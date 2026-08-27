@@ -31,11 +31,27 @@ structures used by all three stages.
 
 ## Usage
 
+The easiest way to run the whole pipeline is `main.py`:
+
 ```bash
 pip install -r requirements.txt
 
+python3 main.py song.mp3 --title "Song Title" --artist "Artist Name" --osz
+```
+
+This writes `output/<Song Title>/<Song Title> (Base|Variety|Styled).osu`,
+and with `--osz` also bundles those three difficulties plus the MP3 into
+`output/<Song Title>/<Song Title>.osz` — drag that straight into osu! to
+import all three difficulties at once.
+
+### Running the stages individually
+
+Each stage is also its own script, useful if you want to inspect or tweak
+the output of one stage before feeding it to the next:
+
+```bash
 python3 generate_base_beatmap.py song.mp3 \
-    --output out/Song (Base).osu \
+    --output "out/Song (Base).osu" \
     --title "Song Title" --artist "Artist Name" --creator "Your Name"
 
 python3 add_variety.py "out/Song (Base).osu" song.mp3 \
@@ -45,14 +61,14 @@ python3 apply_style.py "out/Song (Variety).osu" \
     --output "out/Song (Styled).osu" --audio song.mp3
 ```
 
-Copy the finished `.osu` file and the source MP3 (renamed to match
-`AudioFilename` in the map) into the same folder, zip it, and rename the
-zip to `.osz` to import it into osu!.
+To turn any of those into a `.osz` yourself: put the `.osu` file(s) and the
+source MP3 (renamed to match `AudioFilename` in the map) in the same
+folder, zip it, and rename the zip's extension to `.osz`.
 
 ## Example output
 
-`output/` contains all three stages generated from Red Hot Chili Peppers'
-"Scar Tissue" (`songs/Scar Tissue.mp3`):
+`output/Scar Tissue/` contains all three stages generated from Red Hot
+Chili Peppers' "Scar Tissue" (`songs/Scar Tissue.mp3`, not committed):
 
 - `Scar Tissue (Base).osu`
 - `Scar Tissue (Variety).osu`
