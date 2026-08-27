@@ -120,10 +120,30 @@ def compute_preview_time_ms(times_ms: np.ndarray, energy: np.ndarray, window_ms:
 
 # --- downbeat / combo helpers ------------------------------------------------
 
+def is_near_multiple(time_ms: float, offset_ms: float, period_ms: float, tolerance_ms: float = 1.0) -> bool:
+    """Whether time_ms lands on a multiple of period_ms from offset_ms."""
+    rel = (time_ms - offset_ms) % period_ms
+    return min(rel, period_ms - rel) < tolerance_ms
+
+
 def is_on_downbeat(time_ms: float, offset_ms: float, measure_length_ms: float, tolerance_ms: float = 1.0) -> bool:
     """Whether time_ms lands on a measure boundary (assumes 4/4 time)."""
-    rel = (time_ms - offset_ms) % measure_length_ms
-    return min(rel, measure_length_ms - rel) < tolerance_ms
+    return is_near_multiple(time_ms, offset_ms, measure_length_ms, tolerance_ms)
+
+
+def find_track_end_ms(times_ms: np.ndarray, energy: np.ndarray, floor: float = 0.08) -> float:
+    """The last moment the track is actually audible, for trimming a trailing fade-out.
+
+    Looks only at the very end of the track: the last index where energy
+    still exceeds `floor` (a small fraction of the track's peak loudness,
+    since energy is normalized 0-1 by the max). Everything after that is
+    presumed to be a fade-out or trailing silence, which shouldn't have
+    hittable objects sitting on screen with nothing audible happening.
+    """
+    above = np.where(energy > floor)[0]
+    if len(above) == 0:
+        return float(times_ms[-1])
+    return float(times_ms[above[-1]])
 
 
 def hitsound_for(energy_value: float, is_downbeat: bool, q_high: float, q_climax: float) -> int:
@@ -255,10 +275,17 @@ def main() -> None:
         has_next = i + 1 < n
 
         if cat == "quiet":
-            # Thin quiet sections down to one object per full beat: keep this
-            # circle, and drop the following half-beat circle if there is one.
-            new_objects.append(cur)
-            i += 2 if has_next else 1
+            # Thin quiet sections down to one object per full beat. This
+            # keeps whichever half-beat slot actually lands ON a whole beat
+            # (checked against the real beat grid), not just "every other
+            # slot by array position" — a quiet section can start on either
+            # an on-beat or off-beat half-beat slot, and picking by position
+            # alone would sometimes keep the off-beat one instead, making
+            # objects land consistently on the "and" of the beat (or even
+            # the 3rd beat of the measure) instead of the beat itself.
+            if is_near_multiple(cur.time, offset_ms, beat_length_ms):
+                new_objects.append(cur)
+            i += 1
             continue
 
         # A short, occasional rest: drop this beat entirely so busy sections
@@ -292,61 +319,80 @@ def main() -> None:
         # base-grid circles are only half a beat apart, which on its own
         # never produces more than a 2-3 note "triplet" burst no matter how
         # intense the section is. A long intense passage is a run of many
-        # such slots back to back, and it's *that* — several beats' worth —
-        # that should become one bouncing slider instead of a long wall of
-        # individually-clicked circles.
+        # such slots back to back; it's walked in short chunks, each
+        # independently rolling whether it becomes a bouncing slider or
+        # stays as circles/triplets, so a long run comes out *interspersed*
+        # — bounce, circles, bounce, triplet — instead of one style for the
+        # whole run (or one giant slider).
         run_end = i
         while run_end + 1 < n and categories[run_end + 1] == "intense":
             run_end += 1
-        run_len = run_end - i + 1  # consecutive intense half-beat slots
 
-        if run_len >= 3 and rng.random() < args.bounce_probability:
-            # Two bounces per half-beat slot reproduces the same rapid
-            # back-and-forth density a wall of quarter/eighth-note circles
-            # would have, in a slider that only needs one click. Each
-            # slider is capped to one measure (8 half-beat slots) — a
-            # longer intense run becomes a *chain* of measure-long bouncing
-            # sliders back to back, echoing the short-slider-chain feel of
-            # normal sections rather than one unreadably long single slider.
-            slots_per_slider = 8
-            seg_start = i
-            while seg_start <= run_end:
-                seg_end = min(seg_start + slots_per_slider - 1, run_end)
-                seg_len = seg_end - seg_start + 1
-                after_seg = seg_end + 1
-                seg_end_time = circles[after_seg].time if after_seg < n else circles[seg_end].time + half_beat_ms
-                total_duration = seg_end_time - circles[seg_start].time
-                num_bounces = seg_len * 2
-                new_objects.append(make_bounce_slider(circles[seg_start], circles[seg_end], beat_length_ms,
+        chunk_slots = 4  # half a measure — short enough that a bounce slider doesn't overstay
+        pos = i
+        while pos <= run_end:
+            if rng.random() < args.rest_probability:
+                pos += 1
+                continue
+
+            chunk_end = min(pos + chunk_slots - 1, run_end)
+            chunk_len = chunk_end - pos + 1
+            after_chunk = chunk_end + 1
+            chunk_end_time = circles[after_chunk].time if after_chunk < n else circles[chunk_end].time + half_beat_ms
+
+            if chunk_len >= 3 and rng.random() < args.bounce_probability:
+                # Two bounces per half-beat slot reproduces the same rapid
+                # back-and-forth density a wall of quarter/eighth-note
+                # circles would have, in a slider that only needs one click.
+                total_duration = chunk_end_time - circles[pos].time
+                num_bounces = chunk_len * 2
+                new_objects.append(make_bounce_slider(circles[pos], circles[chunk_end], beat_length_ms,
                                                         slider_multiplier, num_bounces, total_duration))
-                seg_start = after_seg
-            i = run_end + 1
-            continue
+                pos = after_chunk
+                continue
 
-        # Short run (the beloved "triplet" feel) or the slider roll didn't
-        # land: pack subdivisions into the gap up to the next existing
-        # object, never overlapping it, as individually-clicked circles. The
-        # interval is split into an exact whole number of equal steps so no
-        # inserted timestamp can land a fraction of a millisecond from the
-        # next object (which would round to the same millisecond on disk and
-        # become an unplayable simultaneous note).
-        next_time = circles[i + 1].time if has_next else cur.time + half_beat_ms
-        next_obj = circles[i + 1] if has_next else cur
+            # This chunk stays as individually-clicked circles/triplets:
+            # pack subdivisions into the gap up to the next existing object,
+            # never overlapping it. The interval is split into an exact
+            # whole number of equal steps so no inserted timestamp can land
+            # a fraction of a millisecond from the next object (which would
+            # round to the same millisecond on disk and become an
+            # unplayable simultaneous note).
+            for j in range(pos, chunk_end + 1):
+                if rng.random() < args.rest_probability:
+                    continue
+                cur_j = circles[j]
+                has_next_j = j + 1 < n
+                next_time_j = circles[j + 1].time if has_next_j else cur_j.time + half_beat_ms
+                next_obj_j = circles[j + 1] if has_next_j else cur_j
 
-        subdivision = eighth_beat_ms if slot_energy[i] > q_climax else quarter_beat_ms
-        interval = next_time - cur.time
-        num_steps = max(1, round(interval / subdivision))
+                subdivision = eighth_beat_ms if slot_energy[j] > q_climax else quarter_beat_ms
+                interval = next_time_j - cur_j.time
+                num_steps = max(1, round(interval / subdivision))
 
-        new_objects.append(cur)
-        step = interval / num_steps
-        for k in range(1, num_steps):
-            t = cur.time + k * step
-            frac = k / num_steps
-            x, y = interpolate_point(cur, next_obj, frac)
-            new_objects.append(HitObject(x=x, y=y, time=t, is_new_combo=False))
-        i += 1
+                new_objects.append(cur_j)
+                step = interval / num_steps
+                for k in range(1, num_steps):
+                    t = cur_j.time + k * step
+                    frac = k / num_steps
+                    x, y = interpolate_point(cur_j, next_obj_j, frac)
+                    new_objects.append(HitObject(x=x, y=y, time=t, is_new_combo=False))
+            pos = chunk_end + 1
+
+        i = run_end + 1
 
     new_objects.sort(key=lambda h: h.time)
+
+    # Drop anything sitting in a trailing fade-out/silence: there's nothing
+    # audible left to map to, so objects there would just be sitting on
+    # screen with no beat behind them. A one-beat buffer after the last
+    # audible moment keeps the very last real hit from being cut off.
+    track_end_ms = find_track_end_ms(times_ms, energy) + beat_length_ms
+    before_trim = len(new_objects)
+    new_objects = [o for o in new_objects if o.time <= track_end_ms]
+    trimmed = before_trim - len(new_objects)
+    if trimmed:
+        print(f"Trimmed {trimmed} object(s) in the trailing fade-out (after {track_end_ms:.0f}ms)")
 
     # New combos land on the song's actual downbeats (every 4 beats from the
     # detected offset), not a fixed object count — object count drifts as
@@ -366,14 +412,20 @@ def main() -> None:
 
     # Hitsounds: bigger accents (finish/clap/whistle) line up with strong
     # downbeats and louder moments; quieter/off-beat hits stay a plain
-    # normal sample.
+    # normal sample. A bouncing slider only accents its head — repeating
+    # the same clap/finish on every one of a dozen rapid reversals is
+    # jarring rather than emphatic, so its repeats and tail stay a plain
+    # normal sample instead.
     for obj in new_objects:
         e = energy_at(obj.time)
         on_downbeat = is_on_downbeat(obj.time, offset_ms, measure_length_ms)
         hs = hitsound_for(e, on_downbeat, q_high, q_climax)
         obj.hitsound = hs
         if obj.is_slider:
-            obj.edge_hitsounds = [hs] * (obj.slides + 1)
+            if obj.slides > 1:
+                obj.edge_hitsounds = [hs] + [HS_NORMAL] * obj.slides
+            else:
+                obj.edge_hitsounds = [hs] * (obj.slides + 1)
 
     # Sanity check: nothing should overlap in time.
     for a, b in zip(new_objects, new_objects[1:]):
