@@ -6,25 +6,31 @@ Repositions the hit objects produced by add_variety.py without touching
 their timing, type, or count. This is purely about how the map *feels* to
 play, following common osu! "rules of thumb":
 
-  * Distance snap — the spacing for a given time gap is a fixed value per
-    energy tier (quiet/normal/intense), not a continuously-varying formula.
-    Two objects the same beat-distance apart in the same kind of section
-    always get the same spacing, so spacing itself communicates rhythm
-    instead of looking arbitrary — with a hard ceiling so intensity can't
-    run away into unreadable jumps.
+  * Distance snap — spacing is a pure function of the time gap to the
+    previous object: any two objects a half beat apart get the same
+    spacing, always, regardless of how loud or quiet the section is.
+    Energy still shapes the *pattern* (see below), not the magnitude of
+    the jump, with a hard ceiling so even a full-beat gap stays readable.
   * Patterns / motifs — the turn angle between objects is drawn from a
     small fixed set of repeating shapes ("motifs"), one per energy tier,
     keyed to the object's actual position within the musical measure. The
     same motif recurs every measure of a given tier, so patterns are
     genuinely learnable on replay instead of a one-off procedural wiggle
     that happens to look similar.
+  * Stacks — a short run of circles is occasionally held at the exact same
+    position instead of moving, capped to half a beat of total elapsed
+    time so it reads as a deliberate flourish rather than objects that
+    stopped moving; a slider is never stacked, which in practice is what
+    breaks a stack back into motion.
   * Flow — every motif avoids full 180-degree reversals and repeats of the
     same direction for too long, so movement still reads as a continuous
     swing rather than snapping.
-  * No unintended overlaps — a spacing floor keeps objects from visually
-    stacking unless that's the point.
   * Playfield bounds — everything stays within the 512x384 field with a
-    margin, bouncing off the edge instead of clipping.
+    margin, bouncing off the edge instead of clipping. The occasional arc
+    slider uses a Bezier curve rather than a "perfect circle" curve, since
+    a perfect-circle arc can swing outside its own declared points (and
+    off screen) when they're close to collinear — a Bezier is guaranteed
+    to stay within their convex hull.
   * Slider shape consistency — a slider's declared travel distance
     (`length`, which drives its timing/duration) always matches the actual
     distance from its start point to its rendered curve, so what you see is
@@ -47,15 +53,18 @@ from beatmap_utils import HitObject, PLAYFIELD_H, PLAYFIELD_W, clamp_to_playfiel
 
 MARGIN = 30
 MIN_SPACING = 40.0    # px, floor so objects never feel stacked
-MAX_SPACING = 220.0   # px, hard ceiling so even climax sections stay readable
-BASE_SPACING_PER_BEAT = 130.0  # px of movement for a full beat gap at "normal" energy
-
-# Fixed per-tier spacing multipliers: distance snap for a given time gap is
-# the same everywhere within a tier, instead of continuously varying with
-# raw energy — that consistency is what makes spacing legible.
-TIER_SPACING_SCALE = {"quiet": 0.75, "normal": 1.0, "intense": 1.4}
+MAX_SPACING = 220.0   # px, hard ceiling so even a full-beat gap stays readable
+BASE_SPACING_PER_BEAT = 130.0  # px of movement for a full beat gap — a pure function of time gap alone
 
 HALF_BEAT_STEPS_PER_MEASURE = 8  # 4/4 time, half-beat resolution
+
+# A stack (holding the same position across a short run of circles) is
+# capped to half a beat of total elapsed time — long enough to read as a
+# deliberate stylistic beat, never so long it turns into "objects that
+# aren't moving." It's only ever applied between circles; a slider always
+# gets positioned normally, which in practice is what naturally breaks a
+# stack back into movement.
+STACK_PROBABILITY = 0.22
 
 # A handful of repeating turn-angle "motifs" per energy tier (degrees,
 # signed = turn direction), indexed by position-within-measure. Which motif
@@ -125,14 +134,34 @@ def next_angle(prev_angle: float, tier: str, time_ms: float, offset_ms: float,
     return prev_angle + math.radians(turn_degrees)
 
 
-def bounce_into_playfield(x: float, y: float, angle: float) -> tuple[float, float, float]:
-    """Reflect position/angle if we've stepped outside the playfield margin."""
-    if x < MARGIN or x > PLAYFIELD_W - MARGIN:
-        angle = math.pi - angle
-        x = max(MARGIN, min(PLAYFIELD_W - MARGIN, x))
-    if y < MARGIN or y > PLAYFIELD_H - MARGIN:
-        angle = -angle
-        y = max(MARGIN, min(PLAYFIELD_H - MARGIN, y))
+def place_at_distance(cur_x: float, cur_y: float, spacing: float, angle: float) -> tuple[float, float, float]:
+    """Place a point exactly `spacing` away from (cur_x, cur_y) at `angle`, bounced into bounds.
+
+    Critically, a wall bounce here corrects the *angle* and recomputes the
+    position from (cur_x, cur_y) from scratch — it does not mirror an
+    already-computed point. Mirroring a point preserves distance from the
+    wall, not distance from (cur_x, cur_y): a straight-line jump that
+    overshoots the wall and gets mirrored back can land much closer to
+    (cur_x, cur_y) than `spacing`, silently breaking distance snap (the
+    same time gap must always produce the same on-screen distance).
+    Re-deriving the position from the corrected angle each time guarantees
+    the result is always exactly `spacing` from (cur_x, cur_y).
+    """
+    left, right = MARGIN, PLAYFIELD_W - MARGIN
+    top, bottom = MARGIN, PLAYFIELD_H - MARGIN
+    x = y = 0.0
+    for _ in range(8):
+        x = cur_x + spacing * math.cos(angle)
+        y = cur_y + spacing * math.sin(angle)
+        bounced = False
+        if x < left or x > right:
+            angle = math.pi - angle
+            bounced = True
+        if y < top or y > bottom:
+            angle = -angle
+            bounced = True
+        if not bounced:
+            break
     return x, y, angle
 
 
@@ -172,10 +201,14 @@ def main() -> None:
         energy_at = lambda t: 0.5
         q_low, q_high = 0.35, 0.75
 
+    half_beat_ms = beat_length_ms / 2.0
+
     # Start roughly centered.
     cur_x, cur_y = PLAYFIELD_W / 2.0, PLAYFIELD_H / 2.0
     cur_angle = 0.0
     prev_end_time = None
+    prev_was_circle = False
+    stack_start_time = None  # when the current run of stacked circles began, if any
 
     for idx, obj in enumerate(objects):
         if prev_end_time is None:
@@ -184,17 +217,37 @@ def main() -> None:
             gap_ms = max(1.0, obj.time - prev_end_time)
 
         tier = classify_tier(energy_at(obj.time), q_low, q_high)
-        beats_gap = gap_ms / beat_length_ms
-        spacing = BASE_SPACING_PER_BEAT * beats_gap * TIER_SPACING_SCALE[tier]
-        spacing = max(MIN_SPACING, min(MAX_SPACING, spacing))
+        is_circle = not obj.is_slider
 
-        cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, rng)
-        new_x = cur_x + spacing * math.cos(cur_angle)
-        new_y = cur_y + spacing * math.sin(cur_angle)
-        new_x, new_y, cur_angle = bounce_into_playfield(new_x, new_y, cur_angle)
-        cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
+        # A stack: hold the exact same position as the previous object
+        # instead of moving. Only ever considered between two circles (a
+        # slider is always positioned normally, which is what naturally
+        # breaks a stack back into motion), only across a close-enough time
+        # gap, and never longer than half a beat of total elapsed time.
+        stack_elapsed = (obj.time - stack_start_time) if stack_start_time is not None else 0.0
+        can_stack = (is_circle and prev_was_circle and gap_ms <= half_beat_ms + 1.0
+                     and stack_elapsed < half_beat_ms)
+        is_stacking = can_stack and rng.random() < STACK_PROBABILITY
+
+        if is_stacking:
+            if stack_start_time is None:
+                stack_start_time = obj.time - gap_ms  # the previous object's time
+        else:
+            # Distance snap: spacing is a pure function of the time gap to
+            # the previous object — the same half-beat gap always produces
+            # the same spacing, everywhere in the song. Energy still shapes
+            # the turn-angle pattern (via `tier`, below), not the magnitude
+            # of the jump.
+            beats_gap = gap_ms / beat_length_ms
+            spacing = max(MIN_SPACING, min(MAX_SPACING, BASE_SPACING_PER_BEAT * beats_gap))
+
+            cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, rng)
+            new_x, new_y, cur_angle = place_at_distance(cur_x, cur_y, spacing, cur_angle)
+            cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
+            stack_start_time = None
 
         obj.x, obj.y = cur_x, cur_y
+        prev_was_circle = is_circle
 
         if obj.is_slider:
             num_segments = len(obj.points)  # 1 for a simple/bouncing slider, 2-3 for a merged chain
@@ -206,16 +259,20 @@ def main() -> None:
                 # reads as its own beat in the chain.
                 end_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
                                         measure_length_ms, rng)
-                end_x = cur_x + segment_length * math.cos(end_angle)
-                end_y = cur_y + segment_length * math.sin(end_angle)
-                end_x, end_y, end_angle = bounce_into_playfield(end_x, end_y, end_angle)
+                end_x, end_y, end_angle = place_at_distance(cur_x, cur_y, segment_length, end_angle)
                 end_x, end_y = clamp_to_playfield(end_x, end_y, margin=MARGIN)
 
                 if rng.random() < 0.5:
                     obj.curve_type = "L"
                     obj.points = [(end_x, end_y)]
                 else:
-                    obj.curve_type = "P"
+                    # A quadratic Bezier through (start, bow, end) — unlike
+                    # a "P" (perfect-circle) curve, whose rendered arc can
+                    # swing well outside the triangle these three points
+                    # form (and off the visible playfield) when they're
+                    # close to collinear, a Bezier curve is mathematically
+                    # guaranteed to stay within their convex hull.
+                    obj.curve_type = "B"
                     mid_x, mid_y = (cur_x + end_x) / 2.0, (cur_y + end_y) / 2.0
                     perp_angle = end_angle + math.pi / 2
                     bow = min(40.0, segment_length * 0.25)
@@ -232,9 +289,7 @@ def main() -> None:
                 for _ in range(num_segments):
                     cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
                                             measure_length_ms, rng)
-                    px = cur_x + segment_length * math.cos(cur_angle)
-                    py = cur_y + segment_length * math.sin(cur_angle)
-                    px, py, cur_angle = bounce_into_playfield(px, py, cur_angle)
+                    px, py, cur_angle = place_at_distance(cur_x, cur_y, segment_length, cur_angle)
                     cur_x, cur_y = clamp_to_playfield(px, py, margin=MARGIN)
                     new_points.append((cur_x, cur_y))
                 obj.points = new_points

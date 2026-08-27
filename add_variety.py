@@ -177,7 +177,7 @@ def make_slider_chain(nodes: list[HitObject], beat_length_ms: float, slider_mult
 
 
 def make_bounce_slider(start: HitObject, end: HitObject, beat_length_ms: float, slider_multiplier: float,
-                        num_bounces: int, total_duration_ms: float) -> HitObject:
+                        num_bounces: int, total_duration_ms: float, end_buffer_ms: float = 0.0) -> HitObject:
     """A slider that repeats back and forth `num_bounces` times over total_duration_ms.
 
     This is the "chain of short sliders" idea taken further: instead of
@@ -185,9 +185,15 @@ def make_bounce_slider(start: HitObject, end: HitObject, beat_length_ms: float, 
     same rapid back-and-forth motion but only needs a single click to
     start, dramatically cutting required inputs versus a wall of circles
     while keeping the same visual energy.
+
+    `end_buffer_ms`, if given, shortens the slider so it finishes that much
+    before total_duration_ms would otherwise put it — used when
+    total_duration_ms was measured up to the very next object's start time,
+    so the slider's end never lands exactly on top of it.
     """
     px_per_beat = slider_multiplier * 100.0
-    one_way_ms = total_duration_ms / num_bounces
+    playable_duration_ms = max(total_duration_ms - end_buffer_ms, total_duration_ms * 0.5)
+    one_way_ms = playable_duration_ms / num_bounces
     length = px_per_beat * (one_way_ms / beat_length_ms)
     return HitObject(
         x=start.x, y=start.y, time=start.time, is_new_combo=start.is_new_combo,
@@ -346,8 +352,14 @@ def main() -> None:
                 # circles would have, in a slider that only needs one click.
                 total_duration = chunk_end_time - circles[pos].time
                 num_bounces = chunk_len * 2
+                # A small buffer before the next object's start time so the
+                # slider's end is never sitting exactly on top of it — only
+                # applied when there *is* a following object (an
+                # end-of-track chunk has nothing to leave room for).
+                end_buffer = min(60.0, eighth_beat_ms) if after_chunk < n else 0.0
                 new_objects.append(make_bounce_slider(circles[pos], circles[chunk_end], beat_length_ms,
-                                                        slider_multiplier, num_bounces, total_duration))
+                                                        slider_multiplier, num_bounces, total_duration,
+                                                        end_buffer_ms=end_buffer))
                 pos = after_chunk
                 continue
 
