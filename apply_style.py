@@ -6,15 +6,23 @@ Repositions the hit objects produced by add_variety.py without touching
 their timing, type, or count. This is purely about how the map *feels* to
 play, following common osu! "rules of thumb":
 
-  * Distance snap  — spacing between objects scales with the time gap
-    between them, so the player's eye can read rhythm from spacing alone.
-  * Energy-aware jumps — spacing also scales up in louder/more intense
-    parts of the song (bigger jumps) and down in quiet parts, if audio is
-    given for analysis.
-  * Flow — avoid abrupt 180-degree reversals between consecutive objects;
-    prefer angle changes that feel like a continuous swing of the cursor.
-  * No unintended overlaps — objects are kept far enough apart that they
-    don't visually stack unless that's the point.
+  * Distance snap — the spacing for a given time gap is a fixed value per
+    energy tier (quiet/normal/intense), not a continuously-varying formula.
+    Two objects the same beat-distance apart in the same kind of section
+    always get the same spacing, so spacing itself communicates rhythm
+    instead of looking arbitrary — with a hard ceiling so intensity can't
+    run away into unreadable jumps.
+  * Patterns / motifs — the turn angle between objects is drawn from a
+    small fixed set of repeating shapes ("motifs"), one per energy tier,
+    keyed to the object's actual position within the musical measure. The
+    same motif recurs every measure of a given tier, so patterns are
+    genuinely learnable on replay instead of a one-off procedural wiggle
+    that happens to look similar.
+  * Flow — every motif avoids full 180-degree reversals and repeats of the
+    same direction for too long, so movement still reads as a continuous
+    swing rather than snapping.
+  * No unintended overlaps — a spacing floor keeps objects from visually
+    stacking unless that's the point.
   * Playfield bounds — everything stays within the 512x384 field with a
     margin, bouncing off the edge instead of clipping.
   * Slider shape consistency — a slider's declared travel distance
@@ -39,8 +47,37 @@ from beatmap_utils import HitObject, PLAYFIELD_H, PLAYFIELD_W, clamp_to_playfiel
 
 MARGIN = 30
 MIN_SPACING = 40.0    # px, floor so objects never feel stacked
-MAX_SPACING = 260.0   # px, ceiling so jumps stay readable
-BASE_SPACING_PER_BEAT = 140.0  # px of movement for a full beat gap at "normal" energy
+MAX_SPACING = 220.0   # px, hard ceiling so even climax sections stay readable
+BASE_SPACING_PER_BEAT = 130.0  # px of movement for a full beat gap at "normal" energy
+
+# Fixed per-tier spacing multipliers: distance snap for a given time gap is
+# the same everywhere within a tier, instead of continuously varying with
+# raw energy — that consistency is what makes spacing legible.
+TIER_SPACING_SCALE = {"quiet": 0.75, "normal": 1.0, "intense": 1.4}
+
+HALF_BEAT_STEPS_PER_MEASURE = 8  # 4/4 time, half-beat resolution
+
+# A handful of repeating turn-angle "motifs" per energy tier (degrees,
+# signed = turn direction), indexed by position-within-measure. Which motif
+# plays in a given measure cycles with the measure index, so the same shape
+# recurs every few measures within a tier — recognizable on replay — while
+# still varying between passes through the song.
+MOTIFS = {
+    "quiet": [
+        [35, 35, 35, 35, 35, 35, 35, 35],
+        [45, -45, 45, -45, 45, -45, 45, -45],
+    ],
+    "normal": [
+        [70, -70, 70, -70, 70, -70, 70, -70],
+        [50, 50, -50, -50, 50, 50, -50, -50],
+        [90, -40, 40, -90, 90, -40, 40, -90],
+    ],
+    "intense": [
+        [100, -100, 100, -100, 100, -100, 100, -100],
+        [60, 60, 60, -140, 60, 60, 60, -140],
+        [120, -60, 120, -60, -120, 60, -120, 60],
+    ],
+}
 
 
 def compute_energy_lookup(audio_path: str):
@@ -57,25 +94,35 @@ def compute_energy_lookup(audio_path: str):
     return energy_at
 
 
-def energy_scale(energy_value: float) -> float:
-    """Map 0..1 energy to a ~0.6x..1.6x spacing multiplier."""
-    return 0.6 + energy_value * 1.0
+def classify_tier(energy_value: float, q_low: float, q_high: float) -> str:
+    if energy_value < q_low:
+        return "quiet"
+    if energy_value > q_high:
+        return "intense"
+    return "normal"
 
 
-def flow_angle(prev_angle: float, index: int, rng: random.Random) -> float:
-    """Pick the next movement angle relative to the previous one.
+def motif_turn_degrees(tier: str, time_ms: float, offset_ms: float,
+                        beat_length_ms: float, measure_length_ms: float) -> float:
+    """The signed turn angle (degrees) for an object, from its tier's repeating motif."""
+    half_beat_ms = beat_length_ms / 2.0
+    pos_in_measure = int(round((time_ms - offset_ms) / half_beat_ms)) % HALF_BEAT_STEPS_PER_MEASURE
+    measure_index = int((time_ms - offset_ms) // measure_length_ms)
+    motifs = MOTIFS[tier]
+    motif = motifs[measure_index % len(motifs)]
+    return motif[pos_in_measure % len(motif)]
 
-    Alternates the turn direction and keeps the turn magnitude in a band
-    that reads as continuous swinging motion: never a full reversal
-    (~180 degrees, which plays awkwardly), never a repeat of the exact same
-    direction for too long (which reads as robotic/stacked). A small random
-    jitter is layered on top (seeded, so it's reproducible) so consecutive
-    runs on the same song don't produce an identical-looking map.
+
+def next_angle(prev_angle: float, tier: str, time_ms: float, offset_ms: float,
+               beat_length_ms: float, measure_length_ms: float, rng: random.Random) -> float:
+    """Advance the flow angle using the tier's motif, plus a small humanizing jitter.
+
+    The jitter is intentionally small (a few degrees) — the point of a motif
+    is that it repeats recognizably; too much randomness would wash that out.
     """
-    turn_degrees = 55 + 35 * math.sin(index * 0.37)  # stays within ~20-90 degrees
-    turn_degrees += rng.uniform(-10.0, 10.0)
-    direction = 1 if index % 2 == 0 else -1
-    return prev_angle + direction * math.radians(turn_degrees)
+    turn_degrees = motif_turn_degrees(tier, time_ms, offset_ms, beat_length_ms, measure_length_ms)
+    turn_degrees += rng.uniform(-4.0, 4.0)
+    return prev_angle + math.radians(turn_degrees)
 
 
 def bounce_into_playfield(x: float, y: float, angle: float) -> tuple[float, float, float]:
@@ -109,12 +156,21 @@ def main() -> None:
     bm.metadata["Version"] = args.version
     beat_length_ms = bm.beat_length
     slider_multiplier = bm.slider_multiplier
-
-    energy_at = compute_energy_lookup(args.audio) if args.audio else (lambda t: 0.5)
+    offset_ms = bm.offset
+    measure_length_ms = beat_length_ms * 4.0
 
     objects = sorted(bm.hit_objects, key=lambda h: h.time)
     if not objects:
         raise RuntimeError("Beatmap has no hit objects to restyle.")
+
+    if args.audio:
+        energy_at = compute_energy_lookup(args.audio)
+        obj_energy = np.array([energy_at(o.time) for o in objects])
+        q_low = float(np.quantile(obj_energy, 0.35))
+        q_high = float(np.quantile(obj_energy, 0.75))
+    else:
+        energy_at = lambda t: 0.5
+        q_low, q_high = 0.35, 0.75
 
     # Start roughly centered.
     cur_x, cur_y = PLAYFIELD_W / 2.0, PLAYFIELD_H / 2.0
@@ -127,11 +183,12 @@ def main() -> None:
         else:
             gap_ms = max(1.0, obj.time - prev_end_time)
 
+        tier = classify_tier(energy_at(obj.time), q_low, q_high)
         beats_gap = gap_ms / beat_length_ms
-        spacing = BASE_SPACING_PER_BEAT * beats_gap * energy_scale(energy_at(obj.time))
+        spacing = BASE_SPACING_PER_BEAT * beats_gap * TIER_SPACING_SCALE[tier]
         spacing = max(MIN_SPACING, min(MAX_SPACING, spacing))
 
-        cur_angle = flow_angle(cur_angle, idx, rng)
+        cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, rng)
         new_x = cur_x + spacing * math.cos(cur_angle)
         new_y = cur_y + spacing * math.sin(cur_angle)
         new_x, new_y, cur_angle = bounce_into_playfield(new_x, new_y, cur_angle)
@@ -140,14 +197,15 @@ def main() -> None:
         obj.x, obj.y = cur_x, cur_y
 
         if obj.is_slider:
-            num_segments = len(obj.points)  # 1 for a simple slider, 2-3 for a merged chain
+            num_segments = len(obj.points)  # 1 for a simple/bouncing slider, 2-3 for a merged chain
             segment_length = obj.length / num_segments
 
             if num_segments == 1:
                 # A lone slider gets an occasional gentle arc for variety;
                 # chains (below) stay as clean polylines so each waypoint
                 # reads as its own beat in the chain.
-                end_angle = flow_angle(cur_angle, idx + 1, rng)
+                end_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
+                                        measure_length_ms, rng)
                 end_x = cur_x + segment_length * math.cos(end_angle)
                 end_y = cur_y + segment_length * math.sin(end_angle)
                 end_x, end_y, end_angle = bounce_into_playfield(end_x, end_y, end_angle)
@@ -171,8 +229,9 @@ def main() -> None:
                 # each note in the chain still reads as a distinct hop.
                 obj.curve_type = "L"
                 new_points = []
-                for seg in range(num_segments):
-                    cur_angle = flow_angle(cur_angle, idx + seg + 1, rng)
+                for _ in range(num_segments):
+                    cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
+                                            measure_length_ms, rng)
                     px = cur_x + segment_length * math.cos(cur_angle)
                     py = cur_y + segment_length * math.sin(cur_angle)
                     px, py, cur_angle = bounce_into_playfield(px, py, cur_angle)
@@ -192,5 +251,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

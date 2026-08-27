@@ -113,7 +113,7 @@ class HitObject:
         edge_s = self.edge_samplesets or ["0:0"] * (self.slides + 1)
         return (
             f"{self.x},{self.y},{self.time:.0f},{obj_type},{self.hitsound},"
-            f"{curve},{self.slides},{self.length:.7g},"
+            f"{curve},{self.slides},{self.length:.14g},"
             f"{'|'.join(str(h) for h in edge_h)},{'|'.join(edge_s)},0:0:0:0:"
         )
 
