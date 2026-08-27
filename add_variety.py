@@ -6,14 +6,22 @@ Takes the plain half-beat circle skeleton from generate_base_beatmap.py and
 reshapes it based on the song's loudness (RMS energy) over time:
 
   * Quiet sections  -> thinned out (down to one object per full beat).
-  * Normal sections -> some adjacent circle pairs are combined into sliders,
-                        for a bit of visual/rhythmic variety.
+  * Normal sections -> runs of adjacent circles are combined into short
+                        slider chains (2-4 notes per slider), so normal
+                        sections read mostly as sliders rather than a wall
+                        of individually-stacked circles. A few circles are
+                        left standalone for rhythmic variety.
   * Intense sections -> extra circles are inserted on quarter- and
                         eighth-beat subdivisions.
 
 The one hard rule throughout: no two hittable objects may occupy overlapping
 time. A slider "occupies" the timeline for its full duration, so nothing is
-ever placed while a slider is still being held.
+ever placed while a slider is still being held. Subdivision timestamps are
+computed by dividing each interval into an exact whole number of equal
+steps (rather than repeatedly adding a fixed subdivision length), so
+floating-point drift can never leave two objects a fraction of a
+millisecond apart — which would otherwise round to the *same* millisecond
+when written out and become unplayable simultaneous notes.
 
 Usage:
     python3 add_variety.py base.osu song.mp3 --output out/song_variety.osu
@@ -58,14 +66,20 @@ def classify(energy_value: float, q_low: float, q_high: float) -> str:
 
 # --- slider construction -----------------------------------------------------
 
-def make_slider(start: HitObject, end: HitObject, beat_length_ms: float, slider_multiplier: float,
-                 duration_ms: float) -> HitObject:
-    """A straight ("L") slider from start's position/time to end's position, held for duration_ms."""
+def make_slider_chain(nodes: list[HitObject], beat_length_ms: float, slider_multiplier: float) -> HitObject:
+    """Combine consecutive circles into a single multi-anchor ("chain") slider.
+
+    `nodes` is 2+ circles in time order; the slider starts at the first and
+    passes through every subsequent one as a straight-line waypoint, held
+    for exactly the time span from the first to the last node.
+    """
+    start, rest = nodes[0], nodes[1:]
+    duration_ms = nodes[-1].time - start.time
     px_per_beat = slider_multiplier * 100.0
     length = px_per_beat * (duration_ms / beat_length_ms)
     return HitObject(
         x=start.x, y=start.y, time=start.time, is_new_combo=start.is_new_combo,
-        is_slider=True, curve_type="L", points=[(end.x, end.y)], slides=1, length=length,
+        is_slider=True, curve_type="L", points=[(n.x, n.y) for n in rest], slides=1, length=length,
     )
 
 
@@ -114,7 +128,7 @@ def main() -> None:
     new_objects: list[HitObject] = []
     i = 0
     n = len(circles)
-    merge_toggle = 0  # alternates which "normal" pairs get merged, for variety
+    chain_counter = 0  # varies chain length / occasionally skips merging, for variety
 
     while i < n:
         cat = categories[i]
@@ -129,12 +143,17 @@ def main() -> None:
             continue
 
         if cat == "normal":
-            merge_toggle += 1
-            can_merge = has_next and categories[i + 1] != "intense" and (merge_toggle % 2 == 0)
-            if can_merge:
+            # Pair this circle with the next one into a short (single-segment)
+            # slider whenever possible. Doing this for most eligible pairs in
+            # a row is what produces a visible *chain* of short sliders back
+            # to back, rather than a wall of individually-stacked circles.
+            # Every so often a pair is left as plain circles so the section
+            # still breathes and doesn't turn into an unbroken slider train.
+            chain_counter += 1
+            can_chain = has_next and categories[i + 1] != "intense" and (chain_counter % 4 != 0)
+            if can_chain:
                 nxt = circles[i + 1]
-                duration = nxt.time - cur.time
-                new_objects.append(make_slider(cur, nxt, beat_length_ms, slider_multiplier, duration))
+                new_objects.append(make_slider_chain([cur, nxt], beat_length_ms, slider_multiplier))
                 i += 2
             else:
                 new_objects.append(cur)
@@ -142,18 +161,23 @@ def main() -> None:
             continue
 
         # cat == "intense": keep the circle and pack in subdivisions up to the
-        # next existing object, never overlapping it.
+        # next existing object, never overlapping it. The interval is split
+        # into an exact whole number of equal steps so no inserted timestamp
+        # can land a fraction of a millisecond from the next object (which
+        # would round to the same millisecond on disk and be unplayable).
         new_objects.append(cur)
         next_time = circles[i + 1].time if has_next else cur.time + half_beat_ms
         next_obj = circles[i + 1] if has_next else cur
 
         subdivision = eighth_beat_ms if slot_energy[i] > q_climax else quarter_beat_ms
-        t = cur.time + subdivision
-        while t < next_time - 1e-6:
-            frac = (t - cur.time) / (next_time - cur.time) if next_time > cur.time else 0.5
+        interval = next_time - cur.time
+        num_steps = max(1, round(interval / subdivision))
+        step = interval / num_steps
+        for k in range(1, num_steps):
+            t = cur.time + k * step
+            frac = k / num_steps
             x, y = interpolate_point(cur, next_obj, frac)
             new_objects.append(HitObject(x=x, y=y, time=t, is_new_combo=False))
-            t += subdivision
         i += 1
 
     # Recompute new-combo flags cleanly (every 8 objects) now that the object

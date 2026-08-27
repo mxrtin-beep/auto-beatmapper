@@ -128,30 +128,46 @@ def main() -> None:
         obj.x, obj.y = cur_x, cur_y
 
         if obj.is_slider:
-            # Slider end point sits `length` px away along the current flow
-            # angle, so the declared travel distance (which drives its
-            # duration) matches what's visually drawn.
-            end_angle = flow_angle(cur_angle, idx + 1)
-            end_x = cur_x + obj.length * math.cos(end_angle)
-            end_y = cur_y + obj.length * math.sin(end_angle)
-            end_x, end_y, end_angle = bounce_into_playfield(end_x, end_y, end_angle)
-            end_x, end_y = clamp_to_playfield(end_x, end_y, margin=MARGIN)
-            # Re-derive the angle actually achieved after clamping, so the
-            # cursor's flow continues smoothly into the next object.
-            obj.points = [(end_x, end_y)]
-            obj.curve_type = "L" if idx % 2 == 0 else "P"
-            if obj.curve_type == "P":
-                # A perfect-circle slider needs a third point; bow it gently
-                # off the straight line between start and end.
-                mid_x = (cur_x + end_x) / 2.0
-                mid_y = (cur_y + end_y) / 2.0
-                perp_angle = end_angle + math.pi / 2
-                bow = min(40.0, obj.length * 0.25)
-                bow_x, bow_y = clamp_to_playfield(mid_x + bow * math.cos(perp_angle),
-                                                   mid_y + bow * math.sin(perp_angle), margin=MARGIN)
-                obj.points = [(bow_x, bow_y), (end_x, end_y)]
+            num_segments = len(obj.points)  # 1 for a simple slider, 2-3 for a merged chain
+            segment_length = obj.length / num_segments
 
-            cur_x, cur_y, cur_angle = end_x, end_y, end_angle
+            if num_segments == 1:
+                # A lone slider gets an occasional gentle arc for variety;
+                # chains (below) stay as clean polylines so each waypoint
+                # reads as its own beat in the chain.
+                end_angle = flow_angle(cur_angle, idx + 1)
+                end_x = cur_x + segment_length * math.cos(end_angle)
+                end_y = cur_y + segment_length * math.sin(end_angle)
+                end_x, end_y, end_angle = bounce_into_playfield(end_x, end_y, end_angle)
+                end_x, end_y = clamp_to_playfield(end_x, end_y, margin=MARGIN)
+
+                if idx % 2 == 0:
+                    obj.curve_type = "L"
+                    obj.points = [(end_x, end_y)]
+                else:
+                    obj.curve_type = "P"
+                    mid_x, mid_y = (cur_x + end_x) / 2.0, (cur_y + end_y) / 2.0
+                    perp_angle = end_angle + math.pi / 2
+                    bow = min(40.0, segment_length * 0.25)
+                    bow_x, bow_y = clamp_to_playfield(mid_x + bow * math.cos(perp_angle),
+                                                       mid_y + bow * math.sin(perp_angle), margin=MARGIN)
+                    obj.points = [(bow_x, bow_y), (end_x, end_y)]
+
+                cur_x, cur_y, cur_angle = end_x, end_y, end_angle
+            else:
+                # Chain slider: walk one flow-angle segment per waypoint so
+                # each note in the chain still reads as a distinct hop.
+                obj.curve_type = "L"
+                new_points = []
+                for seg in range(num_segments):
+                    cur_angle = flow_angle(cur_angle, idx + seg + 1)
+                    px = cur_x + segment_length * math.cos(cur_angle)
+                    py = cur_y + segment_length * math.sin(cur_angle)
+                    px, py, cur_angle = bounce_into_playfield(px, py, cur_angle)
+                    cur_x, cur_y = clamp_to_playfield(px, py, margin=MARGIN)
+                    new_points.append((cur_x, cur_y))
+                obj.points = new_points
+
             prev_end_time = obj.end_time(beat_length_ms, slider_multiplier)
         else:
             prev_end_time = obj.time
