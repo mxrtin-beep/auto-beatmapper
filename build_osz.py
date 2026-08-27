@@ -21,17 +21,43 @@ import argparse
 import os
 import zipfile
 
+from beatmap_utils import read_osu
+
+
+def _declared_audio_filename(osu_path: str) -> str | None:
+    """The AudioFilename: value a .osu file expects to find next to it, if any."""
+    try:
+        return read_osu(osu_path).general.get("AudioFilename")
+    except Exception:
+        return None
+
 
 def build_osz(osu_paths: list[str], audio_path: str, osz_path: str, audio_filename: str | None = None) -> str:
     """Zip the given .osu file(s) together with the audio file into osz_path.
 
-    `audio_filename` is the name written inside the archive (and must match
-    each .osu's `AudioFilename:` line) — defaults to audio_path's basename.
-    Returns osz_path.
+    `audio_filename` is the name the audio is stored under inside the
+    archive, which must match each .osu's `AudioFilename:` line exactly or
+    osu! will import the beatmap with no sound. If not given, it defaults to
+    whatever the .osu file(s) already declare; if that can't be determined,
+    it falls back to audio_path's own basename. Either way, the result is
+    checked against every .osu's declared AudioFilename before writing, and
+    a mismatch raises a clear error instead of silently producing a
+    beatmap with no audio.
     """
     if not osu_paths:
         raise ValueError("Need at least one .osu file to package.")
-    audio_filename = audio_filename or os.path.basename(audio_path)
+
+    declared = {name for name in (_declared_audio_filename(p) for p in osu_paths) if name}
+    if audio_filename is None:
+        audio_filename = next(iter(declared)) if len(declared) == 1 else os.path.basename(audio_path)
+
+    if declared and audio_filename not in declared:
+        raise ValueError(
+            f"Audio filename mismatch: about to package the audio as '{audio_filename}', but the "
+            f".osu file(s) declare AudioFilename: {', '.join(sorted(declared))}. These must match "
+            "exactly or osu! will import the beatmap with no sound. Fix with "
+            f"--audio-filename \"{sorted(declared)[0]}\"."
+        )
 
     os.makedirs(os.path.dirname(os.path.abspath(osz_path)) or ".", exist_ok=True)
     with zipfile.ZipFile(osz_path, "w", zipfile.ZIP_DEFLATED) as zf:
