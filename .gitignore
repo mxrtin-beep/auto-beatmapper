@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+
+# Audio assets are not committed (large, copyrighted, and per user request
+# not realistic to check into git). Keep the generated .osu maps only.
+songs/*.mp3
+example/**/*.mp3
+example/**/*.jpg
+example/**/*.jpeg
+example/**/*.png
+example/**/*.wav
+example/**/*.ogg
