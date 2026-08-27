@@ -22,19 +22,11 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
-import zipfile
 
 import generate_base_beatmap
 import add_variety
 import apply_style
-
-
-def build_osz(osu_paths: list[str], audio_path: str, audio_filename: str, osz_path: str) -> None:
-    with zipfile.ZipFile(osz_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for path in osu_paths:
-            zf.write(path, arcname=os.path.basename(path))
-        zf.write(audio_path, arcname=audio_filename)
+from build_osz import build_osz
 
 
 def main() -> None:
@@ -46,7 +38,15 @@ def main() -> None:
     parser.add_argument("--outdir", default=None,
                          help="Directory to write the .osu files into (default: output/<title>/).")
     parser.add_argument("--osz", action="store_true", help="Also package the result into a .osz file.")
+    parser.add_argument("--seed", type=int, default=None,
+                         help="Random seed for stages 2 and 3. Omit for a different map every run; "
+                              "pass a fixed value (printed on every run) to reproduce it later.")
     args = parser.parse_args()
+
+    if args.seed is None:
+        import random
+        args.seed = random.SystemRandom().randrange(2**32)
+    print(f"Using seed: {args.seed}")
 
     title = args.title or os.path.splitext(os.path.basename(args.audio))[0]
     outdir = args.outdir or os.path.join("output", title)
@@ -76,14 +76,16 @@ def main() -> None:
     print(f"  wrote {base_path} ({len(times)} circles)")
 
     print("=== Stage 2: add variety ===")
-    _run_module_main(add_variety, [base_path, args.audio, "--output", variety_path, "--version", "Auto Variety"])
+    _run_module_main(add_variety, [base_path, args.audio, "--output", variety_path,
+                                    "--version", "Auto Variety", "--seed", str(args.seed)])
 
     print("=== Stage 3: apply style ===")
-    _run_module_main(apply_style, [variety_path, "--output", styled_path, "--audio", args.audio, "--version", "Auto Styled"])
+    _run_module_main(apply_style, [variety_path, "--output", styled_path, "--audio", args.audio,
+                                    "--version", "Auto Styled", "--seed", str(args.seed)])
 
     if args.osz:
         osz_path = os.path.join(outdir, f"{title}.osz")
-        build_osz([base_path, variety_path, styled_path], args.audio, audio_filename, osz_path)
+        build_osz([base_path, variety_path, styled_path], args.audio, osz_path, audio_filename)
         print(f"=== Packaged {osz_path} ===")
 
     print("Done.")

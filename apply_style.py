@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import random
 
 import numpy as np
 
@@ -61,15 +62,18 @@ def energy_scale(energy_value: float) -> float:
     return 0.6 + energy_value * 1.0
 
 
-def flow_angle(prev_angle: float, index: int) -> float:
+def flow_angle(prev_angle: float, index: int, rng: random.Random) -> float:
     """Pick the next movement angle relative to the previous one.
 
     Alternates the turn direction and keeps the turn magnitude in a band
     that reads as continuous swinging motion: never a full reversal
     (~180 degrees, which plays awkwardly), never a repeat of the exact same
-    direction for too long (which reads as robotic/stacked).
+    direction for too long (which reads as robotic/stacked). A small random
+    jitter is layered on top (seeded, so it's reproducible) so consecutive
+    runs on the same song don't produce an identical-looking map.
     """
     turn_degrees = 55 + 35 * math.sin(index * 0.37)  # stays within ~20-90 degrees
+    turn_degrees += rng.uniform(-10.0, 10.0)
     direction = 1 if index % 2 == 0 else -1
     return prev_angle + direction * math.radians(turn_degrees)
 
@@ -91,7 +95,15 @@ def main() -> None:
     parser.add_argument("--output", required=True)
     parser.add_argument("--audio", default=None, help="Optional path to the song's MP3, for energy-aware spacing.")
     parser.add_argument("--version", default="Auto Styled", help="Difficulty/version name to write into the map.")
+    parser.add_argument("--seed", type=int, default=None,
+                         help="Random seed. Omit for different styling every run; pass a fixed "
+                              "value (printed on every run) to reproduce the exact same map later.")
     args = parser.parse_args()
+
+    if args.seed is None:
+        args.seed = random.SystemRandom().randrange(2**32)
+    rng = random.Random(args.seed)
+    print(f"Using seed: {args.seed}")
 
     bm = read_osu(args.beatmap)
     bm.metadata["Version"] = args.version
@@ -119,7 +131,7 @@ def main() -> None:
         spacing = BASE_SPACING_PER_BEAT * beats_gap * energy_scale(energy_at(obj.time))
         spacing = max(MIN_SPACING, min(MAX_SPACING, spacing))
 
-        cur_angle = flow_angle(cur_angle, idx)
+        cur_angle = flow_angle(cur_angle, idx, rng)
         new_x = cur_x + spacing * math.cos(cur_angle)
         new_y = cur_y + spacing * math.sin(cur_angle)
         new_x, new_y, cur_angle = bounce_into_playfield(new_x, new_y, cur_angle)
@@ -135,13 +147,13 @@ def main() -> None:
                 # A lone slider gets an occasional gentle arc for variety;
                 # chains (below) stay as clean polylines so each waypoint
                 # reads as its own beat in the chain.
-                end_angle = flow_angle(cur_angle, idx + 1)
+                end_angle = flow_angle(cur_angle, idx + 1, rng)
                 end_x = cur_x + segment_length * math.cos(end_angle)
                 end_y = cur_y + segment_length * math.sin(end_angle)
                 end_x, end_y, end_angle = bounce_into_playfield(end_x, end_y, end_angle)
                 end_x, end_y = clamp_to_playfield(end_x, end_y, margin=MARGIN)
 
-                if idx % 2 == 0:
+                if rng.random() < 0.5:
                     obj.curve_type = "L"
                     obj.points = [(end_x, end_y)]
                 else:
@@ -160,7 +172,7 @@ def main() -> None:
                 obj.curve_type = "L"
                 new_points = []
                 for seg in range(num_segments):
-                    cur_angle = flow_angle(cur_angle, idx + seg + 1)
+                    cur_angle = flow_angle(cur_angle, idx + seg + 1, rng)
                     px = cur_x + segment_length * math.cos(cur_angle)
                     py = cur_y + segment_length * math.sin(cur_angle)
                     px, py, cur_angle = bounce_into_playfield(px, py, cur_angle)

@@ -44,6 +44,35 @@ and with `--osz` also bundles those three difficulties plus the MP3 into
 `output/<Song Title>/<Song Title>.osz` — drag that straight into osu! to
 import all three difficulties at once.
 
+### Randomness / seeds
+
+`add_variety.py` and `apply_style.py` make a lot of small randomized
+choices (which eligible circle pairs become sliders, how the flow angle
+jitters) so running the pipeline twice on the same song gives you a
+different-feeling map each time. Every run prints the seed it used
+(`Using seed: 123456789`); pass `--seed 123456789` back in to reproduce
+that exact map again:
+
+```bash
+python3 main.py song.mp3 --seed 123456789 --osz
+```
+
+`main.py` picks one random seed per run and forwards it to both stages, so
+a single `--seed` value reproduces the whole pipeline's output.
+
+### Building a .osz from existing .osu files
+
+If you already have `.osu` file(s) — from a previous run, or hand-edited —
+and just want a playable package without regenerating anything:
+
+```bash
+python3 build_osz.py song.mp3 "out/Song (Base).osu" "out/Song (Variety).osu" \
+    "out/Song (Styled).osu" --output "out/Song.osz"
+```
+
+`build_osz.py` also exposes a `build_osz()` function you can import and
+call directly from other Python code.
+
 ### Running the stages individually
 
 Each stage is also its own script, useful if you want to inspect or tweak

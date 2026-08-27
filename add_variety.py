@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import random
 
 import librosa
 import numpy as np
@@ -99,7 +100,17 @@ def main() -> None:
     parser.add_argument("--quiet-quantile", type=float, default=0.35)
     parser.add_argument("--intense-quantile", type=float, default=0.75)
     parser.add_argument("--climax-quantile", type=float, default=0.92)
+    parser.add_argument("--chain-probability", type=float, default=0.75,
+                         help="Chance an eligible normal-energy pair is merged into a slider (0-1).")
+    parser.add_argument("--seed", type=int, default=None,
+                         help="Random seed. Omit for a different map every run; pass a fixed "
+                              "value (printed on every run) to reproduce the exact same map later.")
     args = parser.parse_args()
+
+    if args.seed is None:
+        args.seed = random.SystemRandom().randrange(2**32)
+    rng = random.Random(args.seed)
+    print(f"Using seed: {args.seed}")
 
     bm = read_osu(args.beatmap)
     bm.metadata["Version"] = args.version
@@ -128,7 +139,6 @@ def main() -> None:
     new_objects: list[HitObject] = []
     i = 0
     n = len(circles)
-    chain_counter = 0  # varies chain length / occasionally skips merging, for variety
 
     while i < n:
         cat = categories[i]
@@ -149,8 +159,9 @@ def main() -> None:
             # to back, rather than a wall of individually-stacked circles.
             # Every so often a pair is left as plain circles so the section
             # still breathes and doesn't turn into an unbroken slider train.
-            chain_counter += 1
-            can_chain = has_next and categories[i + 1] != "intense" and (chain_counter % 4 != 0)
+            # The choice is randomized (seeded) so re-running the pipeline on
+            # the same song doesn't always produce an identical map.
+            can_chain = has_next and categories[i + 1] != "intense" and rng.random() < args.chain_probability
             if can_chain:
                 nxt = circles[i + 1]
                 new_objects.append(make_slider_chain([cur, nxt], beat_length_ms, slider_multiplier))
