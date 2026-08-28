@@ -62,7 +62,7 @@ import random
 
 import numpy as np
 
-from beatmap_utils import HitObject, PLAYFIELD_H, PLAYFIELD_W, clamp_to_playfield, fix_time_overlaps, read_osu, write_osu
+from beatmap_utils import HitObject, PLAYFIELD_H, PLAYFIELD_W, clamp_to_playfield, read_osu, write_osu
 
 MARGIN = 30
 MIN_SPACING = 10.0    # px, safety floor only — the distance-snap formula rarely needs it
@@ -77,20 +77,35 @@ HALF_BEAT_STEPS_PER_MEASURE = 8  # 4/4 time, half-beat resolution
 # similar-sounding section repeats — recognizable on replay — while still
 # varying between genuinely different sections. These only ever apply
 # outside of streams/stacks (see build_stream_runs below).
+#
+# Since consecutive objects at a constant turn angle land the same
+# distance-snapped spacing apart (equal time gap -> equal on-screen
+# distance), a constant-degree motif isn't just an abstract angle sequence
+# — it traces an actual, recognizable geometric shape on screen, the same
+# vocabulary real maps lean on: a triangle (120 degrees), a square (90), a
+# pentagon (72), a hexagon (60), a star/pentagram (144). Mixing those in
+# with the zigzags and asymmetric builds below is what gives a section
+# actual *structure* to recognize, instead of every measure reading as the
+# same generic wiggle.
 MOTIFS = {
     "quiet": [
-        [35, 35, 35, 35, 35, 35, 35, 35],
-        [45, -45, 45, -45, 45, -45, 45, -45],
+        [35, 35, 35, 35, 35, 35, 35, 35],       # gentle spiral drift
+        [45, -45, 45, -45, 45, -45, 45, -45],   # slow zigzag
+        [60, 60, 60, 60, 60, 60, 60, 60],       # hexagon
     ],
     "normal": [
-        [70, -70, 70, -70, 70, -70, 70, -70],
-        [50, 50, -50, -50, 50, 50, -50, -50],
-        [90, -40, 40, -90, 90, -40, 40, -90],
+        [70, -70, 70, -70, 70, -70, 70, -70],   # zigzag
+        [50, 50, -50, -50, 50, 50, -50, -50],   # paired swing
+        [90, -40, 40, -90, 90, -40, 40, -90],   # asymmetric build/release
+        [90, 90, 90, 90, 90, 90, 90, 90],       # square
+        [72, 72, 72, 72, 72, 72, 72, 72],       # pentagon
     ],
     "intense": [
-        [100, -100, 100, -100, 100, -100, 100, -100],
-        [60, 60, 60, -140, 60, 60, 60, -140],
-        [120, -60, 120, -60, -120, 60, -120, 60],
+        [100, -100, 100, -100, 100, -100, 100, -100],  # sharp zigzag
+        [60, 60, 60, -140, 60, 60, 60, -140],           # build then snap back
+        [120, -60, 120, -60, -120, 60, -120, 60],       # asymmetric burst
+        [120, 120, 120, 120, 120, 120, 120, 120],       # triangle
+        [144, 144, 144, 144, 144, 144, 144, 144],       # star/pentagram
     ],
 }
 
@@ -507,11 +522,6 @@ def main() -> None:
             prev_end_time = obj.end_time(beat_length_ms, slider_multiplier)
         else:
             prev_end_time = obj.time
-
-    # apply_style.py never changes a slider's length/duration, so this
-    # should be a no-op in practice — kept as a defensive final check since
-    # the input Variety file might have been hand-edited.
-    fix_time_overlaps(objects, beat_length_ms, slider_multiplier)
 
     bm.hit_objects = objects
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)

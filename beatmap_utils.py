@@ -320,34 +320,38 @@ def clamp_to_playfield(x: float, y: float, margin: int = 20) -> Tuple[int, int]:
     return int(round(x)), int(round(y))
 
 
-def fix_time_overlaps(objects: List[HitObject], beat_length_ms: float, slider_multiplier: float,
-                       min_gap_ms: float = 1.0) -> int:
-    """Guarantee no slider's *on-disk* end time reaches into the next object's start.
+def rounded_gap_ms(start_time: float, end_time: float) -> float:
+    """The gap between two times as it will actually read once both are
+    independently rounded to a whole millisecond for the .osu file (every
+    `HitObject.time` is written with `:.0f`).
 
-    `HitObject.time` is written to the .osu file rounded to a whole
-    millisecond (`to_line` uses `:.0f`), but a slider's rendered duration is
-    reconstructed by osu! from its unrounded `length` — so two objects whose
-    gap was computed to be exactly one subdivision apart can, after each
-    object's start time is independently rounded, end up with the slider's
-    rounded end landing at or past the next object's rounded start: a
-    same-time-slot overlap that osu! (and any beatmap checker) flags as
-    illegal, even though nothing here ever intended it. This shrinks the
-    offending slider's `length` just enough to leave `min_gap_ms` of
-    clearance — never moves any object's `time`, which would instead
-    un-snap it from the beat grid. Mutates `objects` (sorted by time) in
-    place; returns how many sliders were shrunk.
+    Any slider's `length` must be derived from *this*, not the raw
+    `end_time - start_time`, whenever `end_time` is meant to land exactly
+    on another real object's timestamp (the next note in a stream, the
+    other end of a merged pair, …). osu! reconstructs a slider's duration
+    from `length` using the same beat-length/multiplier arithmetic used to
+    produce it, so a length built from `rounded_gap_ms` reconstructs to
+    *exactly* `round(end_time) - round(start_time)` again — the slider's
+    on-disk end lands exactly on `round(end_time)`, never a fraction of a
+    millisecond short (an "unsnapped" slider) or past it (an illegal
+    overlap with whatever starts there). This is why those two symptoms
+    show up together: both come from the same rounding mismatch between an
+    unrounded `length` and the rounded `time` fields it's measured against,
+    and both disappear once every call site measures gaps this way instead
+    of trying to patch the result afterward.
     """
-    px_per_beat = slider_multiplier * 100.0
-    fixed = 0
-    for a, b in zip(objects, objects[1:]):
-        if not a.is_slider:
-            continue
-        a_start = round(a.time)
-        b_start = round(b.time)
-        a_end = a_start + a.duration_ms(beat_length_ms, slider_multiplier)
-        if a_end > b_start - min_gap_ms:
-            allowed_duration = max(1.0, (b_start - a_start) - min_gap_ms)
-            allowed_one_slide_ms = allowed_duration / max(1, a.slides)
-            a.length = max(1.0, px_per_beat * (allowed_one_slide_ms / beat_length_ms))
-            fixed += 1
-    return fixed
+    return round(end_time) - round(start_time)
+
+
+def slider_length_for_gap(start_time: float, end_time: float, beat_length_ms: float,
+                           slider_multiplier: float, slides: int = 1) -> float:
+    """Pixel `length` for a slider from `start_time` to `end_time`, exactly
+    snapped so its reconstructed on-disk end lands on `round(end_time)`.
+
+    See `rounded_gap_ms` for why this must be used instead of a raw
+    `(end_time - start_time)` px-per-beat calculation for any slider whose
+    end is meant to coincide with a specific other timestamp.
+    """
+    total_ms = max(1.0, rounded_gap_ms(start_time, end_time))
+    one_slide_ms = total_ms / max(1, slides)
+    return slider_multiplier * 100.0 * (one_slide_ms / beat_length_ms)

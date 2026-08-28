@@ -61,7 +61,7 @@ import random
 import librosa
 import numpy as np
 
-from beatmap_utils import HitObject, fix_time_overlaps, read_osu, write_osu
+from beatmap_utils import HitObject, read_osu, slider_length_for_gap, write_osu
 
 # Hitsound bit flags (osu! HitObject hitSound field / slider edgeHitsounds).
 HS_NORMAL = 0
@@ -177,13 +177,15 @@ def cap_stream_length(objects: list[HitObject], beat_length_ms: float, slider_mu
 
     This is a backstop, not the primary mechanism (that's the chunk-type
     alternation in main()) — it should rarely fire, but when it does, the
-    replacement slider spans the *exact* gap to the next object (which is
-    itself already a clean subdivision, since both objects sit on the same
-    grid) rather than some fraction of it. Shrinking it by an arbitrary
-    fraction is exactly what previously caused two problems at once: an
-    unsnapped slider end (it no longer landed on a clean beat fraction) and
-    objects sometimes under 10ms apart (a small subdivision gap shrunk by
-    even 10% can leave less than 10ms of clearance).
+    replacement slider spans exactly to the next object's timestamp (both
+    objects already sit on the same beat-subdivision grid, so that gap is
+    itself already a clean subdivision) using `slider_length_for_gap`,
+    which derives `length` from the *rounded* gap between the two times —
+    the same rounding the .osu file itself applies to every `time` field —
+    so the slider's reconstructed end lands exactly on the next object's
+    on-disk timestamp: neither short of it (which would read as
+    "unsnapped") nor past it (an illegal overlap). No arbitrary safety
+    margin is needed or used.
     """
     result: list[HitObject] = []
     consecutive = 0
@@ -201,18 +203,8 @@ def cap_stream_length(objects: list[HitObject], beat_length_ms: float, slider_mu
 
         if consecutive > max_len:
             has_next = i + 1 < n
-            one_way_ms = (objects[i + 1].time - obj.time) if has_next else quarter_beat_ms
-            # Both this slider's start time and the next object's time get
-            # independently rounded to the nearest millisecond when written
-            # out, while `length` (and so the reconstructed duration) is
-            # derived from the exact, unrounded gap — after that independent
-            # rounding on both ends, the reconstructed end can land a
-            # fraction of a millisecond past the next object's now-rounded
-            # start. A 1ms margin easily absorbs that without being a
-            # perceptible or "unsnapped" amount.
-            one_way_ms = max(1.0, one_way_ms - 2.0)
-            px_per_beat = slider_multiplier * 100.0
-            length = px_per_beat * (one_way_ms / beat_length_ms)
+            end_time = objects[i + 1].time if has_next else obj.time + quarter_beat_ms
+            length = slider_length_for_gap(obj.time, end_time, beat_length_ms, slider_multiplier)
             result.append(HitObject(
                 x=obj.x, y=obj.y, time=obj.time, is_new_combo=obj.is_new_combo,
                 is_slider=True, curve_type="L", points=[(obj.x + 1, obj.y)], slides=1, length=length,
@@ -255,9 +247,7 @@ def make_slider_chain(nodes: list[HitObject], beat_length_ms: float, slider_mult
     for exactly the time span from the first to the last node.
     """
     start, rest = nodes[0], nodes[1:]
-    duration_ms = nodes[-1].time - start.time
-    px_per_beat = slider_multiplier * 100.0
-    length = px_per_beat * (duration_ms / beat_length_ms)
+    length = slider_length_for_gap(start.time, nodes[-1].time, beat_length_ms, slider_multiplier)
     return HitObject(
         x=start.x, y=start.y, time=start.time, is_new_combo=start.is_new_combo,
         is_slider=True, curve_type="L", points=[(n.x, n.y) for n in rest], slides=1, length=length,
@@ -276,15 +266,17 @@ def make_bounce_slider(start: HitObject, end: HitObject, beat_length_ms: float, 
 
     `one_way_ms` must be an exact rhythmic subdivision (e.g. a quarter or
     eighth beat) — every repeat lands at start.time + k*one_way_ms, so
-    each one is exactly on the beat grid. Computing the leg length from an
-    arbitrary total duration instead (e.g. shortened by some fixed buffer
-    to avoid touching the next object) would throw every repeat off-grid
-    by that same fraction, which is exactly what triggers an editor's
-    "unsnapped repeat" warning — the fix is to keep the leg length clean
-    and drop a whole leg to make room for a gap instead (see call site).
+    each one is exactly on the beat grid. Rather than multiplying
+    `one_way_ms` straight into a pixel length (which would drift off-grid
+    by the same fraction-of-a-millisecond rounding described in
+    `slider_length_for_gap`), the total span is measured with that helper
+    against the *rounded* start/end times, so the slider's declared
+    duration reconstructs to exactly the intended whole-millisecond span —
+    matching whatever gap the caller already arranged to leave before the
+    next real object (see call site) with no risk of eating into it.
     """
-    px_per_beat = slider_multiplier * 100.0
-    length = px_per_beat * (one_way_ms / beat_length_ms)
+    length = slider_length_for_gap(start.time, start.time + num_bounces * one_way_ms,
+                                    beat_length_ms, slider_multiplier, slides=num_bounces)
     return HitObject(
         x=start.x, y=start.y, time=start.time, is_new_combo=start.is_new_combo,
         is_slider=True, curve_type="L", points=[(end.x, end.y)], slides=num_bounces, length=length,
@@ -620,16 +612,15 @@ def main() -> None:
             else:
                 obj.edge_hitsounds = [hs] * (obj.slides + 1)
 
-    # Close any overlap that only shows up once times are rounded to whole
-    # milliseconds on disk (see fix_time_overlaps) before the final check.
-    shrunk = fix_time_overlaps(new_objects, beat_length_ms, slider_multiplier)
-    if shrunk:
-        print(f"Trimmed {shrunk} slider(s) to clear a rounding-induced overlap with the next object")
-
-    # Sanity check: nothing should overlap in time.
+    # Sanity check: nothing should overlap in time, judged the same way the
+    # .osu file itself will be read back (every object's time rounded to a
+    # whole millisecond) — not raw floats, where a slider whose length was
+    # deliberately built from a *rounded* gap (see slider_length_for_gap)
+    # can land a fraction of a millisecond past an unrounded next-object
+    # time while still reconstructing to the exact same on-disk instant.
     for a, b in zip(new_objects, new_objects[1:]):
-        a_end = a.end_time(beat_length_ms, slider_multiplier)
-        if b.time < a_end - 1e-6:
+        a_end = round(a.time) + a.duration_ms(beat_length_ms, slider_multiplier)
+        if round(b.time) < a_end - 1e-6:
             raise AssertionError(f"Overlap detected: object at {a.time:.1f}ms ends at {a_end:.1f}ms, "
                                   f"but next object starts at {b.time:.1f}ms")
 

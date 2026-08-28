@@ -33,7 +33,7 @@ import os
 
 import random
 
-from beatmap_utils import HitObject, fix_time_overlaps, read_osu, write_osu
+from beatmap_utils import HitObject, read_osu, slider_length_for_gap, write_osu
 from apply_style import compute_energy_lookup, compute_measure_energy_buckets
 from add_variety import is_on_downbeat
 
@@ -137,40 +137,34 @@ def thin_repetitive_streams(objects: list[HitObject], beat_length_ms: float, sli
                              offset_ms: float, measure_length_ms: float,
                              repetitive_measures: set[int], rng: random.Random,
                              drop_probability: float = 0.12) -> list[HitObject]:
-    """Merge adjacent close-together circle pairs into sliders, only in repetitive measures.
+    """Thin closely-spaced circles in repetitive measures, two ways: merge an
+    adjacent pair into a slider, or drop a note outright. Nothing here ever
+    computes a new object's time or reasons about a fixed subdivision length
+    — it only ever reuses the two real, already-legal timestamps that are
+    already sitting in `objects`, so nothing it does can introduce a timing
+    overlap or an unsnapped slider on its own:
+
+      * Merging obj/nxt into one slider uses `slider_length_for_gap`, which
+        measures the gap between their *own* (already valid, already on
+        whatever grid apply_style.py left them on) timestamps the same way
+        the .osu file rounds them — so the merged slider's declared
+        duration reconstructs to exactly that same gap, landing its end
+        precisely on nxt's original timestamp. There is nothing left to
+        drift off-grid or overlap the object after it, because "the grid"
+        here just means "where these two objects already, legally, were".
+      * Dropping a note removes an object; it can never overlap anything,
+        since there's nothing left there to overlap.
 
     A quarter-beat-or-less gap between two circles is exactly what
-    add_variety.py calls a stream note. Merging a pair into a slider keeps
-    the same two positions (so it still looks like the same map) but cuts
-    the click count for that pair in half.
-
-    Only pairs whose gap is (within 2ms of) an exact eighth- or
-    quarter-beat multiple are merged. add_variety.py's stream subdivisions
-    are packed to fill an arbitrary gap in a *whole number* of equal steps
-    (see its own docstring), which can land a fraction off the canonical
-    beat grid the editor's own snap divisor uses — turning such a pair into
-    a slider bakes that drift into the slider's declared duration, which is
-    exactly what an editor flags as "not snapped". Skipping those pairs
-    instead of merging them keeps every slider this stage introduces
-    genuinely on-grid.
-
-    Some of the stream notes left unmerged (still a plain quarter/eighth-beat
-    circle) are instead dropped outright at `drop_probability`, for a
-    further, gentler reduction in click count beyond just merging pairs —
-    dropping a note can never introduce a timing overlap, so it's safe
-    wherever thinning already applies.
+    add_variety.py calls a stream note — that's the density this targets.
+    Both operations are restricted to repetitive measures, so the player
+    still learns the section once at full density elsewhere in the map.
     """
     quarter_beat_ms = beat_length_ms / 4.0
-    eighth_beat_ms = beat_length_ms / 8.0
     threshold = quarter_beat_ms + 1.0
-    grid_tolerance_ms = 2.0
 
     def measure_of(time_ms: float) -> int:
         return int((time_ms - offset_ms) // measure_length_ms)
-
-    def on_grid(duration_ms: float) -> bool:
-        nearest = round(duration_ms / eighth_beat_ms) * eighth_beat_ms
-        return abs(duration_ms - nearest) <= grid_tolerance_ms
 
     result: list[HitObject] = []
     i = 0
@@ -179,14 +173,12 @@ def thin_repetitive_streams(objects: list[HitObject], beat_length_ms: float, sli
         obj = objects[i]
         has_next = i + 1 < n
         gap_ms = (objects[i + 1].time - obj.time) if has_next else None
-        can_merge = (has_next and not obj.is_slider and not objects[i + 1].is_slider
-                     and gap_ms <= threshold and on_grid(gap_ms)
-                     and measure_of(obj.time) in repetitive_measures
-                     and measure_of(objects[i + 1].time) in repetitive_measures)
-        if can_merge:
+        is_dense_stream_note = not obj.is_slider and has_next and gap_ms <= threshold
+        in_repetitive_section = is_dense_stream_note and measure_of(obj.time) in repetitive_measures
+
+        if in_repetitive_section and not objects[i + 1].is_slider:
             nxt = objects[i + 1]
-            duration_ms = round((nxt.time - obj.time) / eighth_beat_ms) * eighth_beat_ms
-            length = slider_multiplier * 100.0 * (duration_ms / beat_length_ms)
+            length = slider_length_for_gap(obj.time, nxt.time, beat_length_ms, slider_multiplier)
             result.append(HitObject(
                 x=obj.x, y=obj.y, time=obj.time, is_new_combo=obj.is_new_combo, hitsound=obj.hitsound,
                 is_slider=True, curve_type="L", points=[(nxt.x, nxt.y)], slides=1, length=length,
@@ -194,10 +186,7 @@ def thin_repetitive_streams(objects: list[HitObject], beat_length_ms: float, sli
             i += 2
             continue
 
-        is_dense_stream_note = (not obj.is_slider and has_next
-                                 and gap_ms is not None and gap_ms <= threshold)
-        if (is_dense_stream_note and result and not result[-1].is_slider
-                and measure_of(obj.time) in repetitive_measures
+        if (in_repetitive_section and result and not result[-1].is_slider
                 and rng.random() < drop_probability):
             i += 1  # drop this note entirely
             continue
@@ -278,16 +267,12 @@ def main() -> None:
     bm.hit_objects = objects
     bm.difficulty = easier_difficulty(bm.difficulty)
 
-    # Close any overlap that only shows up once times are rounded to whole
-    # milliseconds on disk (see fix_time_overlaps) before the final check.
-    shrunk = fix_time_overlaps(objects, beat_length_ms, slider_multiplier)
-    if shrunk:
-        print(f"Trimmed {shrunk} slider(s) to clear a rounding-induced overlap with the next object")
-
-    # Sanity check: thinning must never introduce an overlap.
+    # Sanity check: thinning must never introduce an overlap, judged the same
+    # way the .osu file itself will be read back (see add_variety.py's own
+    # version of this check for why raw floats aren't the right comparison).
     for a, b in zip(objects, objects[1:]):
-        a_end = a.end_time(beat_length_ms, slider_multiplier)
-        if b.time < a_end - 1e-6:
+        a_end = round(a.time) + a.duration_ms(beat_length_ms, slider_multiplier)
+        if round(b.time) < a_end - 1e-6:
             raise AssertionError(f"Overlap introduced at {a.time:.1f}ms while thinning for Easy mode.")
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
