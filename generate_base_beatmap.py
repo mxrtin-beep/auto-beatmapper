@@ -63,10 +63,21 @@ def detect_bpm_and_offset(y: np.ndarray, sr: int) -> tuple[float, float]:
        handful of discrete peaks, which is far less sensitive to a single
        noisy detection or to being pulled off-phase by other percussion/
        vocal chops that don't land on the kick. The best-scoring (bpm,
-       offset) pair *is* the answer — both, together, since the offset
-       that makes a given BPM's grid line up is exactly what this already
-       searched over; there's no more-reliable independent estimate of
-       offset to refine it against afterward.
+       phase) pair gives a reliable whole-number BPM and an offset that's
+       *close*, but a raw onset-strength envelope's peak lags a kick's
+       actual attack — low-frequency transients have a real rise time, so
+       the envelope keeps climbing for a few tens of milliseconds after
+       the beat a player would actually feel. Landing on that peak reads
+       as noticeably late.
+    3. Every grid beat position from step 2 is backtracked (same technique
+       librosa's own onset detector uses) to the local minimum immediately
+       before it — the point the envelope started rising from, not where
+       it finished rising to — and the offset is nudged by the median of
+       how far that backtracked instant sits from the original grid
+       position. Anchored to the phase step 2 already validated (unlike
+       backtracking a fresh, independent onset list, which has no such
+       guarantee and can drift a full beat off), this only ever corrects
+       for the envelope's own attack lag.
     """
     hop_length = 512
     times_seconds, onset_env = _low_frequency_onset_envelope(y, sr, hop_length)
@@ -75,12 +86,15 @@ def detect_bpm_and_offset(y: np.ndarray, sr: int) -> tuple[float, float]:
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr, trim=False)
     guess_bpm = int(round(float(np.atleast_1d(tempo)[0])))
 
-    def grid_score(bpm: float, offset: float) -> float:
+    def grid_indices(bpm: float, offset: float) -> np.ndarray:
         beat_length = 60.0 / bpm
         n_beats = int((times_seconds[-1] - offset) / beat_length)
         beat_times = offset + np.arange(n_beats) * beat_length
         idx = np.round(beat_times / dt).astype(int)
-        idx = idx[(idx >= 0) & (idx < len(onset_env))]
+        return idx[(idx >= 0) & (idx < len(onset_env))]
+
+    def grid_score(bpm: float, offset: float) -> float:
+        idx = grid_indices(bpm, offset)
         if len(idx) == 0:
             return 0.0
         return float(onset_env[idx].sum() / len(idx))  # per-beat average, comparable across candidate BPMs
@@ -93,6 +107,18 @@ def detect_bpm_and_offset(y: np.ndarray, sr: int) -> tuple[float, float]:
             score = grid_score(candidate_bpm, offset)
             if best_score is None or score > best_score:
                 best_score, bpm, offset_seconds = score, float(candidate_bpm), float(offset)
+
+    beat_length = 60.0 / bpm
+    idx = grid_indices(bpm, offset_seconds)
+    if len(idx) > 0:
+        backtracked_idx = librosa.onset.onset_backtrack(idx, onset_env)
+        backtracked_times = times_seconds[backtracked_idx]
+        nearest_grid = offset_seconds + np.round((backtracked_times - offset_seconds) / beat_length) * beat_length
+        residuals = backtracked_times - nearest_grid
+        offset_seconds += float(np.median(residuals))
+        offset_seconds %= beat_length
+        if offset_seconds < 0:
+            offset_seconds += beat_length
 
     return bpm, offset_seconds
 

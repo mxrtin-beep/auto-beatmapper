@@ -61,20 +61,24 @@ HS_FINISH = 4
 
 # Difficulty-setting ranges per tier, straight from osu!'s ranking criteria
 # (Difficulty-specific > Easy/Normal/Hard/Insane > Difficulty setting
-# guidelines). SliderMultiplier is only capped for Easy/Normal, where the
-# document explicitly says to avoid slider velocity above 1.3; Hard/Insane
-# have no such guideline, so their own SliderMultiplier (from Insane, i.e.
-# the Styled difficulty) is left alone.
+# guidelines). SliderMultiplier is left alone at every tier: the "avoid
+# slider velocity above 1.3" guideline turned out to actively contradict
+# what a real, hand-mapped Easy difficulty looks like — the reference
+# example set in example/keha_backstabber/ uses a SliderMultiplier of
+# 3.54 on its Easy difficulty, because a *slow-reading* Easy leans on long
+# sliders that cover real distance over several beats (a smooth, gentle
+# path to track) rather than a cramped one clicking through the same
+# rhythm as circles — capping the multiplier down actively fights that.
 TIER_SETTINGS: dict[str, dict[str, tuple[float, float] | None]] = {
     "easy": {
         "HPDrainRate": (1.0, 3.0), "CircleSize": (2.0, 4.0),
         "OverallDifficulty": (1.0, 3.0), "ApproachRate": (2.0, 5.0),
-        "SliderMultiplier": (0.8, 1.3),
+        "SliderMultiplier": None,
     },
     "normal": {
         "HPDrainRate": (3.0, 5.0), "CircleSize": (2.0, 5.0),
         "OverallDifficulty": (3.0, 5.0), "ApproachRate": (4.0, 6.0),
-        "SliderMultiplier": (0.8, 1.3),
+        "SliderMultiplier": None,
     },
     "hard": {
         "HPDrainRate": (4.0, 6.0), "CircleSize": (2.0, 6.0),
@@ -93,18 +97,27 @@ TIER_SETTINGS: dict[str, dict[str, tuple[float, float] | None]] = {
 # scope="everywhere" thins every eligible measure; scope=None skips
 # thinning entirely (Insane is exactly the Styled difficulty).
 #
-# merge_probability gates merging too, not just dropping — a repetitive
-# dance/pop track can have *most* of its measures flagged repetitive, so
-# "merge every eligible pair, drop some extra" left Hard (repetitive-only)
-# thinning nearly as much of the song as Normal (everywhere), converging
-# both toward a similar difficulty instead of a real spread. Scaling how
-# much of the eligible density even gets merged, tier by tier, is what
-# actually keeps Hard close to Insane's density and Easy far from it.
+# merge_gap_beats is the real lever for how the map *feels*, not just how
+# often it thins: a real Easy difficulty (see example/keha_backstabber/'s
+# [Wanpachi's Easy]) never has two objects less than a full beat apart,
+# and well over half its objects are sliders — a quarter-beat-only merge
+# window (what this used to be fixed to) can only ever touch the same
+# rapid stream notes Hard already barely touches, nowhere near enough to
+# get there. Widening the merge window tier by tier is what actually
+# closes that gap: Hard only chains genuine rapid streams; Easy chains
+# anything up to a full beat apart, turning most of the map's *rhythm*
+# — not just its stray fast bursts — into long, slow-reading slider
+# chains. merge_probability gates merging too, not just dropping — a
+# repetitive dance/pop track can have *most* of its measures flagged
+# repetitive, so a plain "merge every eligible pair" left Hard
+# (repetitive-only) thinning nearly as much of the song as Normal
+# (everywhere), converging both toward a similar difficulty instead of a
+# real spread.
 TIER_THINNING: dict[str, dict | None] = {
     "insane": None,
-    "hard": {"scope": "repetitive", "merge_probability": 0.35, "drop_probability": 0.05},
-    "normal": {"scope": "everywhere", "merge_probability": 0.65, "drop_probability": 0.15},
-    "easy": {"scope": "everywhere", "merge_probability": 0.9, "drop_probability": 0.30},
+    "hard": {"scope": "repetitive", "merge_gap_beats": 0.25, "merge_probability": 0.35, "drop_probability": 0.05},
+    "normal": {"scope": "everywhere", "merge_gap_beats": 0.5, "merge_probability": 0.7, "drop_probability": 0.15},
+    "easy": {"scope": "everywhere", "merge_gap_beats": 1.0, "merge_probability": 0.9, "drop_probability": 0.25},
 }
 
 
@@ -225,34 +238,56 @@ def _safe_translation_fraction(points: list[tuple[float, float]], dx: float, dy:
     return max(0.0, fraction)
 
 
+def merge_chain(chain: list[HitObject], beat_length_ms: float, slider_multiplier: float) -> HitObject:
+    """Combine 2+ consecutive circles into a single multi-anchor slider,
+    exactly like add_variety.py's own make_slider_chain — usable as a
+    general style tool wherever a run of circles is a candidate to read as
+    one held slider instead of several separate clicks, not just for
+    thinning: the same "some stream runs become held slider chains instead
+    of stacks" variety apply_style.py's stack/line choice already gives,
+    generalized to any run of eligible circles.
+
+    Length is derived from `slider_length_for_gap` (start to the *last*
+    node), so the merged slider's declared duration reconstructs to
+    exactly that same on-disk gap — no drift, no overlap with whatever
+    comes after it, the same guarantee a plain pairwise merge has.
+    """
+    start, rest = chain[0], chain[1:]
+    length = slider_length_for_gap(start.time, chain[-1].time, beat_length_ms, slider_multiplier)
+    return HitObject(x=start.x, y=start.y, time=start.time, is_new_combo=start.is_new_combo,
+                      hitsound=start.hitsound, is_slider=True, curve_type="L",
+                      points=[(o.x, o.y) for o in rest], slides=1, length=length)
+
+
 def thin_repetitive_streams(objects: list[HitObject], beat_length_ms: float, slider_multiplier: float,
                              offset_ms: float, measure_length_ms: float,
                              eligible_measures: set[int] | None, rng: random.Random,
-                             drop_probability: float = 0.12, merge_probability: float = 1.0) -> list[HitObject]:
-    """Thin closely-spaced circles in `eligible_measures` (or every measure,
-    if None — Normal/Easy thin everywhere; Hard passes just the repetitive
-    ones), two ways: merge an adjacent pair into a slider, or drop a note
-    outright. Nothing here ever
-    computes a new object's time or reasons about a fixed subdivision length
-    — it only ever reuses the two real, already-legal timestamps that are
-    already sitting in `objects`, so nothing it does can introduce a timing
-    overlap or an unsnapped slider on its own:
+                             drop_probability: float = 0.12, merge_probability: float = 1.0,
+                             merge_gap_beats: float = 0.25, max_chain_len: int = 4) -> list[HitObject]:
+    """Thin objects in `eligible_measures` (or every measure, if None —
+    Normal/Easy thin everywhere; Hard passes just the repetitive ones), two
+    ways: merge a run of adjacent circles into one slider chain, or drop a
+    note outright. Nothing here ever computes a new object's time or
+    reasons about a fixed subdivision length — it only ever reuses the
+    real, already-legal timestamps and positions already sitting in
+    `objects`, so nothing it does can introduce a timing overlap, an
+    unsnapped slider, or an off-screen object on its own:
 
-      * Merging obj/nxt into one slider uses `slider_length_for_gap`, which
-        measures the gap between their *own* (already valid, already on
-        whatever grid apply_style.py left them on) timestamps the same way
-        the .osu file rounds them — so the merged slider's declared
-        duration reconstructs to exactly that same gap, landing its end
-        precisely on nxt's original timestamp. There is nothing left to
-        drift off-grid or overlap the object after it, because "the grid"
-        here just means "where these two objects already, legally, were".
-        A pair apply_style.py placed in a "stack" (identical x, y — see
-        apply_style.py's build_stream_runs) is skipped instead of merged:
-        a straight "L" slider between two identical points is a real
-        zero-length slider — its declared `length` (from the time gap)
-        would no longer match its actual geometric path length of zero,
-        which apply_style.py's own "slider shape consistency" rule exists
-        to prevent.
+      * A chain of up to `max_chain_len` consecutive circles, each no more
+        than `merge_gap_beats` beats from the last, merges into one slider
+        via merge_chain() — `slider_length_for_gap` measures the gap
+        between the chain's own (already valid, already on whatever grid
+        apply_style.py left them on) start/end timestamps the same way the
+        .osu file rounds them, so the merged slider's declared duration
+        reconstructs to exactly that gap, landing its end precisely on the
+        last node's original timestamp; and every point is an already-
+        validated position apply_style.py placed, so the chain is
+        guaranteed to stay on-screen. A run stops extending the moment the
+        next candidate would form a "stack" (identical x, y — see
+        apply_style.py's build_stream_runs) with the chain's current end:
+        an "L" segment between two identical points is a real zero-length
+        segment, which apply_style.py's own "slider shape consistency"
+        rule exists to prevent.
       * Dropping a note removes an object; it can never overlap anything,
         since there's nothing left there to overlap. But since apply_style.py
         positioned every object via distance-snap against the object *before*
@@ -265,11 +300,14 @@ def thin_repetitive_streams(objects: list[HitObject], beat_length_ms: float, sli
         apply_style.py originally sent it in (measured against the dropped
         note it followed), so distance-snap still holds across the hole.
 
-    A quarter-beat-or-less gap between two circles is exactly what
-    add_variety.py calls a stream note — that's the density this targets.
+    `merge_gap_beats` is what actually controls how far this reaches: at
+    the default quarter beat it only touches the same rapid stream notes
+    add_variety.py calls a "stream"; widened toward a full beat (Easy), it
+    reaches ordinary on-beat rhythm too, turning much more of the map into
+    long, slow-reading slider chains — closer to how a real hand-mapped
+    Easy difficulty reads than thinning stream bursts alone ever could.
     """
-    quarter_beat_ms = beat_length_ms / 4.0
-    threshold = quarter_beat_ms + 1.0
+    merge_gap_ms = beat_length_ms * merge_gap_beats + 1.0
     px_per_beat = slider_multiplier * 100.0
 
     def measure_of(time_ms: float) -> int:
@@ -284,29 +322,56 @@ def thin_repetitive_streams(objects: list[HitObject], beat_length_ms: float, sli
     dropped_since_last_keep = False
     while i < n:
         obj = objects[i]
-        has_next = i + 1 < n
-        gap_ms = (objects[i + 1].time - obj.time) if has_next else None
-        is_dense_stream_note = not obj.is_slider and has_next and gap_ms <= threshold
-        is_eligible_note = is_dense_stream_note and is_eligible(obj.time)
-        is_stacked_pair = has_next and (objects[i + 1].x, objects[i + 1].y) == (obj.x, obj.y)
 
-        if (is_eligible_note and not objects[i + 1].is_slider and not is_stacked_pair
-                and rng.random() < merge_probability):
-            nxt = objects[i + 1]
-            length = slider_length_for_gap(obj.time, nxt.time, beat_length_ms, slider_multiplier)
-            result.append(HitObject(
-                x=obj.x, y=obj.y, time=obj.time, is_new_combo=obj.is_new_combo, hitsound=obj.hitsound,
-                is_slider=True, curve_type="L", points=[(nxt.x, nxt.y)], slides=1, length=length,
-            ))
-            dropped_since_last_keep = False
-            i += 2
-            continue
+        if not obj.is_slider and is_eligible(obj.time):
+            # Greedily extend a chain of eligible, non-stacked circles.
+            j = i
+            while (j + 1 < n and (j - i + 1) < max_chain_len
+                   and not objects[j + 1].is_slider
+                   and is_eligible(objects[j + 1].time)
+                   and (objects[j + 1].time - objects[j].time) <= merge_gap_ms
+                   and (objects[j + 1].x, objects[j + 1].y) != (objects[j].x, objects[j].y)):
+                j += 1
+            chain_len = j - i + 1
 
-        if (is_eligible_note and result and not result[-1].is_slider
-                and rng.random() < drop_probability):
-            dropped_since_last_keep = True
-            i += 1  # drop this note entirely
-            continue
+            if chain_len >= 2 and rng.random() < merge_probability:
+                result.append(merge_chain(objects[i:j + 1], beat_length_ms, slider_multiplier))
+                dropped_since_last_keep = False
+                i = j + 1
+                continue
+
+            can_drop = 0 < i < n - 1 and result and not result[-1].is_slider
+            # A run of 2+ eligible circles missed its merge roll: still a
+            # tight, sub-merge_gap_beats pair. For a tier reaching beyond
+            # genuine rapid streams (Normal/Easy, merge_gap_beats >= half a
+            # beat), that's exactly what merge_gap_beats says shouldn't
+            # survive — rather than leaving it to another coin flip that can
+            # just as easily fail too (and does, often enough to leave stray
+            # tight gaps in an otherwise sparse map), drop it outright
+            # whenever dropping is possible at all. Hard (quarter-beat-only)
+            # keeps the plain probabilistic drop below instead — those really
+            # are the rapid stream bursts Hard is meant to barely touch, not
+            # a density target to enforce.
+            # A circle within merge_gap_beats of whatever comes right after
+            # it (chain_len >= 2) never merged into it — either because that
+            # neighbor is already a slider (can't be folded into a plain
+            # chain without discarding its own shape) or the merge roll
+            # missed. Same reasoning either way: force it, don't leave a
+            # coin flip that can just as easily fail to another tight gap
+            # a sparse tier's own merge_gap_beats says shouldn't survive.
+            has_next = i + 1 < n
+            next_too_close = has_next and (objects[i + 1].time - obj.time) <= merge_gap_ms
+            if (chain_len >= 2 or next_too_close) and can_drop and merge_gap_beats >= 0.5:
+                dropped_since_last_keep = True
+                i += 1
+                continue
+            # A lone eligible circle with no close neighbor either side:
+            # drop is still only ever probabilistic — nothing here says a
+            # single beat on its own needs thinning.
+            if can_drop and rng.random() < drop_probability:
+                dropped_since_last_keep = True
+                i += 1
+                continue
 
         if dropped_since_last_keep and result and i > 0:
             # Re-snap against the new predecessor, keeping the direction
@@ -417,7 +482,14 @@ def main() -> None:
     objects = sorted(bm.hit_objects, key=lambda h: h.time)
     if not objects:
         raise RuntimeError("Beatmap has no hit objects to derive a difficulty from.")
-    original_start, original_end = objects[0].time, objects[-1].time
+    original_start = objects[0].time
+    # Use *end* time, not .time (start), for drain purposes — chain-merging
+    # can now (with a wide enough merge_gap_beats) fold the last few original
+    # objects into one slider whose .time is the chain's *start*, well before
+    # the original last object's own time; the slider's end (which the merge
+    # deliberately lands exactly on the last folded object's original time —
+    # see merge_chain/slider_length_for_gap) is what actually still matches.
+    original_end = objects[-1].end_time(beat_length_ms, slider_multiplier)
 
     thinning = TIER_THINNING[args.tier]
     if thinning is not None:
@@ -432,10 +504,12 @@ def main() -> None:
 
         drop_probability = args.drop_probability if args.drop_probability is not None else thinning["drop_probability"]
         merge_probability = thinning["merge_probability"]
+        merge_gap_beats = thinning["merge_gap_beats"]
         before = len(objects)
         objects = thin_repetitive_streams(objects, beat_length_ms, slider_multiplier, offset_ms,
                                            measure_length_ms, eligible_measures, rng,
-                                           drop_probability=drop_probability, merge_probability=merge_probability)
+                                           drop_probability=drop_probability, merge_probability=merge_probability,
+                                           merge_gap_beats=merge_gap_beats)
         print(f"Thinned {before - len(objects)} object(s) by merging stream pairs into sliders or dropping them")
 
         regularize_hitsounds(objects, offset_ms, measure_length_ms, eligible_measures)
@@ -472,13 +546,17 @@ def main() -> None:
 
     # Ranking criteria requires every difficulty in a set to have essentially
     # the same drain time — thin_repetitive_streams merges/drops only ever
-    # touch stream notes *between* the first and last object (dropping
-    # requires both a predecessor already in `result` and a successor still
-    # ahead in `objects`, which structurally excludes index 0 and the very
-    # last index; merging always keeps the merged pair's own start/end
-    # timestamps), so this should never fire — kept as an explicit guarantee
-    # rather than an assumption.
-    if objects[0].time != original_start or objects[-1].time != original_end:
+    # touch objects *between* the first and last object (dropping requires
+    # both a predecessor already in `result` and a successor still ahead in
+    # `objects`, which structurally excludes index 0 and the very last
+    # index; merging always lands its slider's end exactly on the last
+    # folded object's own original time, via slider_length_for_gap), so
+    # this should never fire — kept as an explicit guarantee rather than an
+    # assumption. Compares *end* time (not .time/start) since the final
+    # object can now be a merged slider whose start is well before the
+    # original last object's own time.
+    final_end = objects[-1].end_time(beat_length_ms, new_slider_multiplier)
+    if objects[0].time != original_start or abs(final_end - original_end) > 1e-6:
         raise AssertionError(f"The {args.tier} difficulty's drain time no longer matches Insane's.")
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
