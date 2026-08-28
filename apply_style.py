@@ -34,14 +34,18 @@ play, following common osu! "rules of thumb":
   * Flow — every motif avoids full 180-degree reversals and repeats of the
     same direction for too long, so movement still reads as a continuous
     swing rather than snapping.
-  * Slider shape variety — a single-anchor slider is straight about a third
-    of the time, a gentle Bezier arc another third, and a pronounced
-    circular arc the rest — the bow for that last one is deliberately large
-    relative to the slider's length specifically because that keeps a
-    "perfect circle" curve's actual rendered arc close to its declared
-    points (a *small* bow on a P curve is what risks it swinging off
-    screen). A multi-anchor chain similarly reads as a sharp polyline or
-    one smooth curve through all its waypoints about half the time each.
+  * Slider shape variety — a single-anchor slider is straight, a gentle
+    Bezier arc, or a pronounced circular arc, in a mix controlled by
+    `--curviness` (0-1, default 0.5: straight about a third of the time,
+    gentle Bezier another third, pronounced arc the rest) — the bow for
+    that last one is deliberately large relative to the slider's length
+    specifically because that keeps a "perfect circle" curve's actual
+    rendered arc close to its declared points (a *small* bow on a P curve
+    is what risks it swinging off screen); higher curviness both shifts
+    the mix toward curved shapes and makes every bow more pronounced. A
+    multi-anchor chain similarly reads as a sharp polyline or one smooth
+    curve through all its waypoints, with `--curviness` again controlling
+    how often it's the smooth curve.
   * Playfield bounds — everything stays within the 512x384 field with a
     margin, bouncing off the edge instead of clipping.
   * Slider shape consistency — a slider's declared travel distance
@@ -359,7 +363,14 @@ def main() -> None:
                               "that trace a straight line (0 = always line, 1 = always stack). "
                               "Which one a given repeating section picks stays consistent across "
                               "its repeats either way.")
+    parser.add_argument("--curviness", type=float, default=0.5,
+                         help="How curvy the map feels, 0-1. 0 makes almost every slider a "
+                              "straight line; 1 makes almost every slider a pronounced curve "
+                              "(and makes the bow of every curved slider more pronounced too). "
+                              "0.5 (default) matches the original straight/gentle-arc/pronounced-arc "
+                              "mix.")
     args = parser.parse_args()
+    args.curviness = max(0.0, min(1.0, args.curviness))
 
     if args.seed is None:
         args.seed = random.SystemRandom().randrange(2**32)
@@ -390,6 +401,14 @@ def main() -> None:
     stream_mode = build_stream_runs(objects, beat_length_ms, rng, args.seed, offset_ms=offset_ms,
                                      measure_length_ms=measure_length_ms, measure_buckets=measure_buckets,
                                      stack_probability=args.stack_probability)
+
+    # Single-anchor slider shape mix, derived from --curviness (default 0.5
+    # reproduces the original fixed 35% straight / 30% gentle-Bezier / 35%
+    # pronounced-arc split). Higher curviness both shifts the mix toward
+    # curved shapes and makes every curved bow more pronounced.
+    straight_prob = max(0.0, 0.7 * (1.0 - args.curviness))
+    bezier_prob = straight_prob + (1.0 - straight_prob) * 0.46
+    bow_scale = 0.5 + args.curviness
 
     # Start roughly centered.
     cur_x, cur_y = PLAYFIELD_W / 2.0, PLAYFIELD_H / 2.0
@@ -471,13 +490,13 @@ def main() -> None:
                 end_x, end_y = clamp_to_playfield(end_x, end_y, margin=MARGIN)
 
                 shape_roll = rng.random()
-                if shape_roll < 0.35:
+                if shape_roll < straight_prob:
                     obj.curve_type = "L"
                     obj.points = [(end_x, end_y)]
                 else:
                     mid_x, mid_y = (cur_x + end_x) / 2.0, (cur_y + end_y) / 2.0
                     perp_angle = end_angle + math.pi / 2
-                    if shape_roll < 0.65:
+                    if shape_roll < bezier_prob:
                         # A quadratic Bezier through (start, bow, end) — a
                         # gentle arc. Unlike a "P" (perfect-circle) curve
                         # with a *small* bow, whose rendered path can swing
@@ -486,7 +505,7 @@ def main() -> None:
                         # to collinear, a Bezier is mathematically
                         # guaranteed to stay within their convex hull.
                         obj.curve_type = "B"
-                        bow = min(40.0, segment_length * 0.25)
+                        bow = min(40.0 * bow_scale, segment_length * 0.25 * bow_scale)
                     else:
                         # A real circular arc: safe here specifically
                         # because the bow is deliberately large relative to
@@ -495,7 +514,7 @@ def main() -> None:
                         # to balloon outward) — a pronounced, legible curve
                         # that actually guides the cursor around a bend.
                         obj.curve_type = "P"
-                        bow = min(70.0, segment_length * 0.45)
+                        bow = min(70.0 * bow_scale, segment_length * 0.45 * bow_scale)
                     bow_x, bow_y = clamp_to_playfield(mid_x + bow * math.cos(perp_angle),
                                                        mid_y + bow * math.sin(perp_angle), margin=MARGIN)
                     obj.points = [(bow_x, bow_y), (end_x, end_y)]
@@ -509,7 +528,7 @@ def main() -> None:
                 # waypoint (a Bezier through several points is still
                 # guaranteed to stay within their convex hull, so this is
                 # safe even for a long, sweeping chain).
-                obj.curve_type = "L" if rng.random() < 0.55 else "B"
+                obj.curve_type = "L" if rng.random() >= args.curviness else "B"
                 new_points = []
                 for _ in range(num_segments):
                     cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,

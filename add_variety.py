@@ -171,29 +171,36 @@ def cap_stream_length(objects: list[HitObject], beat_length_ms: float, slider_mu
 
     A stream is a run of consecutive circles a quarter beat or less apart —
     a wider gap resets the count, since that's an ordinary paced circle,
-    not a rapid subdivision. The (max_len + 1)'th circle in a row is
-    replaced by a short slider instead, so a stream always resolves into a
-    slider rather than continuing indefinitely.
+    not a rapid subdivision. Once a run reaches max_len, the (max_len+1)'th
+    and (max_len+2)'th circles are *combined* into one two-node slider —
+    the same "merge circles into a slider" operation make_slider_chain
+    does — rather than turning only the first of the pair into a slider
+    that merely reaches the second one's timestamp while leaving that
+    second circle in place as its own object: that used to leave a circle
+    and a slider's tail both demanding input at the exact same instant,
+    which is illegal regardless of how precisely the timing lines up.
+    Combining both into one slider removes that second circle from the
+    output entirely, so there is nothing left at that timestamp to
+    conflict with the slider's end.
 
     This is a backstop, not the primary mechanism (that's the chunk-type
-    alternation in main()) — it should rarely fire, but when it does, the
-    replacement slider spans exactly to the next object's timestamp (both
-    objects already sit on the same beat-subdivision grid, so that gap is
-    itself already a clean subdivision) using `slider_length_for_gap`,
-    which derives `length` from the *rounded* gap between the two times —
-    the same rounding the .osu file itself applies to every `time` field —
-    so the slider's reconstructed end lands exactly on the next object's
-    on-disk timestamp: neither short of it (which would read as
-    "unsnapped") nor past it (an illegal overlap). No arbitrary safety
-    margin is needed or used.
+    alternation in main()) — it should rarely fire. If there's no next
+    object to combine with (the run runs off the end of the track), or the
+    next object is already a slider (which can't be folded into a simple
+    two-node chain without discarding its own shape), the run is left
+    over-length rather than forcing an unsafe merge — both are rare edge
+    cases and neither risks an overlap.
     """
     result: list[HitObject] = []
     consecutive = 0
+    i = 0
     n = len(objects)
-    for i, obj in enumerate(objects):
+    while i < n:
+        obj = objects[i]
         if obj.is_slider:
             result.append(obj)
             consecutive = 0
+            i += 1
             continue
 
         prev = result[-1] if result else None
@@ -201,17 +208,17 @@ def cap_stream_length(objects: list[HitObject], beat_length_ms: float, slider_mu
                            and (obj.time - prev.time) <= quarter_beat_ms + 1.0)
         consecutive = consecutive + 1 if is_stream_note else 1
 
-        if consecutive > max_len:
-            has_next = i + 1 < n
-            end_time = objects[i + 1].time if has_next else obj.time + quarter_beat_ms
-            length = slider_length_for_gap(obj.time, end_time, beat_length_ms, slider_multiplier)
-            result.append(HitObject(
-                x=obj.x, y=obj.y, time=obj.time, is_new_combo=obj.is_new_combo,
-                is_slider=True, curve_type="L", points=[(obj.x + 1, obj.y)], slides=1, length=length,
-            ))
+        has_next = i + 1 < n
+        can_merge = has_next and not objects[i + 1].is_slider
+        if consecutive > max_len and can_merge:
+            nxt = objects[i + 1]
+            result.append(make_slider_chain([obj, nxt], beat_length_ms, slider_multiplier))
             consecutive = 0
-        else:
-            result.append(obj)
+            i += 2  # nxt is now the slider's endpoint, not a separate object
+            continue
+
+        result.append(obj)
+        i += 1
     return result
 
 

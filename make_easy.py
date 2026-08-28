@@ -248,6 +248,7 @@ def main() -> None:
     objects = sorted(bm.hit_objects, key=lambda h: h.time)
     if not objects:
         raise RuntimeError("Beatmap has no hit objects to simplify.")
+    original_start, original_end = objects[0].time, objects[-1].time
 
     print("Analyzing song structure...")
     energy_at = compute_energy_lookup(args.audio)
@@ -274,6 +275,17 @@ def main() -> None:
         a_end = round(a.time) + a.duration_ms(beat_length_ms, slider_multiplier)
         if round(b.time) < a_end - 1e-6:
             raise AssertionError(f"Overlap introduced at {a.time:.1f}ms while thinning for Easy mode.")
+
+    # Ranking criteria requires every difficulty in a set to have essentially
+    # the same drain time — thin_repetitive_streams merges/drops only ever
+    # touch stream notes *between* the first and last object (dropping
+    # requires both a predecessor already in `result` and a successor still
+    # ahead in `objects`, which structurally excludes index 0 and the very
+    # last index; merging always keeps the merged pair's own start/end
+    # timestamps), so this should never fire — kept as an explicit guarantee
+    # rather than an assumption.
+    if objects[0].time != original_start or objects[-1].time != original_end:
+        raise AssertionError("Easy mode's drain time no longer matches the Styled difficulty's.")
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     write_osu(bm, args.output)

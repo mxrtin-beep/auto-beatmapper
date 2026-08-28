@@ -92,6 +92,10 @@ timing/object count/type, which are never touched either way:
   runs that stack in one spot and runs that trace a straight line (`0` =
   always line, `1` = always stack). Whichever one a given repeating
   section picks stays consistent every time that section recurs.
+- `--curviness C` (default `0.5`) — how curvy the map feels, `0`-`1`. `0`
+  makes almost every slider a straight line; `1` makes almost every
+  slider a pronounced curve, and makes the bow of every curved slider
+  more pronounced too.
 
 ### Randomness / seeds
 
