@@ -6,19 +6,27 @@ Takes the plain half-beat circle skeleton from generate_base_beatmap.py and
 reshapes it based on the song's loudness (RMS energy) over time:
 
   * Quiet sections   -> thinned out (down to one object per full beat).
-  * Normal sections  -> runs of adjacent circles are combined into short
-                         slider chains, so normal sections read mostly as
-                         sliders rather than a wall of individually-stacked
-                         circles. A few circles are left standalone for
-                         rhythmic variety.
+  * Normal sections  -> runs of 2-4 adjacent circles (1, 1.5, or 2 beats'
+                         worth) are combined into slider chains, so normal
+                         sections read mostly as sliders of varying length
+                         rather than a wall of individually-stacked circles
+                         or all-identical 1-beat sliders. A few circles are
+                         left standalone for rhythmic variety.
   * Intense sections -> a short burst (1-2 consecutive intense half-beats,
-                         the "triplet" feel) stays as plain circles with
-                         inserted subdivisions, but a longer run of intense
-                         beats (3+ in a row) becomes a single slider that
-                         bounces back and forth across the whole run instead
-                         of a long wall of individually-clicked circles —
-                         the same visual intensity with far less click
-                         density.
+                         the "triplet" feel) always stays as plain circles
+                         with inserted subdivisions. A longer run (3+ in a
+                         row) is walked in short chunks, each independently
+                         assigned one of three treatments — "stream"
+                         (individually-clicked circles/triplets, capped at
+                         8), "bounce" (one repeating slider), or "rest"
+                         (dropped entirely, a deliberate intensity dip) —
+                         with the same treatment never allowed to repeat
+                         from one chunk to the next. Without that rule nothing
+                         stops two or three consecutive stream chunks from
+                         reading as one unbroken 16-24 note wall (each one
+                         individually "capped" doesn't help if the next
+                         chunk is right back to more circles), and several
+                         bounce sliders in a row get just as repetitive.
 
 A small fraction of otherwise-eligible objects are dropped entirely as
 short rests, so sections get a breath instead of being wall-to-wall notes.
@@ -166,6 +174,16 @@ def cap_stream_length(objects: list[HitObject], beat_length_ms: float, slider_mu
     not a rapid subdivision. The (max_len + 1)'th circle in a row is
     replaced by a short slider instead, so a stream always resolves into a
     slider rather than continuing indefinitely.
+
+    This is a backstop, not the primary mechanism (that's the chunk-type
+    alternation in main()) — it should rarely fire, but when it does, the
+    replacement slider spans the *exact* gap to the next object (which is
+    itself already a clean subdivision, since both objects sit on the same
+    grid) rather than some fraction of it. Shrinking it by an arbitrary
+    fraction is exactly what previously caused two problems at once: an
+    unsnapped slider end (it no longer landed on a clean beat fraction) and
+    objects sometimes under 10ms apart (a small subdivision gap shrunk by
+    even 10% can leave less than 10ms of clearance).
     """
     result: list[HitObject] = []
     consecutive = 0
@@ -183,9 +201,16 @@ def cap_stream_length(objects: list[HitObject], beat_length_ms: float, slider_mu
 
         if consecutive > max_len:
             has_next = i + 1 < n
-            next_time = objects[i + 1].time if has_next else obj.time + beat_length_ms
-            gap = next_time - obj.time
-            one_way_ms = min(quarter_beat_ms, gap * 0.9)
+            one_way_ms = (objects[i + 1].time - obj.time) if has_next else quarter_beat_ms
+            # Both this slider's start time and the next object's time get
+            # independently rounded to the nearest millisecond when written
+            # out, while `length` (and so the reconstructed duration) is
+            # derived from the exact, unrounded gap — after that independent
+            # rounding on both ends, the reconstructed end can land a
+            # fraction of a millisecond past the next object's now-rounded
+            # start. A 1ms margin easily absorbs that without being a
+            # perceptible or "unsnapped" amount.
+            one_way_ms = max(1.0, one_way_ms - 1.0)
             px_per_beat = slider_multiplier * 100.0
             length = px_per_beat * (one_way_ms / beat_length_ms)
             result.append(HitObject(
@@ -199,7 +224,7 @@ def cap_stream_length(objects: list[HitObject], beat_length_ms: float, slider_mu
 
 
 def build_break_periods(objects: list[HitObject], beat_length_ms: float, slider_multiplier: float,
-                         min_gap_ms: float = 6000.0, edge_buffer_ms: float = 200.0) -> list[str]:
+                         min_gap_ms: float = 4000.0, edge_buffer_ms: float = 200.0) -> list[str]:
     """[Events] "Break Periods" lines for any long stretch with no hit objects.
 
     Without an explicit break, a long instrumental/silent stretch just
@@ -367,19 +392,26 @@ def main() -> None:
             continue
 
         if cat == "normal":
-            # Pair this circle with the next one into a short (single-segment)
-            # slider whenever possible. Doing this for most eligible pairs in
-            # a row is what produces a visible *chain* of short sliders back
-            # to back, rather than a wall of individually-stacked circles.
-            # Every so often a pair is left as plain circles so the section
-            # still breathes and doesn't turn into an unbroken slider train.
-            # The choice is randomized (seeded) so re-running the pipeline on
+            # Combine this circle with the next 1-3 into a slider whenever
+            # possible — varying the chain length (2, 3, or 4 nodes: 1, 1.5,
+            # or 2 beats) is what keeps sliders from all reading as the same
+            # fixed length. Doing this for most eligible runs in a row is
+            # what produces a visible *chain* of sliders back to back,
+            # rather than a wall of individually-stacked circles. Every so
+            # often a run is left as plain circles so the section still
+            # breathes and doesn't turn into an unbroken slider train. The
+            # choice is randomized (seeded) so re-running the pipeline on
             # the same song doesn't always produce an identical map.
-            can_chain = has_next and categories[i + 1] != "intense" and rng.random() < args.chain_probability
+            max_chain = 1
+            while (i + max_chain < n and max_chain < 4
+                   and categories[i + max_chain] != "intense"):
+                max_chain += 1
+            can_chain = max_chain >= 2 and rng.random() < args.chain_probability
             if can_chain:
-                nxt = circles[i + 1]
-                new_objects.append(make_slider_chain([cur, nxt], beat_length_ms, slider_multiplier))
-                i += 2
+                chain_len = rng.choices([2, 3, 4][:max_chain - 1], weights=[50, 30, 20][:max_chain - 1])[0]
+                nodes = circles[i:i + chain_len]
+                new_objects.append(make_slider_chain(nodes, beat_length_ms, slider_multiplier))
+                i += chain_len
             else:
                 new_objects.append(cur)
                 i += 1
@@ -391,27 +423,68 @@ def main() -> None:
         # never produces more than a 2-3 note "triplet" burst no matter how
         # intense the section is. A long intense passage is a run of many
         # such slots back to back; it's walked in short chunks, each
-        # independently rolling whether it becomes a bouncing slider or
-        # stays as circles/triplets, so a long run comes out *interspersed*
-        # — bounce, circles, bounce, triplet — instead of one style for the
-        # whole run (or one giant slider).
+        # assigned one of three treatments — "stream" (individually-clicked
+        # circles/triplets), "bounce" (one repeating slider), or "rest"
+        # (dropped entirely, a deliberate breather) — with the same
+        # treatment never allowed twice in a row. Without that rule, two or
+        # three consecutive stream chunks read as one unbroken 16-24 note
+        # wall regardless of each chunk individually being capped at 8, and
+        # several bounce sliders back to back get just as repetitive.
         run_end = i
         while run_end + 1 < n and categories[run_end + 1] == "intense":
             run_end += 1
 
-        chunk_slots = 4  # half a measure — short enough that a bounce slider doesn't overstay
+        chunk_slots = 4  # half a measure
         pos = i
+        last_treatment = None
         while pos <= run_end:
             if rng.random() < args.rest_probability:
                 pos += 1
                 continue
 
-            chunk_end = min(pos + chunk_slots - 1, run_end)
+            lookahead_end = min(pos + chunk_slots - 1, run_end)
+            lookahead_len = lookahead_end - pos + 1
+
+            # A short (1-2 slot) burst is always the "triplet" feel,
+            # regardless of what came before — it's too short to read as a
+            # repetitive wall on its own. Only chunks long enough to
+            # meaningfully become a stream or a bounce slider (3+ slots)
+            # are subject to the no-repeat-treatment rule.
+            if lookahead_len < 3:
+                treatment = "stream"
+            else:
+                options = [t for t in ("stream", "bounce", "rest") if t != last_treatment]
+                weights = {"stream": 0.45, "bounce": 0.45, "rest": 0.10}
+                treatment = rng.choices(options, weights=[weights[t] for t in options])[0]
+            last_treatment = treatment
+
+            chunk_end = lookahead_end
+            if treatment == "stream":
+                # A stream's own subdivision rate can pack up to 4 notes
+                # into a single half-beat slot (eighth-note rate) — a full
+                # 4-slot chunk at that rate is already 16 circles on its
+                # own, well past the 8-circle cap, no matter how well the
+                # chunk-level alternation above spaces treatments out. Bound
+                # how many slots *this* stream actually covers by its own
+                # rate up front, rather than letting cap_stream_length chop
+                # an oversized stream in half with a bridging slider that
+                # doesn't really break anything up.
+                chunk_avg_energy = float(np.mean(slot_energy[pos:lookahead_end + 1]))
+                steps_per_slot = 4 if chunk_avg_energy > q_climax else 2
+                max_slots_for_cap = max(1, 8 // steps_per_slot)
+                chunk_end = min(lookahead_end, pos + max_slots_for_cap - 1)
+
             chunk_len = chunk_end - pos + 1
             after_chunk = chunk_end + 1
             has_after_chunk = after_chunk < n
 
-            if chunk_len >= 3 and rng.random() < args.bounce_probability:
+            if treatment == "rest":
+                # Drop this whole chunk: a deliberate intensity dip instead
+                # of forcing every intense half-beat to have something in it.
+                pos = after_chunk
+                continue
+
+            if treatment == "bounce":
                 # One subdivision (quarter or eighth beat, chosen once for
                 # the whole chunk so the rate doesn't shift mid-slider) per
                 # leg. Two legs per half-beat slot at quarter-beat rate, or
@@ -435,9 +508,9 @@ def main() -> None:
                 pos = after_chunk
                 continue
 
-            # This chunk stays as individually-clicked circles/triplets, all
-            # at one subdivision rate (decided once for the whole chunk, the
-            # same way as the bounce-slider branch above) rather than
+            # treatment == "stream": individually-clicked circles/triplets,
+            # all at one subdivision rate (decided once for the whole
+            # chunk, the same way as the bounce branch above) rather than
             # switching between quarter- and eighth-notes slot to slot,
             # which would read as an inconsistent, hard-to-parse stream.
             # Subdivisions are packed into the gap up to the next existing
@@ -524,11 +597,23 @@ def main() -> None:
     # the same clap/finish on every one of a dozen rapid reversals is
     # jarring rather than emphatic, so its repeats and tail stay a plain
     # normal sample instead.
+    MAX_MS_WITHOUT_ACCENT = measure_length_ms
+    last_accent_time = None
     for obj in new_objects:
         e = energy_at(obj.time)
         on_downbeat = is_on_downbeat(obj.time, offset_ms, measure_length_ms)
         hs = hitsound_for(e, on_downbeat, q_high, q_climax)
+        # A long quiet/normal stretch can otherwise go many measures with
+        # every hit landing on plain HS_NORMAL, which reads as "no
+        # hitsounds" to any checker — force at least a soft whistle often
+        # enough that never happens, even where the energy alone wouldn't
+        # have earned one.
+        if hs == HS_NORMAL and (last_accent_time is None
+                                 or obj.time - last_accent_time > MAX_MS_WITHOUT_ACCENT):
+            hs = HS_WHISTLE
         obj.hitsound = hs
+        if hs != HS_NORMAL:
+            last_accent_time = obj.time
         if obj.is_slider:
             if obj.slides > 1:
                 obj.edge_hitsounds = [hs] + [HS_NORMAL] * obj.slides

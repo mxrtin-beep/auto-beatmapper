@@ -31,12 +31,16 @@ play, following common osu! "rules of thumb":
   * Flow — every motif avoids full 180-degree reversals and repeats of the
     same direction for too long, so movement still reads as a continuous
     swing rather than snapping.
+  * Slider shape variety — a single-anchor slider is straight about a third
+    of the time, a gentle Bezier arc another third, and a pronounced
+    circular arc the rest — the bow for that last one is deliberately large
+    relative to the slider's length specifically because that keeps a
+    "perfect circle" curve's actual rendered arc close to its declared
+    points (a *small* bow on a P curve is what risks it swinging off
+    screen). A multi-anchor chain similarly reads as a sharp polyline or
+    one smooth curve through all its waypoints about half the time each.
   * Playfield bounds — everything stays within the 512x384 field with a
-    margin, bouncing off the edge instead of clipping. The occasional arc
-    slider uses a Bezier curve rather than a "perfect circle" curve, since
-    a perfect-circle arc can swing outside its own declared points (and
-    off screen) when they're close to collinear — a Bezier is guaranteed
-    to stay within their convex hull.
+    margin, bouncing off the edge instead of clipping.
   * Slider shape consistency — a slider's declared travel distance
     (`length`, which drives its timing/duration) always matches the actual
     distance from its start point to its rendered curve, so what you see is
@@ -366,28 +370,42 @@ def main() -> None:
             segment_length = obj.length / num_segments
 
             if num_segments == 1:
-                # A lone slider gets an occasional gentle arc for variety;
-                # chains (below) stay as clean polylines so each waypoint
-                # reads as its own beat in the chain.
+                # A lone slider (including a bouncing one) gets a shape
+                # drawn from three options instead of almost always being
+                # a straight 1-beat line: straight, a gentle Bezier arc, or
+                # a more pronounced circular arc that actually guides the
+                # cursor through a real curve.
                 end_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
                                         measure_length_ms, rng)
                 end_x, end_y, end_angle = place_at_distance(cur_x, cur_y, segment_length, end_angle)
                 end_x, end_y = clamp_to_playfield(end_x, end_y, margin=MARGIN)
 
-                if rng.random() < 0.5:
+                shape_roll = rng.random()
+                if shape_roll < 0.35:
                     obj.curve_type = "L"
                     obj.points = [(end_x, end_y)]
                 else:
-                    # A quadratic Bezier through (start, bow, end) — unlike
-                    # a "P" (perfect-circle) curve, whose rendered arc can
-                    # swing well outside the triangle these three points
-                    # form (and off the visible playfield) when they're
-                    # close to collinear, a Bezier curve is mathematically
-                    # guaranteed to stay within their convex hull.
-                    obj.curve_type = "B"
                     mid_x, mid_y = (cur_x + end_x) / 2.0, (cur_y + end_y) / 2.0
                     perp_angle = end_angle + math.pi / 2
-                    bow = min(40.0, segment_length * 0.25)
+                    if shape_roll < 0.65:
+                        # A quadratic Bezier through (start, bow, end) — a
+                        # gentle arc. Unlike a "P" (perfect-circle) curve
+                        # with a *small* bow, whose rendered path can swing
+                        # well outside the triangle these three points form
+                        # (and off the visible playfield) when they're close
+                        # to collinear, a Bezier is mathematically
+                        # guaranteed to stay within their convex hull.
+                        obj.curve_type = "B"
+                        bow = min(40.0, segment_length * 0.25)
+                    else:
+                        # A real circular arc: safe here specifically
+                        # because the bow is deliberately large relative to
+                        # the chord (well clear of the near-collinear
+                        # configuration that causes a perfect-circle curve
+                        # to balloon outward) — a pronounced, legible curve
+                        # that actually guides the cursor around a bend.
+                        obj.curve_type = "P"
+                        bow = min(70.0, segment_length * 0.45)
                     bow_x, bow_y = clamp_to_playfield(mid_x + bow * math.cos(perp_angle),
                                                        mid_y + bow * math.sin(perp_angle), margin=MARGIN)
                     obj.points = [(bow_x, bow_y), (end_x, end_y)]
@@ -395,8 +413,13 @@ def main() -> None:
                 cur_x, cur_y, cur_angle = end_x, end_y, end_angle
             else:
                 # Chain slider: walk one flow-angle segment per waypoint so
-                # each note in the chain still reads as a distinct hop.
-                obj.curve_type = "L"
+                # each note in the chain still reads as a distinct hop, then
+                # decide once whether the whole chain reads as a sharp
+                # polyline or one smooth curve flowing through every
+                # waypoint (a Bezier through several points is still
+                # guaranteed to stay within their convex hull, so this is
+                # safe even for a long, sweeping chain).
+                obj.curve_type = "L" if rng.random() < 0.55 else "B"
                 new_points = []
                 for _ in range(num_segments):
                     cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
