@@ -22,12 +22,23 @@ inspect (or play) the map at every step.
 
 3. **`apply_style.py`** — repositions every object (without changing its
    timing, type, or count) following common mapping rules of thumb:
-   distance snap (spacing scales with the time gap between notes),
-   energy-aware jump sizing, smooth flow (no abrupt 180° reversals),
-   no unintended stacking, and staying within the playfield.
+   distance snap (on-screen distance for a half-beat-or-larger gap exactly
+   matches what a slider spanning that time would travel), a fast
+   quarter-beat-or-less run of circles reading as a deliberate stack or an
+   overlapping line rather than a zigzag blob, and a small set of
+   repeating turn-angle patterns keyed to each measure's own energy level
+   — so a verse or chorus repeating the song's structure also repeats the
+   same visual pattern, instead of a one-off procedural wiggle.
+
+4. **`make_easy.py`** *(optional, via `--easy`)* — derives a second, easier
+   difficulty from the Styled beatmap: lower Difficulty settings, and some
+   of the *repetitive* sections' stream density thinned into sliders
+   (using the same positions apply_style.py already chose). Non-repetitive
+   sections — a bridge, an intro/outro, anything that only happens once —
+   are left as they were.
 
 `beatmap_utils.py` holds the shared `.osu` parsing/writing code and data
-structures used by all three stages.
+structures used by all four stages.
 
 ## Usage
 
@@ -43,6 +54,29 @@ This writes `output/<Song Title>/<Song Title> (Base|Variety|Styled).osu`,
 and with `--osz` also bundles those three difficulties plus the MP3 into
 `output/<Song Title>/<Song Title>.osz` — drag that straight into osu! to
 import all three difficulties at once.
+
+Add `--easy` to also generate a fourth, easier difficulty (`make_easy.py`,
+see above) and include it in the `.osz`:
+
+```bash
+python3 main.py song.mp3 --easy --osz
+```
+
+### Re-styling without changing the rhythm
+
+`apply_style.py` never touches timing, object type, or object count — only
+where things are placed. To get a different flow/angle pattern (a fresh
+mix of stacks vs. overlapping lines, different slider curves, etc.)
+without regenerating the beatmap's rhythm at all, re-run just that stage
+with a new seed:
+
+```bash
+python3 apply_style.py "out/Song (Variety).osu" \
+    --output "out/Song (Styled2).osu" --audio song.mp3 --seed 123
+
+# or, via main.py:
+python3 main.py song.mp3 --restyle-only "out/Song (Variety).osu" --seed 123
+```
 
 ### Randomness / seeds
 

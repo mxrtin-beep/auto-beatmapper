@@ -24,10 +24,13 @@ play, following common osu! "rules of thumb":
     continues as an overlapping line instead.
   * Patterns / motifs — outside of streams, the turn angle between objects
     is drawn from a small fixed set of repeating shapes ("motifs"), one per
-    energy tier, keyed to the object's actual position within the musical
-    measure. The same motif recurs every measure of a given tier, so
-    patterns are genuinely learnable on replay instead of a one-off
-    procedural wiggle that happens to look similar.
+    energy tier, keyed to the object's position within the musical measure
+    *and* that measure's own energy level (quantized into a handful of
+    buckets). Two measures that sound alike — the second verse repeating
+    the first, a chorus recurring — land in the same bucket and so reuse
+    the exact same motif every time, which is what makes the pattern
+    genuinely learnable: it's driven by where the song actually repeats
+    itself, not an arbitrary rotating counter.
   * Flow — every motif avoids full 180-degree reversals and repeats of the
     same direction for too long, so movement still reads as a continuous
     swing rather than snapping.
@@ -69,9 +72,10 @@ HALF_BEAT_STEPS_PER_MEASURE = 8  # 4/4 time, half-beat resolution
 
 # A handful of repeating turn-angle "motifs" per energy tier (degrees,
 # signed = turn direction), indexed by position-within-measure. Which motif
-# plays in a given measure cycles with the measure index, so the same shape
-# recurs every few measures within a tier — recognizable on replay — while
-# still varying between passes through the song. These only ever apply
+# plays in a given measure is keyed to that measure's energy bucket (see
+# compute_measure_energy_buckets), so the same shape recurs every time a
+# similar-sounding section repeats — recognizable on replay — while still
+# varying between genuinely different sections. These only ever apply
 # outside of streams/stacks (see build_stream_runs below).
 MOTIFS = {
     "quiet": [
@@ -113,25 +117,59 @@ def classify_tier(energy_value: float, q_low: float, q_high: float) -> str:
     return "normal"
 
 
-def motif_turn_degrees(tier: str, time_ms: float, offset_ms: float,
-                        beat_length_ms: float, measure_length_ms: float) -> float:
-    """The signed turn angle (degrees) for an object, from its tier's repeating motif."""
+NUM_ENERGY_BUCKETS = 5  # how many distinct "kinds of section" a tier's motifs can be keyed to
+
+
+def compute_measure_energy_buckets(energy_at, offset_ms: float, measure_length_ms: float,
+                                    track_end_ms: float, num_buckets: int = NUM_ENERGY_BUCKETS) -> dict[int, int]:
+    """Which energy bucket each measure falls into, sampled across the whole track.
+
+    A measure's bucket is its own average energy (sampled at 8 points
+    across it) quantized into num_buckets levels. This is what lets a
+    verse's second and third repeat pick the exact same motif as its
+    first: they have essentially the same energy profile, so they land in
+    the same bucket, every time — driven by the music's actual dynamics
+    rather than an arbitrary rotating counter that has no reason to line
+    up with where the song actually repeats itself.
+    """
+    num_measures = max(1, int((track_end_ms - offset_ms) / measure_length_ms) + 1)
+    buckets: dict[int, int] = {}
+    for m in range(num_measures):
+        start = offset_ms + m * measure_length_ms
+        samples = [energy_at(start + frac * measure_length_ms) for frac in (0.0, 0.125, 0.25, 0.375,
+                                                                              0.5, 0.625, 0.75, 0.875)]
+        avg = sum(samples) / len(samples)
+        buckets[m] = min(num_buckets - 1, int(avg * num_buckets))
+    return buckets
+
+
+def motif_turn_degrees(tier: str, time_ms: float, offset_ms: float, beat_length_ms: float,
+                        measure_length_ms: float, measure_buckets: dict[int, int]) -> float:
+    """The signed turn angle (degrees) for an object, from its tier's repeating motif.
+
+    Which of a tier's motifs plays is keyed to the measure's energy bucket,
+    not a rotating index — so every measure that sounds like "this kind of
+    section" (the same verse or chorus repeating) reuses the exact same
+    motif, giving the player a real, learnable pattern instead of a motif
+    that happens to cycle on its own unrelated schedule.
+    """
     half_beat_ms = beat_length_ms / 2.0
     pos_in_measure = int(round((time_ms - offset_ms) / half_beat_ms)) % HALF_BEAT_STEPS_PER_MEASURE
     measure_index = int((time_ms - offset_ms) // measure_length_ms)
+    bucket = measure_buckets.get(measure_index, 0)
     motifs = MOTIFS[tier]
-    motif = motifs[measure_index % len(motifs)]
+    motif = motifs[bucket % len(motifs)]
     return motif[pos_in_measure % len(motif)]
 
 
-def next_angle(prev_angle: float, tier: str, time_ms: float, offset_ms: float,
-               beat_length_ms: float, measure_length_ms: float, rng: random.Random) -> float:
+def next_angle(prev_angle: float, tier: str, time_ms: float, offset_ms: float, beat_length_ms: float,
+               measure_length_ms: float, measure_buckets: dict[int, int], rng: random.Random) -> float:
     """Advance the flow angle using the tier's motif, plus a small humanizing jitter.
 
     The jitter is intentionally small (a few degrees) — the point of a motif
     is that it repeats recognizably; too much randomness would wash that out.
     """
-    turn_degrees = motif_turn_degrees(tier, time_ms, offset_ms, beat_length_ms, measure_length_ms)
+    turn_degrees = motif_turn_degrees(tier, time_ms, offset_ms, beat_length_ms, measure_length_ms, measure_buckets)
     turn_degrees += rng.uniform(-4.0, 4.0)
     return prev_angle + math.radians(turn_degrees)
 
@@ -300,6 +338,7 @@ def main() -> None:
         q_low, q_high = 0.35, 0.75
 
     stream_mode = build_stream_runs(objects, beat_length_ms, rng)
+    measure_buckets = compute_measure_energy_buckets(energy_at, offset_ms, measure_length_ms, objects[-1].time)
 
     # Start roughly centered.
     cur_x, cur_y = PLAYFIELD_W / 2.0, PLAYFIELD_H / 2.0
@@ -338,7 +377,7 @@ def main() -> None:
                 # unrelated object several beats away that just happened
                 # to precede it.
                 spacing = max(MIN_SPACING, min(MAX_SPACING, snap_distance(gap_ms, beat_length_ms, slider_multiplier)))
-                cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, rng)
+                cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng)
                 new_x, new_y, cur_angle = place_at_distance(cur_x, cur_y, spacing, cur_angle)
                 cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
                 stack_anchor = (cur_x, cur_y)
@@ -351,7 +390,7 @@ def main() -> None:
             # overlap along a straight line rather than zigzagging.
             if line_run_angle is None:
                 line_run_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
-                                             measure_length_ms, rng)
+                                             measure_length_ms, measure_buckets, rng)
             spacing = max(MIN_SPACING, min(MAX_SPACING, snap_distance(gap_ms, beat_length_ms, slider_multiplier)))
             new_x, new_y, line_run_angle = place_at_distance(cur_x, cur_y, spacing, line_run_angle)
             cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
@@ -359,7 +398,7 @@ def main() -> None:
         else:
             # Outside a stream: normal distance-snap + motif-driven flow.
             spacing = max(MIN_SPACING, min(MAX_SPACING, snap_distance(gap_ms, beat_length_ms, slider_multiplier)))
-            cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, rng)
+            cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng)
             new_x, new_y, cur_angle = place_at_distance(cur_x, cur_y, spacing, cur_angle)
             cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
 
@@ -376,7 +415,7 @@ def main() -> None:
                 # a more pronounced circular arc that actually guides the
                 # cursor through a real curve.
                 end_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
-                                        measure_length_ms, rng)
+                                        measure_length_ms, measure_buckets, rng)
                 end_x, end_y, end_angle = place_at_distance(cur_x, cur_y, segment_length, end_angle)
                 end_x, end_y = clamp_to_playfield(end_x, end_y, margin=MARGIN)
 
@@ -423,7 +462,7 @@ def main() -> None:
                 new_points = []
                 for _ in range(num_segments):
                     cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
-                                            measure_length_ms, rng)
+                                            measure_length_ms, measure_buckets, rng)
                     px, py, cur_angle = place_at_distance(cur_x, cur_y, segment_length, cur_angle)
                     cur_x, cur_y = clamp_to_playfield(px, py, margin=MARGIN)
                     new_points.append((cur_x, cur_y))

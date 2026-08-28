@@ -16,6 +16,20 @@ This produces, in --outdir (default: output/<song name>/):
 
 Pass --osz to also zip those three .osu files together with the MP3 into a
 single .osz package that can be dragged straight into osu!.
+
+Pass --restyle-only to re-run *just* Stage 3 against an already-generated
+Variety file with a new --seed — apply_style.py never touches timing, type,
+or object count, so this is how you get a different flow/angle pattern
+(and a fresh mix of stacks/lines, slider curves, etc.) without regenerating
+the rhythm at all:
+
+    python3 main.py song.mp3 --restyle-only "out/Song (Variety).osu" --seed 123
+
+Pass --easy to also derive a second, easier difficulty from the Styled
+beatmap (make_easy.py): lower Difficulty settings, and some of the
+song's repetitive (verse/chorus-like) stream density thinned into
+sliders. Non-repetitive sections (a bridge, an intro/outro) are left as
+the Styled difficulty had them.
 """
 
 from __future__ import annotations
@@ -26,6 +40,7 @@ import os
 import generate_base_beatmap
 import add_variety
 import apply_style
+import make_easy
 from build_osz import build_osz
 
 
@@ -41,6 +56,12 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=None,
                          help="Random seed for stages 2 and 3. Omit for a different map every run; "
                               "pass a fixed value (printed on every run) to reproduce it later.")
+    parser.add_argument("--restyle-only", metavar="VARIETY_OSU", default=None,
+                         help="Skip stages 1-2 and just re-run apply_style.py against this existing "
+                              "Variety .osu with a new --seed — a way to get a different flow/angle "
+                              "pattern without changing the rhythm at all.")
+    parser.add_argument("--easy", action="store_true",
+                         help="Also derive an easier difficulty from the Styled beatmap (make_easy.py).")
     args = parser.parse_args()
 
     if args.seed is None:
@@ -56,6 +77,24 @@ def main() -> None:
     base_path = os.path.join(outdir, f"{title} (Base).osu")
     variety_path = os.path.join(outdir, f"{title} (Variety).osu")
     styled_path = os.path.join(outdir, f"{title} (Styled).osu")
+    easy_path = os.path.join(outdir, f"{title} (Easy).osu")
+
+    if args.restyle_only:
+        variety_path = args.restyle_only
+        print("=== Stage 3 only: re-styling existing Variety file ===")
+        _run_module_main(apply_style, [variety_path, "--output", styled_path, "--audio", args.audio,
+                                        "--version", "Auto Styled", "--seed", str(args.seed)])
+        output_paths = [styled_path]
+        if args.easy:
+            print("=== Stage 4: make easy ===")
+            _run_module_main(make_easy, [styled_path, "--audio", args.audio, "--output", easy_path])
+            output_paths.append(easy_path)
+        if args.osz:
+            osz_path = os.path.join(outdir, f"{title}.osz")
+            build_osz(output_paths, args.audio, osz_path, audio_filename)
+            print(f"=== Packaged {osz_path} ===")
+        print("Done.")
+        return
 
     print("=== Stage 1: base beatmap ===")
     _run_module_main(generate_base_beatmap, [args.audio, "--output", base_path, "--title", title,
@@ -70,9 +109,16 @@ def main() -> None:
     _run_module_main(apply_style, [variety_path, "--output", styled_path, "--audio", args.audio,
                                     "--version", "Auto Styled", "--seed", str(args.seed)])
 
+    output_paths = [base_path, variety_path, styled_path]
+
+    if args.easy:
+        print("=== Stage 4: make easy ===")
+        _run_module_main(make_easy, [styled_path, "--audio", args.audio, "--output", easy_path])
+        output_paths.append(easy_path)
+
     if args.osz:
         osz_path = os.path.join(outdir, f"{title}.osz")
-        build_osz([base_path, variety_path, styled_path], args.audio, osz_path, audio_filename)
+        build_osz(output_paths, args.audio, osz_path, audio_filename)
         print(f"=== Packaged {osz_path} ===")
 
     print("Done.")
