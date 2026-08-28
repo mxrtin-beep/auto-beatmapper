@@ -19,8 +19,15 @@ and a bucket is "repetitive" if measures with that bucket occur in more
 than one separate stretch of the song — i.e. the same kind of section
 comes back more than once.
 
-Timing is never touched — only which objects exist (some circle pairs
-become sliders) and the Difficulty section's numbers.
+No object's *timing* is ever touched — only which objects exist (some
+circle pairs become sliders, some notes are dropped) and the Difficulty
+section's numbers, which are clamped to osu!'s own "Easy" difficulty
+guidelines (Ranking Criteria, Difficulty-specific > Easy). One of those
+numbers, SliderMultiplier, doubles as every slider's velocity — lowering
+it to respect the "avoid slider velocity above 1.3" guideline is the one
+case that requires touching hit objects at all, and even then only to
+rescale each slider's declared `length` so its *duration* is exactly
+preserved.
 
 Usage:
     python3 make_easy.py song_styled.osu --audio song.mp3 --output out/song_easy.osu
@@ -29,11 +36,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import math
 import os
 
 import random
 
-from beatmap_utils import HitObject, read_osu, slider_length_for_gap, write_osu
+from beatmap_utils import HitObject, clamp_to_playfield, read_osu, slider_length_for_gap, write_osu
 from apply_style import compute_energy_lookup, compute_measure_energy_buckets
 from add_variety import is_on_downbeat
 
@@ -81,29 +89,35 @@ def find_repetitive_measures(measure_buckets: dict[int, int], window: int = 4) -
 
 
 def easier_difficulty(difficulty: dict[str, str]) -> dict[str, str]:
-    """Lower HP/CS/OD/AR (larger circles, more reaction time, more forgiving timing/health).
+    """Lower HP/CS/OD/AR/SliderMultiplier to osu!'s own "Easy" difficulty
+    setting guidelines (Ranking Criteria, Difficulty-specific > Easy):
+    AR <= 5, OD/HP between 1 and 3, CS <= 4, slider velocity (SliderMultiplier)
+    not above 1.3. The Styled difficulty's own settings sit in Hard/Insane
+    range, so a small shift-then-clamp (as a previous version of this
+    function did) isn't enough to land in Easy's actual range — this clamps
+    straight to it.
 
-    Deliberately does *not* touch SliderMultiplier: every slider's `length`
-    in the map was chosen to produce a specific duration at the *original*
-    multiplier (that's the whole point of distance snap), so changing the
-    multiplier here would silently change every existing slider's timing —
-    exactly what this stage promises never to do. "Slower" instead comes
-    from thin_repetitive_streams below turning fast circle pairs into
-    calmer sliders, plus the extra reaction time from a lower AR.
+    Slider velocity is the one exception to "never touches timing": every
+    slider's `length` was chosen for a specific *duration* at the original
+    multiplier, and duration is proportional to length/multiplier — so the
+    caller must rescale every slider's `length` by (new multiplier / old
+    multiplier) alongside this change, which keeps every duration exactly
+    what it was (see main()). Difficulty is not touched.
     """
 
-    def shift(key: str, delta: float, lo: float, hi: float) -> str:
+    def clamp(key: str, lo: float, hi: float) -> str:
         try:
             value = float(difficulty.get(key, (lo + hi) / 2))
         except ValueError:
             value = (lo + hi) / 2
-        return f"{max(lo, min(hi, value + delta)):.1f}"
+        return f"{max(lo, min(hi, value)):.1f}"
 
     easier = dict(difficulty)
-    easier["HPDrainRate"] = shift("HPDrainRate", -2.0, 1.0, 7.0)
-    easier["CircleSize"] = shift("CircleSize", -1.5, 2.0, 5.0)
-    easier["OverallDifficulty"] = shift("OverallDifficulty", -2.0, 1.0, 6.0)
-    easier["ApproachRate"] = shift("ApproachRate", -2.0, 3.0, 7.0)
+    easier["HPDrainRate"] = clamp("HPDrainRate", 1.0, 3.0)
+    easier["CircleSize"] = clamp("CircleSize", 2.0, 4.0)
+    easier["OverallDifficulty"] = clamp("OverallDifficulty", 1.0, 3.0)
+    easier["ApproachRate"] = clamp("ApproachRate", 2.0, 5.0)
+    easier["SliderMultiplier"] = clamp("SliderMultiplier", 0.8, 1.3)
     return easier
 
 
@@ -152,8 +166,24 @@ def thin_repetitive_streams(objects: list[HitObject], beat_length_ms: float, sli
         precisely on nxt's original timestamp. There is nothing left to
         drift off-grid or overlap the object after it, because "the grid"
         here just means "where these two objects already, legally, were".
+        A pair apply_style.py placed in a "stack" (identical x, y — see
+        apply_style.py's build_stream_runs) is skipped instead of merged:
+        a straight "L" slider between two identical points is a real
+        zero-length slider — its declared `length` (from the time gap)
+        would no longer match its actual geometric path length of zero,
+        which apply_style.py's own "slider shape consistency" rule exists
+        to prevent.
       * Dropping a note removes an object; it can never overlap anything,
-        since there's nothing left there to overlap.
+        since there's nothing left there to overlap. But since apply_style.py
+        positioned every object via distance-snap against the object *before*
+        it, removing one changes the time gap on both sides of the hole
+        without updating anyone's position — left alone, the very next kept
+        object would sit exactly where it did before, now visually too close
+        for the larger time gap it's actually separated by. Whenever a note
+        was just dropped, the next object kept is re-snapped to the correct
+        distance from its new predecessor, along the same direction
+        apply_style.py originally sent it in (measured against the dropped
+        note it followed), so distance-snap still holds across the hole.
 
     A quarter-beat-or-less gap between two circles is exactly what
     add_variety.py calls a stream note — that's the density this targets.
@@ -162,6 +192,7 @@ def thin_repetitive_streams(objects: list[HitObject], beat_length_ms: float, sli
     """
     quarter_beat_ms = beat_length_ms / 4.0
     threshold = quarter_beat_ms + 1.0
+    px_per_beat = slider_multiplier * 100.0
 
     def measure_of(time_ms: float) -> int:
         return int((time_ms - offset_ms) // measure_length_ms)
@@ -169,28 +200,55 @@ def thin_repetitive_streams(objects: list[HitObject], beat_length_ms: float, sli
     result: list[HitObject] = []
     i = 0
     n = len(objects)
+    dropped_since_last_keep = False
     while i < n:
         obj = objects[i]
         has_next = i + 1 < n
         gap_ms = (objects[i + 1].time - obj.time) if has_next else None
         is_dense_stream_note = not obj.is_slider and has_next and gap_ms <= threshold
         in_repetitive_section = is_dense_stream_note and measure_of(obj.time) in repetitive_measures
+        is_stacked_pair = has_next and (objects[i + 1].x, objects[i + 1].y) == (obj.x, obj.y)
 
-        if in_repetitive_section and not objects[i + 1].is_slider:
+        if in_repetitive_section and not objects[i + 1].is_slider and not is_stacked_pair:
             nxt = objects[i + 1]
             length = slider_length_for_gap(obj.time, nxt.time, beat_length_ms, slider_multiplier)
             result.append(HitObject(
                 x=obj.x, y=obj.y, time=obj.time, is_new_combo=obj.is_new_combo, hitsound=obj.hitsound,
                 is_slider=True, curve_type="L", points=[(nxt.x, nxt.y)], slides=1, length=length,
             ))
+            dropped_since_last_keep = False
             i += 2
             continue
 
         if (in_repetitive_section and result and not result[-1].is_slider
                 and rng.random() < drop_probability):
+            dropped_since_last_keep = True
             i += 1  # drop this note entirely
             continue
 
+        if dropped_since_last_keep and result and i > 0:
+            # Re-snap against the new predecessor, keeping the direction
+            # this object was already sent in from the note that got
+            # dropped (objects[i - 1]) so the flow's shape doesn't change,
+            # only how far this one hop travels. If this object is itself a
+            # slider, its curve points (absolute coordinates, not relative
+            # to its head) are translated by the same offset as its head so
+            # the curve stays attached to it instead of being left behind.
+            prev = result[-1]
+            dropped_pred = objects[i - 1]
+            angle = math.atan2(obj.y - dropped_pred.y, obj.x - dropped_pred.x)
+            new_gap_ms = max(1.0, obj.time - prev.time)
+            spacing = px_per_beat * (new_gap_ms / beat_length_ms)
+            new_x, new_y = clamp_to_playfield(prev.x + spacing * math.cos(angle),
+                                               prev.y + spacing * math.sin(angle))
+            delta_x, delta_y = new_x - obj.x, new_y - obj.y
+            new_points = [clamp_to_playfield(px + delta_x, py + delta_y) for px, py in obj.points]
+            obj = HitObject(x=new_x, y=new_y, time=obj.time, is_new_combo=obj.is_new_combo,
+                             hitsound=obj.hitsound, is_slider=obj.is_slider, curve_type=obj.curve_type,
+                             points=new_points, slides=obj.slides, length=obj.length,
+                             edge_hitsounds=obj.edge_hitsounds, edge_samplesets=obj.edge_samplesets)
+
+        dropped_since_last_keep = False
         result.append(obj)
         i += 1
     return result
@@ -265,14 +323,31 @@ def main() -> None:
     regularize_hitsounds(objects, offset_ms, measure_length_ms, repetitive_measures)
     recompute_combos(objects, offset_ms, measure_length_ms)
 
-    bm.hit_objects = objects
     bm.difficulty = easier_difficulty(bm.difficulty)
+    new_slider_multiplier = bm.slider_multiplier
+
+    # Lowering SliderMultiplier (to respect the Easy-tier "avoid slider
+    # velocity above 1.3" guideline) would otherwise silently change every
+    # slider's duration, since duration is proportional to length/multiplier
+    # — rescale every slider's declared length by the same ratio so the
+    # *duration* every slider already has is exactly preserved. This is the
+    # one case where a Difficulty-section change requires touching hit
+    # objects to keep the "never touches timing" promise.
+    if new_slider_multiplier != slider_multiplier:
+        ratio = new_slider_multiplier / slider_multiplier
+        for obj in objects:
+            if obj.is_slider:
+                obj.length *= ratio
+
+    bm.hit_objects = objects
 
     # Sanity check: thinning must never introduce an overlap, judged the same
     # way the .osu file itself will be read back (see add_variety.py's own
     # version of this check for why raw floats aren't the right comparison).
+    # Uses the *new* multiplier, matching what bm.difficulty (and so the
+    # written file) now actually holds.
     for a, b in zip(objects, objects[1:]):
-        a_end = round(a.time) + a.duration_ms(beat_length_ms, slider_multiplier)
+        a_end = round(a.time) + a.duration_ms(beat_length_ms, new_slider_multiplier)
         if round(b.time) < a_end - 1e-6:
             raise AssertionError(f"Overlap introduced at {a.time:.1f}ms while thinning for Easy mode.")
 

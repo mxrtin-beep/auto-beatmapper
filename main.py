@@ -16,7 +16,10 @@ This produces, in --outdir (default: output/<song name>/):
     <Song> (Easy).osu
 
 Pass --osz to also zip those .osu files together with the MP3 into a
-single .osz package that can be dragged straight into osu!.
+single .osz package that can be dragged straight into osu! — once the
+.osz is built, the intermediate .osu files are deleted (they're fully
+contained in the .osz already); pass --keep-osu-files to keep them
+around too.
 
 Pass --restyle-only to re-run *just* Stage 3 against an already-generated
 Variety file with a new --seed — apply_style.py never touches timing, type,
@@ -56,6 +59,22 @@ def main() -> None:
     parser.add_argument("--outdir", default=None,
                          help="Directory to write the .osu files into (default: output/<title>/).")
     parser.add_argument("--osz", action="store_true", help="Also package the result into a .osz file.")
+    parser.add_argument("--keep-osu-files", action="store_true",
+                         help="Keep the intermediate .osu files after building the .osz (default: "
+                              "delete them, since the .osz already contains everything they hold). "
+                              "Ignored if --osz isn't passed — the .osu files are the only output then.")
+    parser.add_argument("--spacing", type=float, default=None,
+                         help="Forwarded to apply_style.py's --spacing (jump/spacing distance "
+                              "multiplier). Omit to use apply_style.py's own default.")
+    parser.add_argument("--curviness", type=float, default=None,
+                         help="Forwarded to apply_style.py's --curviness (0-1, how curvy sliders "
+                              "feel). Omit to use apply_style.py's own default.")
+    parser.add_argument("--stack-probability", type=float, default=None,
+                         help="Forwarded to apply_style.py's --stack-probability. Omit to use "
+                              "apply_style.py's own default.")
+    parser.add_argument("--angle-jitter", type=float, default=None,
+                         help="Forwarded to apply_style.py's --angle-jitter. Omit to use "
+                              "apply_style.py's own default.")
     parser.add_argument("--seed", type=int, default=None,
                          help="Random seed for stages 2 and 3. Omit for a different map every run; "
                               "pass a fixed value (printed on every run) to reproduce it later.")
@@ -73,6 +92,13 @@ def main() -> None:
         args.seed = random.SystemRandom().randrange(2**32)
     print(f"Using seed: {args.seed}")
 
+    style_extra_args: list[str] = []
+    for flag, value in (("--spacing", args.spacing), ("--curviness", args.curviness),
+                         ("--stack-probability", args.stack_probability),
+                         ("--angle-jitter", args.angle_jitter)):
+        if value is not None:
+            style_extra_args += [flag, str(value)]
+
     title = args.title or os.path.splitext(os.path.basename(args.audio))[0]
     outdir = args.outdir or os.path.join("output", title)
     os.makedirs(outdir, exist_ok=True)
@@ -87,7 +113,7 @@ def main() -> None:
         variety_path = args.restyle_only
         print("=== Stage 3 only: re-styling existing Variety file ===")
         _run_module_main(apply_style, [variety_path, "--output", styled_path, "--audio", args.audio,
-                                        "--version", "Auto Styled", "--seed", str(args.seed)])
+                                        "--version", "Auto Styled", "--seed", str(args.seed)] + style_extra_args)
         output_paths = [styled_path]
         if args.easy:
             print("=== Stage 4: make easy ===")
@@ -97,6 +123,7 @@ def main() -> None:
             osz_path = os.path.join(outdir, f"{title}.osz")
             build_osz(output_paths, args.audio, osz_path, audio_filename)
             print(f"=== Packaged {osz_path} ===")
+            _cleanup_osu_files(output_paths, args.keep_osu_files)
         print("Done.")
         return
 
@@ -111,7 +138,7 @@ def main() -> None:
 
     print("=== Stage 3: apply style ===")
     _run_module_main(apply_style, [variety_path, "--output", styled_path, "--audio", args.audio,
-                                    "--version", "Auto Styled", "--seed", str(args.seed)])
+                                    "--version", "Auto Styled", "--seed", str(args.seed)] + style_extra_args)
 
     output_paths = [base_path, variety_path, styled_path]
 
@@ -124,8 +151,24 @@ def main() -> None:
         osz_path = os.path.join(outdir, f"{title}.osz")
         build_osz(output_paths, args.audio, osz_path, audio_filename)
         print(f"=== Packaged {osz_path} ===")
+        _cleanup_osu_files(output_paths, args.keep_osu_files)
 
     print("Done.")
+
+
+def _cleanup_osu_files(paths: list[str], keep: bool) -> None:
+    """Delete the intermediate .osu files once they're safely packaged into
+    the .osz — the .osz already contains everything they hold, so keeping
+    them around by default is just clutter. Skipped entirely if --keep-osu-files
+    was passed. Only ever called after a successful build_osz(), so the .osz
+    is guaranteed to exist before any .osu file is removed."""
+    if keep:
+        return
+    for path in paths:
+        try:
+            os.remove(path)
+        except OSError as e:
+            print(f"Warning: couldn't remove {path}: {e}")
 
 
 def _run_module_main(module, argv: list[str]) -> None:

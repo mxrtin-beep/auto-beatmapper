@@ -7,13 +7,16 @@ their timing, type, or count. This is purely about how the map *feels* to
 play, following common osu! "rules of thumb":
 
   * Distance snap — for two objects a half beat or more apart, the on-screen
-    distance between them is *exactly* what a slider spanning that same
-    time gap would be (SliderMultiplier * 100 px/beat * beats of gap) — the
-    same formula the game itself uses for a slider's length, so a circle
-    jump reads with the same "speed" as a slider covering the same time.
-    The same time gap always produces the same distance, everywhere in the
-    song; energy shapes the turn-angle *pattern* (see below), not the size
-    of the jump.
+    distance between them is what a slider spanning that same time gap
+    would be (SliderMultiplier * 100 px/beat * beats of gap, scaled by
+    `--spacing`, default 1.0 keeps the base formula) — the same formula the
+    game itself uses for a slider's length, so a circle jump reads with the
+    same "speed" as a slider covering the same time. A given time gap
+    produces (about) the same distance everywhere in the song — a small
+    seeded wobble (a few percent) keeps jumps from feeling mechanically
+    identical every time the same gap recurs, without meaningfully breaking
+    the snap; energy shapes the turn-angle *pattern* (see below), not the
+    size of the jump.
   * Streams/stacks — a run of circles a quarter beat or less apart (up to 8
     long; add_variety.py itself never produces a longer one) is positioned
     as a single deliberate unit in one of exactly two ways: every circle in
@@ -272,6 +275,21 @@ def snap_distance(gap_ms: float, beat_length_ms: float, slider_multiplier: float
     return slider_multiplier * 100.0 * (gap_ms / beat_length_ms)
 
 
+def styled_spacing(gap_ms: float, beat_length_ms: float, slider_multiplier: float,
+                    spacing_scale: float, rng: random.Random, jitter_frac: float = 0.05) -> float:
+    """`snap_distance`, scaled by `--spacing` and given a small seeded wobble.
+
+    The wobble is tiny on purpose (a few percent) and drawn from the run's
+    own seeded `rng` — enough that jump distances don't feel mechanically
+    identical every time the same time gap recurs, without meaningfully
+    breaking distance snap (a checker measuring "does this gap's spacing
+    match this gap's time" would still call it a match) or losing
+    reproducibility: the same seed always produces the same wobble.
+    """
+    base = snap_distance(gap_ms, beat_length_ms, slider_multiplier) * spacing_scale
+    return base * (1.0 + rng.uniform(-jitter_frac, jitter_frac))
+
+
 def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: random.Random, seed: int,
                        offset_ms: float = 0.0, measure_length_ms: float = 0.0,
                        measure_buckets: dict[int, int] | None = None,
@@ -293,21 +311,30 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
     re-anchors a fresh stack (or picks a fresh line direction) instead of
     silently continuing the previous run's.
 
-    A stack is only ever "stack" for its first half beat of elapsed time —
-    beyond that it continues as "line" — so a literal stack (everything
-    piled on one spot) never lasts longer than that, while a run can still
-    go the rest of the way to the 8-circle cap as an overlapping line.
+    A run picks exactly one mode for its *entire* length — never stack for
+    part of it and line for the rest. Mixing the two within what reads as
+    one run is genuinely confusing to a player (two circles piled on each
+    other followed by the same run suddenly fanning out into a line reads
+    as two different rhythms that happen to look the same at the seam),
+    and it's also what osu!'s own ranking criteria calls out: stacks are
+    fine, but switching stack behavior mid-pattern is the specific thing
+    to avoid.
 
-    Which of the two a given run picks is keyed to its measure's energy
+    A run is only *eligible* for "stack" if its whole span (first member to
+    last) is half a beat or less — piling more than that much elapsed time
+    onto one spot is a real, fully-overlapping stack the ranking criteria's
+    Hard difficulty rule forbids ("objects 1/2 of a beat apart or less must
+    not fully overlap" — days notwithstanding for shorter gaps). A run
+    longer than that is always "line" instead, in full, not partially.
+
+    Which of the two an eligible run picks is keyed to its measure's energy
     bucket (the same signal apply_style's motifs use), not a fresh coin
     flip every time: a bucket-seeded RNG makes the choice, so every run
     that lands in "this kind of section" (a verse's second and third
     repeat, say) reuses the *same* stack-vs-line choice every time it
     recurs, instead of re-rolling and looking different on each repeat.
     `stack_probability` still controls the overall mix (both are still
-    good, per the design brief — this only makes the mix repeat
-    consistently within a given section rather than changing which mix it
-    is).
+    good, per the design brief).
     """
     quarter_beat_ms = beat_length_ms / 4.0
     half_beat_ms = beat_length_ms / 2.0
@@ -328,17 +355,20 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
         run_len = j - i
         if run_len >= 2:
             run_start_time = objects[i].time
-            if measure_buckets and measure_length_ms:
-                measure_index = int((run_start_time - offset_ms) // measure_length_ms)
-                bucket = measure_buckets.get(measure_index, 0)
-                bucket_rng = random.Random(f"stream_mode:{bucket}:{seed}")
-                base_mode = "stack" if bucket_rng.random() < stack_probability else "line"
+            run_span_ms = objects[j - 1].time - run_start_time
+            stack_eligible = run_span_ms <= half_beat_ms
+            if stack_eligible:
+                if measure_buckets and measure_length_ms:
+                    measure_index = int((run_start_time - offset_ms) // measure_length_ms)
+                    bucket = measure_buckets.get(measure_index, 0)
+                    bucket_rng = random.Random(f"stream_mode:{bucket}:{seed}")
+                    base_mode = "stack" if bucket_rng.random() < stack_probability else "line"
+                else:
+                    base_mode = "stack" if rng.random() < stack_probability else "line"
             else:
-                base_mode = "stack" if rng.random() < stack_probability else "line"
+                base_mode = "line"
             for k in range(i, j):
-                elapsed = objects[k].time - run_start_time
-                mode = base_mode if (base_mode == "line" or elapsed < half_beat_ms) else "line"
-                mode_of[k] = (run_id, mode)
+                mode_of[k] = (run_id, base_mode)
             run_id += 1
         i = j
     return mode_of
@@ -369,8 +399,14 @@ def main() -> None:
                               "(and makes the bow of every curved slider more pronounced too). "
                               "0.5 (default) matches the original straight/gentle-arc/pronounced-arc "
                               "mix.")
+    parser.add_argument("--spacing", type=float, default=1.15,
+                         help="Multiplier on jump/spacing distance (1.0 = the base distance-snap "
+                              "formula; default 1.15 opens objects up a bit, since 1.0 alone read "
+                              "as too close together). Ranking-criteria guidelines recommend "
+                              "keeping this within 0.8-1.3x of the base formula.")
     args = parser.parse_args()
     args.curviness = max(0.0, min(1.0, args.curviness))
+    args.spacing = max(0.1, args.spacing)
 
     if args.seed is None:
         args.seed = random.SystemRandom().randrange(2**32)
@@ -446,7 +482,7 @@ def main() -> None:
                 # location arbitrary, and could even coincide with an
                 # unrelated object several beats away that just happened
                 # to precede it.
-                spacing = max(MIN_SPACING, min(MAX_SPACING, snap_distance(gap_ms, beat_length_ms, slider_multiplier)))
+                spacing = max(MIN_SPACING, min(MAX_SPACING, styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing, rng)))
                 cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
                 new_x, new_y, cur_angle = place_at_distance(cur_x, cur_y, spacing, cur_angle)
                 cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
@@ -461,13 +497,13 @@ def main() -> None:
             if line_run_angle is None:
                 line_run_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
                                              measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
-            spacing = max(MIN_SPACING, min(MAX_SPACING, snap_distance(gap_ms, beat_length_ms, slider_multiplier)))
+            spacing = max(MIN_SPACING, min(MAX_SPACING, styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing, rng)))
             new_x, new_y, line_run_angle = place_at_distance(cur_x, cur_y, spacing, line_run_angle)
             cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
             cur_angle = line_run_angle
         else:
             # Outside a stream: normal distance-snap + motif-driven flow.
-            spacing = max(MIN_SPACING, min(MAX_SPACING, snap_distance(gap_ms, beat_length_ms, slider_multiplier)))
+            spacing = max(MIN_SPACING, min(MAX_SPACING, styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing, rng)))
             cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
             new_x, new_y, cur_angle = place_at_distance(cur_x, cur_y, spacing, cur_angle)
             cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
@@ -490,6 +526,11 @@ def main() -> None:
                 end_x, end_y = clamp_to_playfield(end_x, end_y, margin=MARGIN)
 
                 shape_roll = rng.random()
+                # A tiny seeded wobble on the bow itself, same reasoning as
+                # styled_spacing: keeps curves from looking mechanically
+                # identical whenever curviness happens to land the same
+                # shape twice, while staying reproducible for a given seed.
+                bow_jitter = 1.0 + rng.uniform(-0.1, 0.1)
                 if shape_roll < straight_prob:
                     obj.curve_type = "L"
                     obj.points = [(end_x, end_y)]
@@ -505,7 +546,7 @@ def main() -> None:
                         # to collinear, a Bezier is mathematically
                         # guaranteed to stay within their convex hull.
                         obj.curve_type = "B"
-                        bow = min(40.0 * bow_scale, segment_length * 0.25 * bow_scale)
+                        bow = min(40.0 * bow_scale, segment_length * 0.25 * bow_scale) * bow_jitter
                     else:
                         # A real circular arc: safe here specifically
                         # because the bow is deliberately large relative to
@@ -514,7 +555,7 @@ def main() -> None:
                         # to balloon outward) — a pronounced, legible curve
                         # that actually guides the cursor around a bend.
                         obj.curve_type = "P"
-                        bow = min(70.0 * bow_scale, segment_length * 0.45 * bow_scale)
+                        bow = min(70.0 * bow_scale, segment_length * 0.45 * bow_scale) * bow_jitter
                     bow_x, bow_y = clamp_to_playfield(mid_x + bow * math.cos(perp_angle),
                                                        mid_y + bow * math.sin(perp_angle), margin=MARGIN)
                     obj.points = [(bow_x, bow_y), (end_x, end_y)]
