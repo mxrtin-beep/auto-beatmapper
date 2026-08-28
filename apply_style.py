@@ -383,11 +383,19 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=None,
                          help="Random seed. Omit for different styling every run; pass a fixed "
                               "value (printed on every run) to reproduce the exact same map later.")
-    parser.add_argument("--angle-jitter", type=float, default=4.0,
+    parser.add_argument("--temperature", type=float, default=0.5,
+                         help="How creative vs. structured the styling gets, 0-1 (default 0.5). "
+                              "Scales --angle-jitter, how much a section's curviness can drift from "
+                              "the --curviness baseline, and how strongly the path wanders around "
+                              "the playfield, all together — low is tight and predictable, high is "
+                              "loose and varied. Passing one of those flags explicitly overrides "
+                              "temperature's value for that one knob only.")
+    parser.add_argument("--angle-jitter", type=float, default=None,
                          help="Degrees of random jitter added on top of each motif's turn angle "
                               "(circles and slider curves alike). Widening this only changes "
                               "angles/flow, never timing, note count, or object type — a way to "
-                              "get more (or less) variety in the flow without being restrictive.")
+                              "get more (or less) variety in the flow without being restrictive. "
+                              "Defaults to a value derived from --temperature (roughly 1-10).")
     parser.add_argument("--stack-probability", type=float, default=0.5,
                          help="Overall mix between stream runs that stack in one spot and runs "
                               "that trace a straight line (0 = always line, 1 = always stack). "
@@ -399,14 +407,19 @@ def main() -> None:
                               "(and makes the bow of every curved slider more pronounced too). "
                               "0.5 (default) matches the original straight/gentle-arc/pronounced-arc "
                               "mix.")
-    parser.add_argument("--spacing", type=float, default=1.15,
+    parser.add_argument("--spacing", type=float, default=1.3,
                          help="Multiplier on jump/spacing distance (1.0 = the base distance-snap "
-                              "formula; default 1.15 opens objects up a bit, since 1.0 alone read "
-                              "as too close together). Ranking-criteria guidelines recommend "
-                              "keeping this within 0.8-1.3x of the base formula.")
+                              "formula; default 1.3, the top of the ranking-criteria-recommended "
+                              "range, since lower values still read as too close together / "
+                              "prone to crisscrossing).")
     args = parser.parse_args()
     args.curviness = max(0.0, min(1.0, args.curviness))
     args.spacing = max(0.1, args.spacing)
+    args.temperature = max(0.0, min(1.0, args.temperature))
+    if args.angle_jitter is None:
+        args.angle_jitter = 1.0 + args.temperature * 9.0  # 1-10 degrees
+    curviness_variance = 0.15 + args.temperature * 0.4  # 0.15-0.55
+    wander_strength = 0.12 + args.temperature * 0.28  # 0.12-0.40
 
     if args.seed is None:
         args.seed = random.SystemRandom().randrange(2**32)
@@ -448,7 +461,8 @@ def main() -> None:
     bucket_curviness: dict[int, float] = {}
     for bucket in range(NUM_ENERGY_BUCKETS):
         bucket_rng = random.Random(f"curviness:{bucket}:{args.seed}")
-        bucket_curviness[bucket] = max(0.0, min(1.0, args.curviness + bucket_rng.uniform(-0.35, 0.35)))
+        bucket_curviness[bucket] = max(0.0, min(1.0, args.curviness
+                                                 + bucket_rng.uniform(-curviness_variance, curviness_variance)))
 
     def shape_mix_for(time_ms: float) -> tuple[float, float, float, float]:
         """(curviness, straight_prob, bezier_prob, bow_scale) for the slider
@@ -482,12 +496,11 @@ def main() -> None:
     wander_rng = random.Random(f"wander:{args.seed}")
     wander_target = (wander_rng.uniform(MARGIN, PLAYFIELD_W - MARGIN),
                       wander_rng.uniform(MARGIN, PLAYFIELD_H - MARGIN))
-    WANDER_STRENGTH = 0.18
 
     def wander_nudge(angle: float, x: float, y: float) -> float:
         bias = math.atan2(wander_target[1] - y, wander_target[0] - x)
         diff = (bias - angle + math.pi) % (2 * math.pi) - math.pi
-        return angle + diff * WANDER_STRENGTH
+        return angle + diff * wander_strength
 
     for idx, obj in enumerate(objects):
         if prev_end_time is None:

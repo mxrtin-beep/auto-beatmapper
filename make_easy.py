@@ -49,7 +49,8 @@ import os
 
 import random
 
-from beatmap_utils import HitObject, clamp_to_playfield, read_osu, slider_length_for_gap, write_osu
+from beatmap_utils import (HitObject, PLAYFIELD_H, PLAYFIELD_W, clamp_to_playfield, read_osu,
+                            slider_length_for_gap, write_osu)
 from apply_style import compute_energy_lookup, compute_measure_energy_buckets
 from add_variety import is_on_downbeat
 
@@ -91,11 +92,19 @@ TIER_SETTINGS: dict[str, dict[str, tuple[float, float] | None]] = {
 # scope="repetitive" only thins measures find_repetitive_measures() flags;
 # scope="everywhere" thins every eligible measure; scope=None skips
 # thinning entirely (Insane is exactly the Styled difficulty).
+#
+# merge_probability gates merging too, not just dropping — a repetitive
+# dance/pop track can have *most* of its measures flagged repetitive, so
+# "merge every eligible pair, drop some extra" left Hard (repetitive-only)
+# thinning nearly as much of the song as Normal (everywhere), converging
+# both toward a similar difficulty instead of a real spread. Scaling how
+# much of the eligible density even gets merged, tier by tier, is what
+# actually keeps Hard close to Insane's density and Easy far from it.
 TIER_THINNING: dict[str, dict | None] = {
     "insane": None,
-    "hard": {"scope": "repetitive", "drop_probability": 0.08},
-    "normal": {"scope": "everywhere", "drop_probability": 0.20},
-    "easy": {"scope": "everywhere", "drop_probability": 0.32},
+    "hard": {"scope": "repetitive", "merge_probability": 0.35, "drop_probability": 0.05},
+    "normal": {"scope": "everywhere", "merge_probability": 0.65, "drop_probability": 0.15},
+    "easy": {"scope": "everywhere", "merge_probability": 0.9, "drop_probability": 0.30},
 }
 
 
@@ -192,10 +201,34 @@ def recompute_combos(objects: list[HitObject], offset_ms: float, measure_length_
             combo_count += 1
 
 
+def _safe_translation_fraction(points: list[tuple[float, float]], dx: float, dy: float,
+                                margin: int = 20) -> float:
+    """The largest f in [0, 1] such that every point in `points`, shifted by
+    (f*dx, f*dy), still lands within the playfield margin on both axes.
+
+    Used to translate a whole slider (head + curve points) as one rigid
+    unit: scaling the *same* delta down for every point can't distort the
+    shape (unlike clamping each point independently), so whatever curve the
+    points describe is guaranteed to stay exactly as originally shaped,
+    just shifted less far.
+    """
+    lo_x, hi_x = margin, PLAYFIELD_W - margin
+    lo_y, hi_y = margin, PLAYFIELD_H - margin
+    fraction = 1.0
+    for px, py in points:
+        for p, d, lo, hi in ((px, dx, lo_x, hi_x), (py, dy, lo_y, hi_y)):
+            if d == 0:
+                continue
+            # p + f*d must stay in [lo, hi] -> f in [(lo-p)/d, (hi-p)/d] (order depends on sign of d)
+            f_lo, f_hi = sorted([(lo - p) / d, (hi - p) / d])
+            fraction = min(fraction, max(0.0, f_hi))
+    return max(0.0, fraction)
+
+
 def thin_repetitive_streams(objects: list[HitObject], beat_length_ms: float, slider_multiplier: float,
                              offset_ms: float, measure_length_ms: float,
                              eligible_measures: set[int] | None, rng: random.Random,
-                             drop_probability: float = 0.12) -> list[HitObject]:
+                             drop_probability: float = 0.12, merge_probability: float = 1.0) -> list[HitObject]:
     """Thin closely-spaced circles in `eligible_measures` (or every measure,
     if None — Normal/Easy thin everywhere; Hard passes just the repetitive
     ones), two ways: merge an adjacent pair into a slider, or drop a note
@@ -257,7 +290,8 @@ def thin_repetitive_streams(objects: list[HitObject], beat_length_ms: float, sli
         is_eligible_note = is_dense_stream_note and is_eligible(obj.time)
         is_stacked_pair = has_next and (objects[i + 1].x, objects[i + 1].y) == (obj.x, obj.y)
 
-        if is_eligible_note and not objects[i + 1].is_slider and not is_stacked_pair:
+        if (is_eligible_note and not objects[i + 1].is_slider and not is_stacked_pair
+                and rng.random() < merge_probability):
             nxt = objects[i + 1]
             length = slider_length_for_gap(obj.time, nxt.time, beat_length_ms, slider_multiplier)
             result.append(HitObject(
@@ -279,18 +313,31 @@ def thin_repetitive_streams(objects: list[HitObject], beat_length_ms: float, sli
             # this object was already sent in from the note that got
             # dropped (objects[i - 1]) so the flow's shape doesn't change,
             # only how far this one hop travels. If this object is itself a
-            # slider, its curve points (absolute coordinates, not relative
-            # to its head) are translated by the same offset as its head so
-            # the curve stays attached to it instead of being left behind.
+            # slider, it's translated as one rigid unit — head and every
+            # curve point shifted by the *same* offset, scaled down (never
+            # per-point clamped) just enough that all of them stay in
+            # bounds. Clamping each point independently would distort the
+            # shape (points moving by different amounts), and a distorted
+            # "P" (perfect-circle) or "B" (Bezier) curve's actual rendered
+            # arc can bulge well outside its own anchor points even when
+            # every anchor is individually in bounds — the same failure
+            # mode apply_style.py's own curve-shape comments warn about.
+            # A uniformly-scaled rigid shift can't distort anything, so
+            # this can't happen here.
             prev = result[-1]
             dropped_pred = objects[i - 1]
             angle = math.atan2(obj.y - dropped_pred.y, obj.x - dropped_pred.x)
             new_gap_ms = max(1.0, obj.time - prev.time)
             spacing = px_per_beat * (new_gap_ms / beat_length_ms)
-            new_x, new_y = clamp_to_playfield(prev.x + spacing * math.cos(angle),
-                                               prev.y + spacing * math.sin(angle))
-            delta_x, delta_y = new_x - obj.x, new_y - obj.y
-            new_points = [clamp_to_playfield(px + delta_x, py + delta_y) for px, py in obj.points]
+            target_x = prev.x + spacing * math.cos(angle)
+            target_y = prev.y + spacing * math.sin(angle)
+            delta_x, delta_y = target_x - obj.x, target_y - obj.y
+
+            all_points = [(obj.x, obj.y)] + list(obj.points)
+            fraction = _safe_translation_fraction(all_points, delta_x, delta_y)
+            new_x, new_y = clamp_to_playfield(obj.x + fraction * delta_x, obj.y + fraction * delta_y)
+            new_points = [clamp_to_playfield(px + fraction * delta_x, py + fraction * delta_y)
+                          for px, py in obj.points]
             obj = HitObject(x=new_x, y=new_y, time=obj.time, is_new_combo=obj.is_new_combo,
                              hitsound=obj.hitsound, is_slider=obj.is_slider, curve_type=obj.curve_type,
                              points=new_points, slides=obj.slides, length=obj.length,
@@ -304,10 +351,17 @@ def thin_repetitive_streams(objects: list[HitObject], beat_length_ms: float, sli
 
 def regularize_hitsounds(objects: list[HitObject], offset_ms: float, measure_length_ms: float,
                           eligible_measures: set[int] | None) -> None:
-    """In eligible measures (or every measure, if None), settle on one predictable
-    accent (downbeat only) instead of the styled map's fuller finish/clap/whistle
-    variety — easier to anticipate. Mutates in place; non-eligible measures (and
-    slider repeats) are left exactly as they were."""
+    """In eligible measures (or every measure, if None), guarantee a
+    predictable downbeat accent — easier to anticipate. Mutates in place;
+    this only ever *adds* a finish accent on downbeats that don't already
+    have one, never removes an existing accent elsewhere in the measure:
+    forcing every non-downbeat hit down to a plain HS_NORMAL (an earlier
+    version of this function did) can silence long, otherwise fine
+    stretches of the styled map's own accenting whenever eligible_measures
+    covers most or all of the song (Normal/Easy's "everywhere" scope),
+    which is exactly the "long periods without hitsounds" a checker (or a
+    player) would flag. Non-eligible measures (and slider repeats) are
+    left exactly as they were either way."""
 
     def is_downbeat(time_ms: float) -> bool:
         rel = (time_ms - offset_ms) % measure_length_ms
@@ -319,10 +373,12 @@ def regularize_hitsounds(objects: list[HitObject], offset_ms: float, measure_len
     for obj in objects:
         if eligible_measures is not None and measure_of(obj.time) not in eligible_measures:
             continue
-        hs = HS_FINISH if is_downbeat(obj.time) else HS_NORMAL
-        obj.hitsound = hs
+        if not is_downbeat(obj.time):
+            continue
+        obj.hitsound = HS_FINISH
         if obj.is_slider:
-            obj.edge_hitsounds = [hs] + [HS_NORMAL] * obj.slides
+            tail = obj.edge_hitsounds[-1] if obj.edge_hitsounds else HS_NORMAL
+            obj.edge_hitsounds = [HS_FINISH] + [tail] * obj.slides
 
 
 def main() -> None:
@@ -375,10 +431,11 @@ def main() -> None:
             eligible_measures = None  # thin everywhere
 
         drop_probability = args.drop_probability if args.drop_probability is not None else thinning["drop_probability"]
+        merge_probability = thinning["merge_probability"]
         before = len(objects)
         objects = thin_repetitive_streams(objects, beat_length_ms, slider_multiplier, offset_ms,
                                            measure_length_ms, eligible_measures, rng,
-                                           drop_probability=drop_probability)
+                                           drop_probability=drop_probability, merge_probability=merge_probability)
         print(f"Thinned {before - len(objects)} object(s) by merging stream pairs into sliders or dropping them")
 
         regularize_hitsounds(objects, offset_ms, measure_length_ms, eligible_measures)

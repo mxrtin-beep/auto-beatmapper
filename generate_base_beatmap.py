@@ -56,17 +56,17 @@ def detect_bpm_and_offset(y: np.ndarray, sr: int) -> tuple[float, float]:
 
     1. A broadband beat tracker gives a rough starting BPM guess (this can
        be off by a whole BPM or more on its own).
-    2. Every integer BPM within a few of that guess is scored by how well a
-       beat grid at that tempo lines up with a low-frequency ("kick drum")
-       onset envelope, tried at every possible phase — the best-scoring
-       (bpm, phase) pair is a much more reliable whole-number BPM than the
-       broadband estimate alone.
-    3. The offset is then refined further: discrete kick onset events are
-       detected (with sample-accurate backtracking to each attack's actual
-       start, not just its peak), and the offset is the median of how far
-       each one sits from the nearest multiple of the beat length — far
-       less sensitive to any single noisy detection than using the first
-       beat alone, and precise enough to hold in sync for the whole track.
+    2. Every integer BPM within a few of that guess, at every possible
+       phase, is scored by how well a beat grid at that (bpm, phase) lines
+       up with a low-frequency ("kick drum") onset envelope — weighting
+       every sample of the envelope at each beat position rather than a
+       handful of discrete peaks, which is far less sensitive to a single
+       noisy detection or to being pulled off-phase by other percussion/
+       vocal chops that don't land on the kick. The best-scoring (bpm,
+       offset) pair *is* the answer — both, together, since the offset
+       that makes a given BPM's grid line up is exactly what this already
+       searched over; there's no more-reliable independent estimate of
+       offset to refine it against afterward.
     """
     hop_length = 512
     times_seconds, onset_env = _low_frequency_onset_envelope(y, sr, hop_length)
@@ -85,28 +85,14 @@ def detect_bpm_and_offset(y: np.ndarray, sr: int) -> tuple[float, float]:
             return 0.0
         return float(onset_env[idx].sum() / len(idx))  # per-beat average, comparable across candidate BPMs
 
-    best_score, bpm = None, float(guess_bpm)
+    best_score, bpm, offset_seconds = None, float(guess_bpm), 0.0
     for candidate_bpm in range(guess_bpm - 2, guess_bpm + 3):
         beat_length = 60.0 / candidate_bpm
         num_offsets = max(20, int(beat_length / dt) * 2)
         for offset in np.linspace(0.0, beat_length, num_offsets, endpoint=False):
             score = grid_score(candidate_bpm, offset)
             if best_score is None or score > best_score:
-                best_score, bpm = score, float(candidate_bpm)
-
-    beat_length_seconds = 60.0 / bpm
-    onset_times = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr, hop_length=hop_length,
-                                              backtrack=True, units="time")
-    if len(onset_times) == 0:
-        raise RuntimeError("Could not detect enough onsets in this track to estimate an offset.")
-
-    beat_indices = np.round(onset_times / beat_length_seconds)
-    residuals = onset_times - beat_indices * beat_length_seconds
-    offset_seconds = float(np.median(residuals))
-    # The fit can land slightly before 0 (a whole beat "before" the first
-    # detected one); nudge it forward into the track if so.
-    while offset_seconds < 0:
-        offset_seconds += beat_length_seconds
+                best_score, bpm, offset_seconds = score, float(candidate_bpm), float(offset)
 
     return bpm, offset_seconds
 
@@ -151,6 +137,13 @@ def main() -> None:
     parser.add_argument("--version", default="Auto Base", help="Difficulty/version name.")
     parser.add_argument("--audio-filename", default=None,
                          help="Value written into AudioFilename (defaults to the input file's basename).")
+    parser.add_argument("--bpm", type=float, default=None,
+                         help="Manually set the BPM instead of auto-detecting it.")
+    parser.add_argument("--offset", type=float, default=None,
+                         help="Manually set the offset (ms, time of the first beat) instead of "
+                              "auto-detecting it. Any value works — it's wrapped to the equivalent "
+                              "position within one beat, so e.g. -118 and 334 at 137 BPM name the "
+                              "same beat and are interchangeable.")
     args = parser.parse_args()
 
     title = args.title or os.path.splitext(os.path.basename(args.audio))[0]
@@ -160,10 +153,18 @@ def main() -> None:
     y, sr = librosa.load(args.audio, sr=None, mono=True)
     duration_seconds = len(y) / sr
 
-    print("Detecting BPM and offset...")
-    bpm, offset_seconds = detect_bpm_and_offset(y, sr)
-    print(f"  BPM: {bpm:.2f}")
-    print(f"  Offset: {offset_seconds * 1000:.1f} ms")
+    if args.bpm is None or args.offset is None:
+        print("Detecting BPM and offset...")
+        detected_bpm, detected_offset_seconds = detect_bpm_and_offset(y, sr)
+    bpm = args.bpm if args.bpm is not None else detected_bpm
+    if args.offset is not None:
+        # Wrap to [0, beat_length) — any phase-equivalent value (one beat
+        # earlier/later, negative or not) names the same beat.
+        offset_seconds = (args.offset / 1000.0) % (60.0 / bpm)
+    else:
+        offset_seconds = detected_offset_seconds
+    print(f"  BPM: {bpm:.2f}" + (" (manual)" if args.bpm is not None else ""))
+    print(f"  Offset: {offset_seconds * 1000:.1f} ms" + (" (manual)" if args.offset is not None else ""))
 
     times = build_half_beat_grid(offset_seconds, bpm, duration_seconds)
     print(f"Placing {len(times)} circles (one per half beat)...")

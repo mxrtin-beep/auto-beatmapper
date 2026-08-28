@@ -222,6 +222,49 @@ def cap_stream_length(objects: list[HitObject], beat_length_ms: float, slider_mu
     return result
 
 
+def carve_mid_breaks(objects: list[HitObject], energy_at, q_low: float, beat_length_ms: float,
+                      min_run_ms: float = 16000.0, lead_ms: float | None = None) -> list[HitObject]:
+    """Cut an actual break into the middle of any long, uninterrupted quiet
+    stretch, instead of clicking through minutes of near-nothing.
+
+    "Quiet" sections are already thinned to one object per beat, but that
+    still leaves the player clicking through an extended low-energy stretch
+    (a long intro, an ambient breakdown) with nothing much happening — it's
+    a better rest for the player, and more true to how the song actually
+    ebbs and flows, to drop the middle of a stretch like that entirely and
+    let the surrounding lead-in/lead-out (kept, `lead_ms` each) frame a real
+    break. build_break_periods() then declares the resulting gap official
+    automatically, since it's just an ordinary long silence to that pass.
+
+    Never touches anything shorter than `min_run_ms` — a normal-length
+    quiet passage (a verse's held notes, a brief comedown) is left exactly
+    as thinned; this only fires for stretches long enough that a real break
+    reads as more musical than more of the same thinned-out clicking.
+    """
+    if lead_ms is None:
+        lead_ms = beat_length_ms * 4.0  # one measure's lead-in/out
+    result: list[HitObject] = []
+    i = 0
+    n = len(objects)
+    while i < n:
+        if energy_at(objects[i].time) >= q_low:
+            result.append(objects[i])
+            i += 1
+            continue
+        j = i
+        while j < n and energy_at(objects[j].time) < q_low:
+            j += 1
+        run = objects[i:j]
+        run_duration = run[-1].time - run[0].time
+        if run_duration >= min_run_ms:
+            run_start, run_end = run[0].time, run[-1].time
+            result.extend(o for o in run if (o.time - run_start) <= lead_ms or (run_end - o.time) <= lead_ms)
+        else:
+            result.extend(run)
+        i = j
+    return result
+
+
 def build_break_periods(objects: list[HitObject], beat_length_ms: float, slider_multiplier: float,
                          min_gap_ms: float = 4000.0, edge_buffer_ms: float = 200.0) -> list[str]:
     """[Events] "Break Periods" lines for any long stretch with no hit objects.
@@ -564,6 +607,16 @@ def main() -> None:
     after_cap = sum(1 for o in new_objects if not o.is_slider)
     if before_cap != after_cap:
         print(f"Capped long streams: converted {before_cap - after_cap} circle(s) into sliders")
+
+    # Cut a real break into any long, uninterrupted quiet stretch (a long
+    # intro, an ambient breakdown) instead of clicking through minutes of
+    # near-nothing — build_break_periods() below declares the resulting gap
+    # official automatically.
+    before_breaks = len(new_objects)
+    new_objects = carve_mid_breaks(new_objects, energy_at, q_low, beat_length_ms)
+    if len(new_objects) != before_breaks:
+        print(f"Carved a mid-track break out of {before_breaks - len(new_objects)} object(s) "
+              f"in long quiet stretch(es)")
 
     # New combos land on the song's actual downbeats (every 4 beats from the
     # detected offset), not a fixed object count — object count drifts as

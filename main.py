@@ -9,21 +9,23 @@ work as standalone scripts:
 Usage:
     python3 main.py song.mp3 --title "Song Title" --artist "Artist Name"
 
-This produces, in --outdir (default: output/<song name>/), four real,
-playable difficulties named the way a finished osu! beatmap set names
-them — no pipeline-stage labels, just the difficulty itself:
+This produces, in --outdir (default: output/ — every song lands in the
+same flat directory, not a per-song subfolder; files are already
+distinguished by their title-prefixed names), four real, playable
+difficulties named the way a finished osu! beatmap set names them — no
+pipeline-stage labels, just the difficulty itself:
     <Song> [Easy].osu
     <Song> [Normal].osu
     <Song> [Hard].osu
     <Song> [Insane].osu
 
-(<Song> (Base).osu, (Variety).osu, and (Styled).osu are the intermediate
-pipeline stages Insane/Hard/Normal/Easy are all derived from — internal
-working files, not one of the four difficulties, deleted by default once
---osz packages everything; see --keep-osu-files.)
+The Base/Variety/Styled intermediate pipeline stages Insane/Hard/Normal/
+Easy are all derived from are internal working files, not one of the four
+difficulties — always deleted once those four are derived from them.
 
 Pass --osz to also zip those four difficulties plus the MP3 into a single
-.osz package that can be dragged straight into osu!.
+.osz package that can be dragged straight into osu! (and delete the four
+loose .osu files too, once packaged — see --keep-osu-files).
 
 Pass --restyle-only to re-run *just* the styling stage against an already-
 generated Variety file with a new --seed — apply_style.py never touches
@@ -60,13 +62,17 @@ def main() -> None:
     parser.add_argument("--title", default=None, help="Song title (defaults to the audio filename).")
     parser.add_argument("--artist", default="Unknown Artist")
     parser.add_argument("--creator", default="auto-beatmapper")
-    parser.add_argument("--outdir", default=None,
-                         help="Directory to write the .osu files into (default: output/<title>/).")
+    parser.add_argument("--outdir", default="output",
+                         help="Directory to write files into (default: output/ — every song's files "
+                              "land in the same flat directory, distinguished by their own title-"
+                              "prefixed names, not a per-song subfolder).")
     parser.add_argument("--osz", action="store_true", help="Also package the result into a .osz file.")
     parser.add_argument("--keep-osu-files", action="store_true",
-                         help="Keep the intermediate .osu files after building the .osz (default: "
+                         help="Keep the four difficulty .osu files after building the .osz (default: "
                               "delete them, since the .osz already contains everything they hold). "
-                              "Ignored if --osz isn't passed — the .osu files are the only output then.")
+                              "Ignored if --osz isn't passed — the .osu files are the only output then. "
+                              "The Base/Variety/Styled intermediate files are always deleted once the "
+                              "difficulties are derived from them, regardless of this flag.")
     parser.add_argument("--spacing", type=float, default=None,
                          help="Forwarded to apply_style.py's --spacing (jump/spacing distance "
                               "multiplier). Omit to use apply_style.py's own default.")
@@ -79,6 +85,15 @@ def main() -> None:
     parser.add_argument("--angle-jitter", type=float, default=None,
                          help="Forwarded to apply_style.py's --angle-jitter. Omit to use "
                               "apply_style.py's own default.")
+    parser.add_argument("--temperature", type=float, default=None,
+                         help="Forwarded to apply_style.py's --temperature (0-1, how creative vs. "
+                              "structured the styling gets). Omit to use apply_style.py's own default.")
+    parser.add_argument("--bpm", type=float, default=None,
+                         help="Forwarded to generate_base_beatmap.py's --bpm, to set it manually "
+                              "instead of auto-detecting it. Ignored with --restyle-only.")
+    parser.add_argument("--offset", type=float, default=None,
+                         help="Forwarded to generate_base_beatmap.py's --offset (ms), to set it "
+                              "manually instead of auto-detecting it. Ignored with --restyle-only.")
     parser.add_argument("--seed", type=int, default=None,
                          help="Random seed for stages 2 and 3. Omit for a different map every run; "
                               "pass a fixed value (printed on every run) to reproduce it later.")
@@ -99,12 +114,13 @@ def main() -> None:
     style_extra_args: list[str] = []
     for flag, value in (("--spacing", args.spacing), ("--curviness", args.curviness),
                          ("--stack-probability", args.stack_probability),
-                         ("--angle-jitter", args.angle_jitter)):
+                         ("--angle-jitter", args.angle_jitter),
+                         ("--temperature", args.temperature)):
         if value is not None:
             style_extra_args += [flag, str(value)]
 
     title = args.title or os.path.splitext(os.path.basename(args.audio))[0]
-    outdir = args.outdir or os.path.join("output", title)
+    outdir = args.outdir
     os.makedirs(outdir, exist_ok=True)
 
     audio_filename = os.path.basename(args.audio)
@@ -140,19 +156,26 @@ def main() -> None:
         print("=== Stage 3 only: re-styling existing Variety file ===")
         _run_module_main(apply_style, [variety_path, "--output", styled_path, "--audio", args.audio,
                                         "--version", "Styled", "--seed", str(args.seed)] + style_extra_args)
-        output_paths = [styled_path] + derive_tiers()
+        tier_output_paths = derive_tiers()
+        _cleanup_osu_files([styled_path], keep=False)  # never one of the four difficulties
         if args.osz:
             osz_path = os.path.join(outdir, f"{title}.osz")
-            build_osz(output_paths, args.audio, osz_path, audio_filename)
+            build_osz(tier_output_paths, args.audio, osz_path, audio_filename)
             print(f"=== Packaged {osz_path} ===")
-            _cleanup_osu_files(output_paths, args.keep_osu_files)
+            _cleanup_osu_files(tier_output_paths, args.keep_osu_files)
         print("Done.")
         return
+
+    base_extra_args: list[str] = []
+    for flag, value in (("--bpm", args.bpm), ("--offset", args.offset)):
+        if value is not None:
+            base_extra_args += [flag, str(value)]
 
     print("=== Stage 1: base beatmap ===")
     _run_module_main(generate_base_beatmap, [args.audio, "--output", base_path, "--title", title,
                                               "--artist", args.artist, "--creator", args.creator,
-                                              "--version", "Auto Base", "--audio-filename", audio_filename])
+                                              "--version", "Auto Base", "--audio-filename", audio_filename]
+                      + base_extra_args)
 
     print("=== Stage 2: add variety ===")
     _run_module_main(add_variety, [base_path, args.audio, "--output", variety_path,
@@ -162,23 +185,30 @@ def main() -> None:
     _run_module_main(apply_style, [variety_path, "--output", styled_path, "--audio", args.audio,
                                     "--version", "Styled", "--seed", str(args.seed)] + style_extra_args)
 
-    output_paths = [base_path, variety_path, styled_path] + derive_tiers()
+    tier_output_paths = derive_tiers()
+
+    # Base/Variety/Styled are internal working files, not one of the four
+    # finished difficulties — always cleaned up once the difficulties are
+    # derived from them, regardless of --osz/--keep-osu-files (which only
+    # ever govern the four difficulty files themselves).
+    _cleanup_osu_files([base_path, variety_path, styled_path], keep=False)
 
     if args.osz:
         osz_path = os.path.join(outdir, f"{title}.osz")
-        build_osz(output_paths, args.audio, osz_path, audio_filename)
+        build_osz(tier_output_paths, args.audio, osz_path, audio_filename)
         print(f"=== Packaged {osz_path} ===")
-        _cleanup_osu_files(output_paths, args.keep_osu_files)
+        _cleanup_osu_files(tier_output_paths, args.keep_osu_files)
 
     print("Done.")
 
 
 def _cleanup_osu_files(paths: list[str], keep: bool) -> None:
-    """Delete the intermediate .osu files once they're safely packaged into
-    the .osz — the .osz already contains everything they hold, so keeping
-    them around by default is just clutter. Skipped entirely if --keep-osu-files
-    was passed. Only ever called after a successful build_osz(), so the .osz
-    is guaranteed to exist before any .osu file is removed."""
+    """Delete the given .osu files. Used two ways: unconditionally (keep=False)
+    for the Base/Variety/Styled intermediates, which are never one of the four
+    finished difficulties; and, only after a successful build_osz() so the
+    .osz is guaranteed to already hold everything they do, for the four
+    difficulty files themselves — there `keep` is --keep-osu-files, letting
+    the user opt out of that second cleanup."""
     if keep:
         return
     for path in paths:
