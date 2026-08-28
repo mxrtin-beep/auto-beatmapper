@@ -250,8 +250,45 @@ def classify_beat_position(time_ms: float, offset_ms: float, beat_length_ms: flo
     return "quarter_eighth"
 
 
+def estimate_spacing_scale(objects: list[HitObject], beat_length_ms: float, slider_multiplier: float) -> float:
+    """The map's own actual on-screen-distance-per-beat, relative to the
+    bare distance-snap formula (slider_multiplier * 100 px/beat).
+
+    apply_style.py scales that bare formula by its own --spacing (default
+    1.3, plus a few percent of seeded wobble) before placing anything, so
+    re-snapping an object after a deletion using the *bare* formula (scale
+    1.0) makes its gap visually inconsistent with every untouched gap
+    around it — exactly what a spacing checker comparing "expected vs.
+    actual" px against neighboring objects flags, both when the untouched
+    gaps read larger (bare 1.0 vs. apply_style's 1.3) and when a checker's
+    own expectation is instead anchored to those larger neighbors. Sampling
+    the ratio the existing (untouched) map already used, rather than
+    assuming any particular --spacing value, keeps a re-snapped gap
+    consistent with its neighbors regardless of what --spacing the Insane
+    beatmap was actually styled with.
+    """
+    ratios = []
+    for a, b in zip(objects, objects[1:]):
+        if a.is_slider:
+            continue
+        gap_ms = b.time - a.time
+        if gap_ms <= 0:
+            continue
+        expected_1x = slider_multiplier * 100.0 * (gap_ms / beat_length_ms)
+        if expected_1x < 1.0:
+            continue
+        dist = math.hypot(b.x - a.x, b.y - a.y)
+        if dist < 1.0:
+            continue  # a deliberate stack — not governed by distance-snap at all
+        ratios.append(dist / expected_1x)
+    if not ratios:
+        return 1.0
+    ratios.sort()
+    return ratios[len(ratios) // 2]  # median — robust to the odd jump/stream outlier
+
+
 def _resnap_after_drop(obj: HitObject, prev: HitObject, dropped_pred: HitObject,
-                        beat_length_ms: float, slider_multiplier: float) -> HitObject:
+                        beat_length_ms: float, px_per_beat: float) -> HitObject:
     """`obj` is the next kept object after one or more deletions; re-snap it
     to the correct distance-snap spacing from its new predecessor `prev`,
     along the same direction apply_style.py originally sent it in (measured
@@ -259,17 +296,18 @@ def _resnap_after_drop(obj: HitObject, prev: HitObject, dropped_pred: HitObject,
     any deletions) — so distance-snap still holds across the hole, instead
     of `obj` sitting exactly where it was for a since-deleted predecessor,
     now visually too close for the larger time gap it's really separated
-    by. If `obj` is itself a slider, it's translated as one rigid unit —
-    head and every curve point shifted by the *same* offset, scaled down
-    (never per-point clamped) just enough that all of them stay in bounds.
-    Clamping each point independently would distort the shape (points
-    moving by different amounts), and a distorted "P" (perfect-circle) or
-    "B" (Bezier) curve's actual rendered arc can bulge well outside its own
+    by. `px_per_beat` should be `slider_multiplier * 100 * estimate_spacing_scale(...)`,
+    not the bare formula — see estimate_spacing_scale for why. If `obj` is
+    itself a slider, it's translated as one rigid unit — head and every
+    curve point shifted by the *same* offset, scaled down (never per-point
+    clamped) just enough that all of them stay in bounds. Clamping each
+    point independently would distort the shape (points moving by
+    different amounts), and a distorted "P" (perfect-circle) or "B"
+    (Bezier) curve's actual rendered arc can bulge well outside its own
     anchor points even when every anchor is individually in bounds — the
     same failure mode apply_style.py's own curve-shape comments warn
     about. A uniformly-scaled rigid shift can't distort anything.
     """
-    px_per_beat = slider_multiplier * 100.0
     angle = math.atan2(obj.y - dropped_pred.y, obj.x - dropped_pred.x)
     new_gap_ms = max(1.0, obj.time - prev.time)
     spacing = px_per_beat * (new_gap_ms / beat_length_ms)
@@ -324,6 +362,8 @@ def thin_by_deletion(objects: list[HitObject], beat_length_ms: float, slider_mul
     def category_of(obj: HitObject) -> str:
         return "slider" if obj.is_slider else classify_beat_position(obj.time, offset_ms, beat_length_ms)
 
+    px_per_beat = slider_multiplier * 100.0 * estimate_spacing_scale(objects, beat_length_ms, slider_multiplier)
+
     n = len(objects)
     result: list[HitObject] = []
     dropped_since_last_keep = False
@@ -335,7 +375,7 @@ def thin_by_deletion(objects: list[HitObject], beat_length_ms: float, slider_mul
             continue
 
         if dropped_since_last_keep and result:
-            obj = _resnap_after_drop(obj, result[-1], objects[i - 1], beat_length_ms, slider_multiplier)
+            obj = _resnap_after_drop(obj, result[-1], objects[i - 1], beat_length_ms, px_per_beat)
 
         dropped_since_last_keep = False
         result.append(obj)
@@ -363,6 +403,7 @@ def enforce_min_gap(objects: list[HitObject], beat_length_ms: float, slider_mult
     to catch a gap that only appears once its own predecessor was removed.
     """
     min_gap_ms = beat_length_ms * min_gap_beats - 1.0
+    px_per_beat = slider_multiplier * 100.0 * estimate_spacing_scale(objects, beat_length_ms, slider_multiplier)
     n = len(objects)
     result: list[HitObject] = []
     dropped_since_last_keep = False
@@ -373,7 +414,7 @@ def enforce_min_gap(objects: list[HitObject], beat_length_ms: float, slider_mult
             continue
 
         if dropped_since_last_keep and result:
-            obj = _resnap_after_drop(obj, result[-1], objects[i - 1], beat_length_ms, slider_multiplier)
+            obj = _resnap_after_drop(obj, result[-1], objects[i - 1], beat_length_ms, px_per_beat)
 
         dropped_since_last_keep = False
         result.append(obj)
