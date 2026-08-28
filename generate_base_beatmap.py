@@ -23,6 +23,7 @@ import librosa
 import numpy as np
 
 from beatmap_utils import HitObject, PLAYFIELD_H, PLAYFIELD_W, TimingPoint, default_metadata, write_osu
+from add_variety import compute_energy_curve, compute_preview_time_ms
 
 
 def _low_frequency_onset_envelope(y: np.ndarray, sr: int, hop_length: int) -> tuple[np.ndarray, np.ndarray]:
@@ -172,6 +173,14 @@ def main() -> None:
     bm = default_metadata(title=title, artist=args.artist, creator=args.creator,
                            version=args.version, audio_filename=audio_filename)
     bm.timing_points = [TimingPoint(time=offset_seconds * 1000.0, beat_length=60000.0 / bpm)]
+
+    # Computed once here so every difficulty in the set carries the exact
+    # same PreviewTime — add_variety.py and apply_style.py both leave an
+    # already-set value alone rather than recomputing their own, which
+    # would otherwise let it drift difficulty to difficulty.
+    times_ms, energy = compute_energy_curve(args.audio)
+    preview_ms = compute_preview_time_ms(times_ms, energy)
+    bm.general["PreviewTime"] = str(int(round(preview_ms)))
 
     hit_objects = []
     for i, (t, (x, y_pos)) in enumerate(zip(times, positions)):

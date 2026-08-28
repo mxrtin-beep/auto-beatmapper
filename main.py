@@ -58,22 +58,9 @@ def main() -> None:
     styled_path = os.path.join(outdir, f"{title} (Styled).osu")
 
     print("=== Stage 1: base beatmap ===")
-    y, sr = _load_audio_once(args.audio)
-    bpm, offset_seconds = generate_base_beatmap.detect_bpm_and_offset(y, sr)
-    print(f"  BPM: {bpm:.2f}  offset: {offset_seconds * 1000:.1f} ms")
-    duration_seconds = len(y) / sr
-    times = generate_base_beatmap.build_half_beat_grid(offset_seconds, bpm, duration_seconds)
-    positions = generate_base_beatmap.placeholder_positions(len(times))
-    bm = generate_base_beatmap.default_metadata(
-        title=title, artist=args.artist, creator=args.creator, version="Auto Base", audio_filename=audio_filename)
-    from beatmap_utils import HitObject, TimingPoint, write_osu
-    bm.timing_points = [TimingPoint(time=offset_seconds * 1000.0, beat_length=60000.0 / bpm)]
-    bm.hit_objects = [
-        HitObject(x=x, y=y_pos, time=t, is_new_combo=(i % 8 == 0))
-        for i, (t, (x, y_pos)) in enumerate(zip(times, positions))
-    ]
-    write_osu(bm, base_path)
-    print(f"  wrote {base_path} ({len(times)} circles)")
+    _run_module_main(generate_base_beatmap, [args.audio, "--output", base_path, "--title", title,
+                                              "--artist", args.artist, "--creator", args.creator,
+                                              "--version", "Auto Base", "--audio-filename", audio_filename])
 
     print("=== Stage 2: add variety ===")
     _run_module_main(add_variety, [base_path, args.audio, "--output", variety_path,
@@ -89,11 +76,6 @@ def main() -> None:
         print(f"=== Packaged {osz_path} ===")
 
     print("Done.")
-
-
-def _load_audio_once(audio_path: str):
-    import librosa
-    return librosa.load(audio_path, sr=None, mono=True)
 
 
 def _run_module_main(module, argv: list[str]) -> None:

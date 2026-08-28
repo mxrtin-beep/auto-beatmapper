@@ -3,7 +3,7 @@ osu file format v14
 [General]
 AudioFilename:Scar Tissue.mp3
 AudioLeadIn:0
-PreviewTime:-1
+PreviewTime:166893
 Countdown:0
 SampleSet:Soft
 StackLeniency:0.7

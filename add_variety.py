@@ -157,6 +157,69 @@ def hitsound_for(energy_value: float, is_downbeat: bool, q_high: float, q_climax
     return HS_NORMAL
 
 
+def cap_stream_length(objects: list[HitObject], beat_length_ms: float, slider_multiplier: float,
+                       quarter_beat_ms: float, max_len: int = 8) -> list[HitObject]:
+    """Guarantee no run of quarter/eighth-beat circles (a "stream") is longer than max_len.
+
+    A stream is a run of consecutive circles a quarter beat or less apart —
+    a wider gap resets the count, since that's an ordinary paced circle,
+    not a rapid subdivision. The (max_len + 1)'th circle in a row is
+    replaced by a short slider instead, so a stream always resolves into a
+    slider rather than continuing indefinitely.
+    """
+    result: list[HitObject] = []
+    consecutive = 0
+    n = len(objects)
+    for i, obj in enumerate(objects):
+        if obj.is_slider:
+            result.append(obj)
+            consecutive = 0
+            continue
+
+        prev = result[-1] if result else None
+        is_stream_note = (prev is not None and not prev.is_slider
+                           and (obj.time - prev.time) <= quarter_beat_ms + 1.0)
+        consecutive = consecutive + 1 if is_stream_note else 1
+
+        if consecutive > max_len:
+            has_next = i + 1 < n
+            next_time = objects[i + 1].time if has_next else obj.time + beat_length_ms
+            gap = next_time - obj.time
+            one_way_ms = min(quarter_beat_ms, gap * 0.9)
+            px_per_beat = slider_multiplier * 100.0
+            length = px_per_beat * (one_way_ms / beat_length_ms)
+            result.append(HitObject(
+                x=obj.x, y=obj.y, time=obj.time, is_new_combo=obj.is_new_combo,
+                is_slider=True, curve_type="L", points=[(obj.x + 1, obj.y)], slides=1, length=length,
+            ))
+            consecutive = 0
+        else:
+            result.append(obj)
+    return result
+
+
+def build_break_periods(objects: list[HitObject], beat_length_ms: float, slider_multiplier: float,
+                         min_gap_ms: float = 6000.0, edge_buffer_ms: float = 200.0) -> list[str]:
+    """[Events] "Break Periods" lines for any long stretch with no hit objects.
+
+    Without an explicit break, a long instrumental/silent stretch just
+    looks like a mapper forgot to add hitsounds or objects there; declaring
+    it as a real break tells both the game and any checker that the gap is
+    intentional.
+    """
+    breaks = []
+    for a, b in zip(objects, objects[1:]):
+        end = a.end_time(beat_length_ms, slider_multiplier)
+        gap = b.time - end
+        if gap < min_gap_ms:
+            continue
+        start = end + edge_buffer_ms
+        stop = b.time - edge_buffer_ms
+        if stop - start >= 650.0:  # osu!'s own minimum break length
+            breaks.append(f"2,{start:.0f},{stop:.0f}")
+    return breaks
+
+
 # --- slider construction -----------------------------------------------------
 
 def make_slider_chain(nodes: list[HitObject], beat_length_ms: float, slider_multiplier: float) -> HitObject:
@@ -177,8 +240,8 @@ def make_slider_chain(nodes: list[HitObject], beat_length_ms: float, slider_mult
 
 
 def make_bounce_slider(start: HitObject, end: HitObject, beat_length_ms: float, slider_multiplier: float,
-                        num_bounces: int, total_duration_ms: float, end_buffer_ms: float = 0.0) -> HitObject:
-    """A slider that repeats back and forth `num_bounces` times over total_duration_ms.
+                        num_bounces: int, one_way_ms: float) -> HitObject:
+    """A slider that repeats back and forth `num_bounces` times, each leg exactly one_way_ms long.
 
     This is the "chain of short sliders" idea taken further: instead of
     several separate slider objects, one slider with repeats reads as the
@@ -186,14 +249,16 @@ def make_bounce_slider(start: HitObject, end: HitObject, beat_length_ms: float, 
     start, dramatically cutting required inputs versus a wall of circles
     while keeping the same visual energy.
 
-    `end_buffer_ms`, if given, shortens the slider so it finishes that much
-    before total_duration_ms would otherwise put it — used when
-    total_duration_ms was measured up to the very next object's start time,
-    so the slider's end never lands exactly on top of it.
+    `one_way_ms` must be an exact rhythmic subdivision (e.g. a quarter or
+    eighth beat) — every repeat lands at start.time + k*one_way_ms, so
+    each one is exactly on the beat grid. Computing the leg length from an
+    arbitrary total duration instead (e.g. shortened by some fixed buffer
+    to avoid touching the next object) would throw every repeat off-grid
+    by that same fraction, which is exactly what triggers an editor's
+    "unsnapped repeat" warning — the fix is to keep the leg length clean
+    and drop a whole leg to make room for a gap instead (see call site).
     """
     px_per_beat = slider_multiplier * 100.0
-    playable_duration_ms = max(total_duration_ms - end_buffer_ms, total_duration_ms * 0.5)
-    one_way_ms = playable_duration_ms / num_bounces
     length = px_per_beat * (one_way_ms / beat_length_ms)
     return HitObject(
         x=start.x, y=start.y, time=start.time, is_new_combo=start.is_new_combo,
@@ -344,32 +409,45 @@ def main() -> None:
             chunk_end = min(pos + chunk_slots - 1, run_end)
             chunk_len = chunk_end - pos + 1
             after_chunk = chunk_end + 1
-            chunk_end_time = circles[after_chunk].time if after_chunk < n else circles[chunk_end].time + half_beat_ms
+            has_after_chunk = after_chunk < n
 
             if chunk_len >= 3 and rng.random() < args.bounce_probability:
-                # Two bounces per half-beat slot reproduces the same rapid
-                # back-and-forth density a wall of quarter/eighth-note
-                # circles would have, in a slider that only needs one click.
-                total_duration = chunk_end_time - circles[pos].time
-                num_bounces = chunk_len * 2
-                # A small buffer before the next object's start time so the
-                # slider's end is never sitting exactly on top of it — only
-                # applied when there *is* a following object (an
-                # end-of-track chunk has nothing to leave room for).
-                end_buffer = min(60.0, eighth_beat_ms) if after_chunk < n else 0.0
+                # One subdivision (quarter or eighth beat, chosen once for
+                # the whole chunk so the rate doesn't shift mid-slider) per
+                # leg. Two legs per half-beat slot at quarter-beat rate, or
+                # four at eighth-beat rate, span the chunk's half-beat slots
+                # *exactly* — chunk_len consecutive base-grid slots are
+                # always exactly chunk_len half-beats apart — so every
+                # repeat lands precisely on the beat grid with no rounding.
+                chunk_avg_energy = float(np.mean(slot_energy[pos:chunk_end + 1]))
+                one_way_ms = eighth_beat_ms if chunk_avg_energy > q_climax else quarter_beat_ms
+                legs_per_half_beat = 4 if one_way_ms == eighth_beat_ms else 2
+                full_bounces = chunk_len * legs_per_half_beat
+
+                # Rather than shrinking each leg to leave a gap before the
+                # next object (which would throw every repeat off the beat
+                # grid — exactly what triggers an "unsnapped repeat"
+                # warning), drop the *last whole leg* instead: the gap this
+                # leaves is itself one clean subdivision long.
+                num_bounces = max(1, full_bounces - 1) if has_after_chunk else full_bounces
                 new_objects.append(make_bounce_slider(circles[pos], circles[chunk_end], beat_length_ms,
-                                                        slider_multiplier, num_bounces, total_duration,
-                                                        end_buffer_ms=end_buffer))
+                                                        slider_multiplier, num_bounces, one_way_ms))
                 pos = after_chunk
                 continue
 
-            # This chunk stays as individually-clicked circles/triplets:
-            # pack subdivisions into the gap up to the next existing object,
-            # never overlapping it. The interval is split into an exact
-            # whole number of equal steps so no inserted timestamp can land
-            # a fraction of a millisecond from the next object (which would
-            # round to the same millisecond on disk and become an
+            # This chunk stays as individually-clicked circles/triplets, all
+            # at one subdivision rate (decided once for the whole chunk, the
+            # same way as the bounce-slider branch above) rather than
+            # switching between quarter- and eighth-notes slot to slot,
+            # which would read as an inconsistent, hard-to-parse stream.
+            # Subdivisions are packed into the gap up to the next existing
+            # object, never overlapping it — the interval is split into an
+            # exact whole number of equal steps so no inserted timestamp can
+            # land a fraction of a millisecond from the next object (which
+            # would round to the same millisecond on disk and become an
             # unplayable simultaneous note).
+            chunk_avg_energy = float(np.mean(slot_energy[pos:chunk_end + 1]))
+            subdivision = eighth_beat_ms if chunk_avg_energy > q_climax else quarter_beat_ms
             for j in range(pos, chunk_end + 1):
                 if rng.random() < args.rest_probability:
                     continue
@@ -378,7 +456,6 @@ def main() -> None:
                 next_time_j = circles[j + 1].time if has_next_j else cur_j.time + half_beat_ms
                 next_obj_j = circles[j + 1] if has_next_j else cur_j
 
-                subdivision = eighth_beat_ms if slot_energy[j] > q_climax else quarter_beat_ms
                 interval = next_time_j - cur_j.time
                 num_steps = max(1, round(interval / subdivision))
 
@@ -406,6 +483,16 @@ def main() -> None:
     if trimmed:
         print(f"Trimmed {trimmed} object(s) in the trailing fade-out (after {track_end_ms:.0f}ms)")
 
+    # Guarantee no run of quarter/eighth-beat circles ("stream") is longer
+    # than 8 — the chunk-level bounce/circle decisions above already aim
+    # for this, but this is the hard backstop regardless of how those rolls
+    # landed: the (max_len+1)'th circle in a row always becomes a slider.
+    before_cap = sum(1 for o in new_objects if not o.is_slider)
+    new_objects = cap_stream_length(new_objects, beat_length_ms, slider_multiplier, quarter_beat_ms)
+    after_cap = sum(1 for o in new_objects if not o.is_slider)
+    if before_cap != after_cap:
+        print(f"Capped long streams: converted {before_cap - after_cap} circle(s) into sliders")
+
     # New combos land on the song's actual downbeats (every 4 beats from the
     # detected offset), not a fixed object count — object count drifts as
     # things get merged/dropped/added, which would otherwise make combos (and
@@ -413,14 +500,23 @@ def main() -> None:
     # the measure instead of consistently the first. If a downbeat's own
     # object got swallowed as a slider waypoint (so nothing starts exactly on
     # it), a combo is forced at the next object instead of going a long
-    # stretch with no combo break at all.
+    # stretch with no combo break at all. Either way, a combo is also never
+    # allowed to run past 8 objects — a section with extra subdivisions
+    # inserted (a stream can have several notes per beat) could otherwise
+    # rack up many more than 8 objects before the next downbeat arrives.
+    MAX_COMBO_LENGTH = 8
     last_combo_time = None
+    combo_count = 0
     for obj in new_objects:
         on_downbeat = is_on_downbeat(obj.time, offset_ms, measure_length_ms)
-        overdue = last_combo_time is not None and (obj.time - last_combo_time) > measure_length_ms * 2.5
-        obj.is_new_combo = on_downbeat or overdue
+        overdue_time = last_combo_time is not None and (obj.time - last_combo_time) > measure_length_ms * 2.5
+        overdue_count = combo_count >= MAX_COMBO_LENGTH
+        obj.is_new_combo = on_downbeat or overdue_time or overdue_count
         if obj.is_new_combo:
             last_combo_time = obj.time
+            combo_count = 1
+        else:
+            combo_count += 1
 
     # Hitsounds: bigger accents (finish/clap/whistle) line up with strong
     # downbeats and louder moments; quieter/off-beat hits stay a plain
@@ -448,9 +544,24 @@ def main() -> None:
 
     bm.hit_objects = new_objects
 
-    preview_ms = compute_preview_time_ms(times_ms, energy)
-    bm.general["PreviewTime"] = str(int(round(preview_ms)))
-    print(f"Preview time: {preview_ms:.0f} ms")
+    # A long stretch with no hit objects at all (an instrumental break, a
+    # long fade before the trimmed-off outro, etc.) otherwise looks
+    # unintentional — no hitsounds, nothing happening. Declaring it as a
+    # real break period tells the game (and any checker) it's deliberate.
+    breaks = build_break_periods(new_objects, beat_length_ms, slider_multiplier)
+    if breaks:
+        break_index = bm.events.index("//Break Periods") + 1
+        bm.events[break_index:break_index] = breaks
+        print(f"Added {len(breaks)} break period(s)")
+
+    # PreviewTime is computed once, in generate_base_beatmap.py, and should
+    # stay identical across every difficulty in the set (a mismatch reads
+    # as a bug to any checker) — only fall back to computing one here if
+    # the base beatmap somehow didn't already set it.
+    if bm.general.get("PreviewTime", "-1") == "-1":
+        preview_ms = compute_preview_time_ms(times_ms, energy)
+        bm.general["PreviewTime"] = str(int(round(preview_ms)))
+    print(f"Preview time: {bm.general['PreviewTime']} ms")
 
     bounces = sum(1 for o in new_objects if o.is_slider and o.slides > 1)
     print(f"{len(circles)} base circles -> {len(new_objects)} objects "

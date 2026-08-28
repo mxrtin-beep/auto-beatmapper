@@ -6,22 +6,28 @@ Repositions the hit objects produced by add_variety.py without touching
 their timing, type, or count. This is purely about how the map *feels* to
 play, following common osu! "rules of thumb":
 
-  * Distance snap — spacing is a pure function of the time gap to the
-    previous object: any two objects a half beat apart get the same
-    spacing, always, regardless of how loud or quiet the section is.
-    Energy still shapes the *pattern* (see below), not the magnitude of
-    the jump, with a hard ceiling so even a full-beat gap stays readable.
-  * Patterns / motifs — the turn angle between objects is drawn from a
-    small fixed set of repeating shapes ("motifs"), one per energy tier,
-    keyed to the object's actual position within the musical measure. The
-    same motif recurs every measure of a given tier, so patterns are
-    genuinely learnable on replay instead of a one-off procedural wiggle
-    that happens to look similar.
-  * Stacks — a short run of circles is occasionally held at the exact same
-    position instead of moving, capped to half a beat of total elapsed
-    time so it reads as a deliberate flourish rather than objects that
-    stopped moving; a slider is never stacked, which in practice is what
-    breaks a stack back into motion.
+  * Distance snap — for two objects a half beat or more apart, the on-screen
+    distance between them is *exactly* what a slider spanning that same
+    time gap would be (SliderMultiplier * 100 px/beat * beats of gap) — the
+    same formula the game itself uses for a slider's length, so a circle
+    jump reads with the same "speed" as a slider covering the same time.
+    The same time gap always produces the same distance, everywhere in the
+    song; energy shapes the turn-angle *pattern* (see below), not the size
+    of the jump.
+  * Streams/stacks — a run of circles a quarter beat or less apart (up to 8
+    long; add_variety.py itself never produces a longer one) is positioned
+    as a single deliberate unit in one of exactly two ways: every circle in
+    the run at the *same* position (a stack), or all of them overlapping
+    along one straight line — never the general zigzag flow, which is what
+    turns a fast run into an unreadable blob. A stack specifically is
+    capped to half a beat of elapsed time; a run that runs longer than that
+    continues as an overlapping line instead.
+  * Patterns / motifs — outside of streams, the turn angle between objects
+    is drawn from a small fixed set of repeating shapes ("motifs"), one per
+    energy tier, keyed to the object's actual position within the musical
+    measure. The same motif recurs every measure of a given tier, so
+    patterns are genuinely learnable on replay instead of a one-off
+    procedural wiggle that happens to look similar.
   * Flow — every motif avoids full 180-degree reversals and repeats of the
     same direction for too long, so movement still reads as a continuous
     swing rather than snapping.
@@ -52,25 +58,17 @@ import numpy as np
 from beatmap_utils import HitObject, PLAYFIELD_H, PLAYFIELD_W, clamp_to_playfield, read_osu, write_osu
 
 MARGIN = 30
-MIN_SPACING = 40.0    # px, floor so objects never feel stacked
-MAX_SPACING = 220.0   # px, hard ceiling so even a full-beat gap stays readable
-BASE_SPACING_PER_BEAT = 130.0  # px of movement for a full beat gap — a pure function of time gap alone
+MIN_SPACING = 10.0    # px, safety floor only — the distance-snap formula rarely needs it
+MAX_SPACING = 600.0   # px, generous safety ceiling (a little over the playfield diagonal)
 
 HALF_BEAT_STEPS_PER_MEASURE = 8  # 4/4 time, half-beat resolution
-
-# A stack (holding the same position across a short run of circles) is
-# capped to half a beat of total elapsed time — long enough to read as a
-# deliberate stylistic beat, never so long it turns into "objects that
-# aren't moving." It's only ever applied between circles; a slider always
-# gets positioned normally, which in practice is what naturally breaks a
-# stack back into movement.
-STACK_PROBABILITY = 0.22
 
 # A handful of repeating turn-angle "motifs" per energy tier (degrees,
 # signed = turn direction), indexed by position-within-measure. Which motif
 # plays in a given measure cycles with the measure index, so the same shape
 # recurs every few measures within a tier — recognizable on replay — while
-# still varying between passes through the song.
+# still varying between passes through the song. These only ever apply
+# outside of streams/stacks (see build_stream_runs below).
 MOTIFS = {
     "quiet": [
         [35, 35, 35, 35, 35, 35, 35, 35],
@@ -149,10 +147,17 @@ def place_at_distance(cur_x: float, cur_y: float, spacing: float, angle: float) 
     """
     left, right = MARGIN, PLAYFIELD_W - MARGIN
     top, bottom = MARGIN, PLAYFIELD_H - MARGIN
+
+    def in_bounds(x: float, y: float) -> bool:
+        return left <= x <= right and top <= y <= bottom
+
+    original_angle = angle
     x = y = 0.0
-    for _ in range(8):
+    for _ in range(20):
         x = cur_x + spacing * math.cos(angle)
         y = cur_y + spacing * math.sin(angle)
+        if in_bounds(x, y):
+            return x, y, angle
         bounced = False
         if x < left or x > right:
             angle = math.pi - angle
@@ -162,14 +167,103 @@ def place_at_distance(cur_x: float, cur_y: float, spacing: float, angle: float) 
             bounced = True
         if not bounced:
             break
+
+    # A large gap near a corner can, rarely, put the angle-correction above
+    # into a 2-cycle that never settles (correcting x re-breaks y and vice
+    # versa) even though a valid angle exists. Falling back to a direct
+    # search over candidate angles always finds one when it exists (any
+    # angle whose endpoint lands in bounds), picking whichever is closest
+    # to the originally intended direction — this is what actually
+    # guarantees "same time gap -> same distance" holds even at the edges
+    # of the playfield, rather than silently settling for a shorter jump.
+    best = None
+    for deg in range(0, 360, 2):
+        a = math.radians(deg)
+        cx = cur_x + spacing * math.cos(a)
+        cy = cur_y + spacing * math.sin(a)
+        if in_bounds(cx, cy):
+            diff = abs((a - original_angle + math.pi) % (2 * math.pi) - math.pi)
+            if best is None or diff < best[0]:
+                best = (diff, cx, cy, a)
+    if best is not None:
+        return best[1], best[2], best[3]
+
+    # No angle keeps the point in bounds at this exact distance (spacing
+    # exceeds the farthest reachable point from here) — an extreme, rare
+    # edge case. Fall back to whatever the last bounce attempt produced;
+    # the caller still clamps it onto the playfield afterward.
     return x, y, angle
+
+
+def snap_distance(gap_ms: float, beat_length_ms: float, slider_multiplier: float) -> float:
+    """The exact pixel distance a slider spanning gap_ms would travel.
+
+    This is deliberately the same formula used for a slider's own pixel
+    length (slider_multiplier * 100 px/beat * beats of duration) — a circle
+    jump covering the same amount of time is styled to read at the same
+    "speed" as a slider would over that time.
+    """
+    return slider_multiplier * 100.0 * (gap_ms / beat_length_ms)
+
+
+def build_stream_runs(objects: list[HitObject], beat_length_ms: float,
+                       rng: random.Random) -> dict[int, tuple[int, str]]:
+    """Decide a stack/line mode for every object that's part of a stream.
+
+    A stream is a maximal run of consecutive circles (never sliders) each a
+    quarter beat or less from the one before — add_variety.py caps these at
+    8 circles, converting any longer run into a slider itself, so nothing
+    here needs to re-enforce that length limit.
+
+    Returns {object index: (run_id, "stack" | "line")} for every object
+    that belongs to a run of 2 or more; objects not in the mapping use the
+    general motif-driven flow instead. The run_id matters because two
+    *different* runs can sit back to back with no gap between them (the
+    last object of one run and the first of the next, more than a quarter
+    beat apart but with nothing in between) — the caller needs it to know
+    a new run has started even when the mode happens to repeat, so it
+    re-anchors a fresh stack (or picks a fresh line direction) instead of
+    silently continuing the previous run's.
+
+    A stack is only ever "stack" for its first half beat of elapsed time —
+    beyond that it continues as "line" — so a literal stack (everything
+    piled on one spot) never lasts longer than that, while a run can still
+    go the rest of the way to the 8-circle cap as an overlapping line.
+    """
+    quarter_beat_ms = beat_length_ms / 4.0
+    half_beat_ms = beat_length_ms / 2.0
+    threshold = quarter_beat_ms + 1.0
+
+    mode_of: dict[int, tuple[int, str]] = {}
+    i = 0
+    n = len(objects)
+    run_id = 0
+    while i < n:
+        if objects[i].is_slider:
+            i += 1
+            continue
+        j = i + 1
+        while (j < n and not objects[j].is_slider
+               and (objects[j].time - objects[j - 1].time) <= threshold):
+            j += 1
+        run_len = j - i
+        if run_len >= 2:
+            base_mode = "stack" if rng.random() < 0.5 else "line"
+            run_start_time = objects[i].time
+            for k in range(i, j):
+                elapsed = objects[k].time - run_start_time
+                mode = base_mode if (base_mode == "line" or elapsed < half_beat_ms) else "line"
+                mode_of[k] = (run_id, mode)
+            run_id += 1
+        i = j
+    return mode_of
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Restyle object placement in a beatmap (timing/objects unchanged).")
     parser.add_argument("beatmap", help="Path to the variety .osu file (from add_variety.py).")
     parser.add_argument("--output", required=True)
-    parser.add_argument("--audio", default=None, help="Optional path to the song's MP3, for energy-aware spacing.")
+    parser.add_argument("--audio", default=None, help="Optional path to the song's MP3, for energy-aware patterns.")
     parser.add_argument("--version", default="Auto Styled", help="Difficulty/version name to write into the map.")
     parser.add_argument("--seed", type=int, default=None,
                          help="Random seed. Omit for different styling every run; pass a fixed "
@@ -201,14 +295,15 @@ def main() -> None:
         energy_at = lambda t: 0.5
         q_low, q_high = 0.35, 0.75
 
-    half_beat_ms = beat_length_ms / 2.0
+    stream_mode = build_stream_runs(objects, beat_length_ms, rng)
 
     # Start roughly centered.
     cur_x, cur_y = PLAYFIELD_W / 2.0, PLAYFIELD_H / 2.0
     cur_angle = 0.0
     prev_end_time = None
-    prev_was_circle = False
-    stack_start_time = None  # when the current run of stacked circles began, if any
+    line_run_angle = None  # the single locked-in direction for the current "line" stream, if any
+    stack_anchor = None  # the (x, y) every member of the current "stack" run holds at, if any
+    current_run_id = None  # detects entering a *different* run, even one with the same mode
 
     for idx, obj in enumerate(objects):
         if prev_end_time is None:
@@ -217,37 +312,54 @@ def main() -> None:
             gap_ms = max(1.0, obj.time - prev_end_time)
 
         tier = classify_tier(energy_at(obj.time), q_low, q_high)
-        is_circle = not obj.is_slider
+        entry = stream_mode.get(idx)
+        run_id, mode = entry if entry is not None else (None, None)
+        if run_id != current_run_id:
+            # A new run has started — even a same-mode run immediately
+            # following another (the two are more than a quarter beat
+            # apart, or build_stream_runs would have merged them into one)
+            # must not silently inherit the previous run's stack position
+            # or line direction.
+            line_run_angle = None
+            stack_anchor = None
+            current_run_id = run_id
 
-        # A stack: hold the exact same position as the previous object
-        # instead of moving. Only ever considered between two circles (a
-        # slider is always positioned normally, which is what naturally
-        # breaks a stack back into motion), only across a close-enough time
-        # gap, and never longer than half a beat of total elapsed time.
-        stack_elapsed = (obj.time - stack_start_time) if stack_start_time is not None else 0.0
-        can_stack = (is_circle and prev_was_circle and gap_ms <= half_beat_ms + 1.0
-                     and stack_elapsed < half_beat_ms)
-        is_stacking = can_stack and rng.random() < STACK_PROBABILITY
-
-        if is_stacking:
-            if stack_start_time is None:
-                stack_start_time = obj.time - gap_ms  # the previous object's time
+        if mode == "stack":
+            if stack_anchor is None:
+                # First member of this stack run: it still moves normally
+                # to establish where the stack sits — freezing it at
+                # whatever position preceded the run (rather than a
+                # deliberately chosen new spot) would make the stack's
+                # location arbitrary, and could even coincide with an
+                # unrelated object several beats away that just happened
+                # to precede it.
+                spacing = max(MIN_SPACING, min(MAX_SPACING, snap_distance(gap_ms, beat_length_ms, slider_multiplier)))
+                cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, rng)
+                new_x, new_y, cur_angle = place_at_distance(cur_x, cur_y, spacing, cur_angle)
+                cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
+                stack_anchor = (cur_x, cur_y)
+            else:
+                # Every other circle in this run: hold the exact same spot.
+                cur_x, cur_y = stack_anchor
+        elif mode == "line":
+            # The whole run moves along one fixed direction, decided once
+            # when the run is first entered, so consecutive circles
+            # overlap along a straight line rather than zigzagging.
+            if line_run_angle is None:
+                line_run_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
+                                             measure_length_ms, rng)
+            spacing = max(MIN_SPACING, min(MAX_SPACING, snap_distance(gap_ms, beat_length_ms, slider_multiplier)))
+            new_x, new_y, line_run_angle = place_at_distance(cur_x, cur_y, spacing, line_run_angle)
+            cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
+            cur_angle = line_run_angle
         else:
-            # Distance snap: spacing is a pure function of the time gap to
-            # the previous object — the same half-beat gap always produces
-            # the same spacing, everywhere in the song. Energy still shapes
-            # the turn-angle pattern (via `tier`, below), not the magnitude
-            # of the jump.
-            beats_gap = gap_ms / beat_length_ms
-            spacing = max(MIN_SPACING, min(MAX_SPACING, BASE_SPACING_PER_BEAT * beats_gap))
-
+            # Outside a stream: normal distance-snap + motif-driven flow.
+            spacing = max(MIN_SPACING, min(MAX_SPACING, snap_distance(gap_ms, beat_length_ms, slider_multiplier)))
             cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, rng)
             new_x, new_y, cur_angle = place_at_distance(cur_x, cur_y, spacing, cur_angle)
             cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
-            stack_start_time = None
 
         obj.x, obj.y = cur_x, cur_y
-        prev_was_circle = is_circle
 
         if obj.is_slider:
             num_segments = len(obj.points)  # 1 for a simple/bouncing slider, 2-3 for a merged chain
