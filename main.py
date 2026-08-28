@@ -1,41 +1,45 @@
 #!/usr/bin/env python3
 """
-End-to-end driver: MP3 in, three .osu beatmaps (and optionally a ready-to-
-import .osz) out. This just wires together the three pipeline stages that
-also work as standalone scripts:
+End-to-end driver: MP3 in, a full 4-difficulty spread (and optionally a
+ready-to-import .osz) out. Wires together the pipeline stages that also
+work as standalone scripts:
 
-    generate_base_beatmap.py  -> add_variety.py  -> apply_style.py
+    generate_base_beatmap.py -> add_variety.py -> apply_style.py -> make_easy.py
 
 Usage:
     python3 main.py song.mp3 --title "Song Title" --artist "Artist Name"
 
-This produces, in --outdir (default: output/<song name>/):
-    <Song> (Base).osu
-    <Song> (Variety).osu
-    <Song> (Styled).osu
-    <Song> (Easy).osu
+This produces, in --outdir (default: output/<song name>/), four real,
+playable difficulties named the way a finished osu! beatmap set names
+them — no pipeline-stage labels, just the difficulty itself:
+    <Song> [Easy].osu
+    <Song> [Normal].osu
+    <Song> [Hard].osu
+    <Song> [Insane].osu
 
-Pass --osz to also zip those .osu files together with the MP3 into a
-single .osz package that can be dragged straight into osu! — once the
-.osz is built, the intermediate .osu files are deleted (they're fully
-contained in the .osz already); pass --keep-osu-files to keep them
-around too.
+(<Song> (Base).osu, (Variety).osu, and (Styled).osu are the intermediate
+pipeline stages Insane/Hard/Normal/Easy are all derived from — internal
+working files, not one of the four difficulties, deleted by default once
+--osz packages everything; see --keep-osu-files.)
 
-Pass --restyle-only to re-run *just* Stage 3 against an already-generated
-Variety file with a new --seed — apply_style.py never touches timing, type,
-or object count, so this is how you get a different flow/angle pattern
-(and a fresh mix of stacks/lines, slider curves, etc.) without regenerating
-the rhythm at all:
+Pass --osz to also zip those four difficulties plus the MP3 into a single
+.osz package that can be dragged straight into osu!.
+
+Pass --restyle-only to re-run *just* the styling stage against an already-
+generated Variety file with a new --seed — apply_style.py never touches
+timing, type, or object count, so this is how you get a different
+flow/angle pattern (and a fresh mix of stacks/lines, slider curves, etc.)
+without regenerating the rhythm at all:
 
     python3 main.py song.mp3 --restyle-only "out/Song (Variety).osu" --seed 123
 
-A second, easier difficulty is derived from the Styled beatmap
-(make_easy.py) automatically: lower Difficulty settings, and some of the
-song's repetitive (verse/chorus-like) stream density thinned — merged into
-sliders or dropped outright — plus more predictable hitsounds there.
-Non-repetitive sections (a bridge, an intro/outro) are left as the Styled
-difficulty had them. Pass --no-easy to skip it and produce only the three
-main difficulties.
+The Hard/Normal/Easy difficulties are derived from Insane (make_easy.py,
+run once per tier): each tier's Difficulty settings (AR/OD/HP/CS, and for
+Normal/Easy, slider velocity) are clamped to osu!'s own ranking-criteria
+range for that tier, and each tier thins the previous one's stream density
+a bit further — Hard only in the song's *repetitive* sections (a
+verse/chorus that recurs), Normal and Easy everywhere. Pass --no-spread to
+skip Hard/Normal/Easy and produce only Insane.
 """
 
 from __future__ import annotations
@@ -82,9 +86,9 @@ def main() -> None:
                          help="Skip stages 1-2 and just re-run apply_style.py against this existing "
                               "Variety .osu with a new --seed — a way to get a different flow/angle "
                               "pattern without changing the rhythm at all.")
-    parser.add_argument("--no-easy", dest="easy", action="store_false", default=True,
-                         help="Skip deriving the easier difficulty from the Styled beatmap "
-                              "(make_easy.py) — by default it's generated automatically.")
+    parser.add_argument("--no-spread", dest="spread", action="store_false", default=True,
+                         help="Skip deriving Hard/Normal/Easy from Insane (make_easy.py) — by "
+                              "default the full 4-difficulty spread is generated automatically.")
     args = parser.parse_args()
 
     if args.seed is None:
@@ -104,21 +108,39 @@ def main() -> None:
     os.makedirs(outdir, exist_ok=True)
 
     audio_filename = os.path.basename(args.audio)
+    # Intermediate pipeline stages — internal working files, not one of the
+    # four finished difficulties, so they keep the old parenthetical
+    # pipeline-stage naming and get cleaned up with the rest of output_paths.
     base_path = os.path.join(outdir, f"{title} (Base).osu")
     variety_path = os.path.join(outdir, f"{title} (Variety).osu")
     styled_path = os.path.join(outdir, f"{title} (Styled).osu")
-    easy_path = os.path.join(outdir, f"{title} (Easy).osu")
+    # The four finished difficulties: named the way a real, finished osu!
+    # beatmap set names them — just the difficulty, no pipeline labels.
+    tier_paths = {tier: os.path.join(outdir, f"{title} [{tier.capitalize()}].osu")
+                  for tier in ("insane", "hard", "normal", "easy")}
+
+    def derive_tiers() -> list[str]:
+        """Run make_easy.py once per tier from styled_path, Insane first (no
+        thinning, just Difficulty-setting clamping) and, unless --no-spread,
+        Hard/Normal/Easy after (each thinning Insane's density further). Each
+        tier gets its own seed derived from --seed so they don't all make the
+        exact same random thinning/drop choices. Returns the paths written."""
+        tiers = ["insane"] + (["hard", "normal", "easy"] if args.spread else [])
+        written = []
+        for i, tier in enumerate(tiers):
+            print(f"=== Stage 4: {tier.capitalize()} ===")
+            tier_seed = args.seed + i
+            _run_module_main(make_easy, [styled_path, "--audio", args.audio, "--tier", tier,
+                                          "--output", tier_paths[tier], "--seed", str(tier_seed)])
+            written.append(tier_paths[tier])
+        return written
 
     if args.restyle_only:
         variety_path = args.restyle_only
         print("=== Stage 3 only: re-styling existing Variety file ===")
         _run_module_main(apply_style, [variety_path, "--output", styled_path, "--audio", args.audio,
-                                        "--version", "Auto Styled", "--seed", str(args.seed)] + style_extra_args)
-        output_paths = [styled_path]
-        if args.easy:
-            print("=== Stage 4: make easy ===")
-            _run_module_main(make_easy, [styled_path, "--audio", args.audio, "--output", easy_path, "--seed", str(args.seed)])
-            output_paths.append(easy_path)
+                                        "--version", "Styled", "--seed", str(args.seed)] + style_extra_args)
+        output_paths = [styled_path] + derive_tiers()
         if args.osz:
             osz_path = os.path.join(outdir, f"{title}.osz")
             build_osz(output_paths, args.audio, osz_path, audio_filename)
@@ -138,14 +160,9 @@ def main() -> None:
 
     print("=== Stage 3: apply style ===")
     _run_module_main(apply_style, [variety_path, "--output", styled_path, "--audio", args.audio,
-                                    "--version", "Auto Styled", "--seed", str(args.seed)] + style_extra_args)
+                                    "--version", "Styled", "--seed", str(args.seed)] + style_extra_args)
 
-    output_paths = [base_path, variety_path, styled_path]
-
-    if args.easy:
-        print("=== Stage 4: make easy ===")
-        _run_module_main(make_easy, [styled_path, "--audio", args.audio, "--output", easy_path, "--seed", str(args.seed)])
-        output_paths.append(easy_path)
+    output_paths = [base_path, variety_path, styled_path] + derive_tiers()
 
     if args.osz:
         osz_path = os.path.join(outdir, f"{title}.osz")
