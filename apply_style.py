@@ -573,7 +573,23 @@ def main() -> None:
                                              measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
                 line_run_angle = wander_nudge(line_run_angle, cur_x, cur_y)
             spacing = max(MIN_SPACING, min(MAX_SPACING, boost * styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing, rng)))
-            new_x, new_y, line_run_angle = place_at_distance(cur_x, cur_y, spacing, line_run_angle)
+            # A run's direction is locked in once, above — but if it
+            # happens to point straight at a wall, letting place_at_distance
+            # "bounce" it back on every single step (as every other call
+            # site does) doesn't read as one straight line at all: since
+            # cur_x/cur_y barely moves once pinned against the edge, the
+            # very same bounce fires again next step, and the run oscillates
+            # between two points for the rest of its length — a run visibly
+            # doubling back over its own earlier members and anything else
+            # nearby. So a genuine wall conflict re-aims the run *once*,
+            # back toward the open field, rather than re-bouncing forever;
+            # a run that doesn't hit a wall never re-aims at all.
+            raw_x = cur_x + spacing * math.cos(line_run_angle)
+            raw_y = cur_y + spacing * math.sin(line_run_angle)
+            if not (MARGIN <= raw_x <= PLAYFIELD_W - MARGIN and MARGIN <= raw_y <= PLAYFIELD_H - MARGIN):
+                line_run_angle = math.atan2(PLAYFIELD_H / 2.0 - cur_y, PLAYFIELD_W / 2.0 - cur_x)
+                line_run_angle += math.radians(rng.uniform(-20.0, 20.0))
+            new_x, new_y, _ = place_at_distance(cur_x, cur_y, spacing, line_run_angle)
             cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
             cur_angle = line_run_angle
         else:
