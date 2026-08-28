@@ -210,7 +210,7 @@ def cap_stream_length(objects: list[HitObject], beat_length_ms: float, slider_mu
             # fraction of a millisecond past the next object's now-rounded
             # start. A 1ms margin easily absorbs that without being a
             # perceptible or "unsnapped" amount.
-            one_way_ms = max(1.0, one_way_ms - 1.0)
+            one_way_ms = max(1.0, one_way_ms - 2.0)
             px_per_beat = slider_multiplier * 100.0
             length = px_per_beat * (one_way_ms / beat_length_ms)
             result.append(HitObject(
