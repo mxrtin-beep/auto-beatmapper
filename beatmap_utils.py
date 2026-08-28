@@ -318,3 +318,40 @@ def clamp_to_playfield(x: float, y: float, margin: int = 20) -> Tuple[int, int]:
     x = max(margin, min(PLAYFIELD_W - margin, x))
     y = max(margin, min(PLAYFIELD_H - margin, y))
     return int(round(x)), int(round(y))
+
+
+def rounded_gap_ms(start_time: float, end_time: float) -> float:
+    """The gap between two times as it will actually read once both are
+    independently rounded to a whole millisecond for the .osu file (every
+    `HitObject.time` is written with `:.0f`).
+
+    Any slider's `length` must be derived from *this*, not the raw
+    `end_time - start_time`, whenever `end_time` is meant to land exactly
+    on another real object's timestamp (the next note in a stream, the
+    other end of a merged pair, …). osu! reconstructs a slider's duration
+    from `length` using the same beat-length/multiplier arithmetic used to
+    produce it, so a length built from `rounded_gap_ms` reconstructs to
+    *exactly* `round(end_time) - round(start_time)` again — the slider's
+    on-disk end lands exactly on `round(end_time)`, never a fraction of a
+    millisecond short (an "unsnapped" slider) or past it (an illegal
+    overlap with whatever starts there). This is why those two symptoms
+    show up together: both come from the same rounding mismatch between an
+    unrounded `length` and the rounded `time` fields it's measured against,
+    and both disappear once every call site measures gaps this way instead
+    of trying to patch the result afterward.
+    """
+    return round(end_time) - round(start_time)
+
+
+def slider_length_for_gap(start_time: float, end_time: float, beat_length_ms: float,
+                           slider_multiplier: float, slides: int = 1) -> float:
+    """Pixel `length` for a slider from `start_time` to `end_time`, exactly
+    snapped so its reconstructed on-disk end lands on `round(end_time)`.
+
+    See `rounded_gap_ms` for why this must be used instead of a raw
+    `(end_time - start_time)` px-per-beat calculation for any slider whose
+    end is meant to coincide with a specific other timestamp.
+    """
+    total_ms = max(1.0, rounded_gap_ms(start_time, end_time))
+    one_slide_ms = total_ms / max(1, slides)
+    return slider_multiplier * 100.0 * (one_slide_ms / beat_length_ms)
