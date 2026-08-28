@@ -321,11 +321,14 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
     to avoid.
 
     A run is only *eligible* for "stack" if its whole span (first member to
-    last) is half a beat or less — piling more than that much elapsed time
-    onto one spot is a real, fully-overlapping stack the ranking criteria's
-    Hard difficulty rule forbids ("objects 1/2 of a beat apart or less must
-    not fully overlap" — days notwithstanding for shorter gaps). A run
-    longer than that is always "line" instead, in full, not partially.
+    last) is half a beat or less, *and* it's no more than MAX_STACK_LEN
+    objects — piling more than that much elapsed time, or too many circles,
+    onto one spot is both a real overlap the ranking criteria's Hard rule
+    forbids ("objects 1/2 of a beat apart or less must not fully overlap")
+    and, well before that limit even matters, just unreadable: a pile of
+    5+ circles stacked exactly on top of each other doesn't read as "click
+    here N times," it reads as a smear you can't count. A run failing
+    either check is always "line" instead, in full, not partially.
 
     Which of the two an eligible run picks is keyed to its measure's energy
     bucket (the same signal apply_style's motifs use), not a fresh coin
@@ -339,6 +342,7 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
     quarter_beat_ms = beat_length_ms / 4.0
     half_beat_ms = beat_length_ms / 2.0
     threshold = quarter_beat_ms + 1.0
+    MAX_STACK_LEN = 4  # beyond this a "pile" reads as a smear, not a countable stack
 
     mode_of: dict[int, tuple[int, str]] = {}
     i = 0
@@ -356,7 +360,7 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
         if run_len >= 2:
             run_start_time = objects[i].time
             run_span_ms = objects[j - 1].time - run_start_time
-            stack_eligible = run_span_ms <= half_beat_ms
+            stack_eligible = run_span_ms <= half_beat_ms and run_len <= MAX_STACK_LEN
             if stack_eligible:
                 if measure_buckets and measure_length_ms:
                     measure_index = int((run_start_time - offset_ms) // measure_length_ms)
@@ -497,6 +501,17 @@ def main() -> None:
     wander_target = (wander_rng.uniform(MARGIN, PLAYFIELD_W - MARGIN),
                       wander_rng.uniform(MARGIN, PLAYFIELD_H - MARGIN))
 
+    # A stack/line run reads as one deliberate unit only if it's visually
+    # set apart from whatever comes right before and after it — otherwise
+    # a pile of circles bleeds into the normal flow on either side and the
+    # run boundary disappears. STREAM_TRANSITION_BOOST widens just the one
+    # connecting gap on both sides of a run (never a gap inside it, and
+    # never anything more than one gap away) on top of ordinary distance
+    # snap. was_in_stream tracks whether the *previous* object belonged to
+    # a run at all, so the boost applies leaving one too, not just entering.
+    STREAM_TRANSITION_BOOST = 1.4
+    was_in_stream = False
+
     def wander_nudge(angle: float, x: float, y: float) -> float:
         bias = math.atan2(wander_target[1] - y, wander_target[0] - x)
         diff = (bias - angle + math.pi) % (2 * math.pi) - math.pi
@@ -525,16 +540,22 @@ def main() -> None:
             stack_anchor = None
             current_run_id = run_id
 
+        entering_stream = mode is not None and not was_in_stream
+        leaving_stream = mode is None and was_in_stream
+        boost = STREAM_TRANSITION_BOOST if (entering_stream or leaving_stream) else 1.0
+
         if mode == "stack":
             if stack_anchor is None:
                 # First member of this stack run: it still moves normally
-                # to establish where the stack sits — freezing it at
-                # whatever position preceded the run (rather than a
-                # deliberately chosen new spot) would make the stack's
-                # location arbitrary, and could even coincide with an
-                # unrelated object several beats away that just happened
-                # to precede it.
-                spacing = max(MIN_SPACING, min(MAX_SPACING, styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing, rng)))
+                # (plus the transition boost, since this gap is what sets
+                # the stack apart from whatever came before it) to
+                # establish where the stack sits — freezing it at whatever
+                # position preceded the run (rather than a deliberately
+                # chosen new spot) would make the stack's location
+                # arbitrary, and could even coincide with an unrelated
+                # object several beats away that just happened to precede
+                # it.
+                spacing = max(MIN_SPACING, min(MAX_SPACING, boost * styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing, rng)))
                 cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
                 cur_angle = wander_nudge(cur_angle, cur_x, cur_y)
                 new_x, new_y, cur_angle = place_at_distance(cur_x, cur_y, spacing, cur_angle)
@@ -551,17 +572,21 @@ def main() -> None:
                 line_run_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
                                              measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
                 line_run_angle = wander_nudge(line_run_angle, cur_x, cur_y)
-            spacing = max(MIN_SPACING, min(MAX_SPACING, styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing, rng)))
+            spacing = max(MIN_SPACING, min(MAX_SPACING, boost * styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing, rng)))
             new_x, new_y, line_run_angle = place_at_distance(cur_x, cur_y, spacing, line_run_angle)
             cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
             cur_angle = line_run_angle
         else:
-            # Outside a stream: normal distance-snap + motif-driven flow.
-            spacing = max(MIN_SPACING, min(MAX_SPACING, styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing, rng)))
+            # Outside a stream: normal distance-snap + motif-driven flow
+            # (plus the transition boost on the one gap right after a
+            # stream ends, for the same readability reason as entering one).
+            spacing = max(MIN_SPACING, min(MAX_SPACING, boost * styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing, rng)))
             cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
             cur_angle = wander_nudge(cur_angle, cur_x, cur_y)
             new_x, new_y, cur_angle = place_at_distance(cur_x, cur_y, spacing, cur_angle)
             cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
+
+        was_in_stream = mode is not None
 
         obj.x, obj.y = cur_x, cur_y
 

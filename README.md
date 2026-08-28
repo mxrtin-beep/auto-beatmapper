@@ -166,9 +166,14 @@ recurs — the same seed always reproduces the same wobble.
   always line, `1` = always stack). A run picks exactly one of the two for
   its whole length (never a mix), and whichever one a given repeating
   section picks stays consistent every time that section recurs. A run
-  spanning more than half a beat is never a stack (only ever a line),
-  matching the ranking criteria's Hard-difficulty rule against fully
-  overlapping objects more than half a beat apart.
+  spanning more than half a beat, or longer than 4 circles, is never a
+  stack (only ever a line) — matching the ranking criteria's Hard-
+  difficulty rule against fully overlapping objects more than half a beat
+  apart, and keeping a pile of circles from growing long enough to read as
+  an unreadable smear rather than a countable stack. The single gap
+  entering a stack or line run, and the single gap leaving one, is also
+  widened a bit past ordinary distance snap, so a run reads as a clearly
+  set-apart unit instead of bleeding into the normal flow on either side.
 - `--curviness C` (default `0.5`) — how curvy the map feels, `0`-`1`. `0`
   makes almost every slider a straight line; `1` makes almost every
   slider a pronounced curve, and makes the bow of every curved slider
@@ -239,9 +244,15 @@ that document:
   same-spot stacks are kept (relying on osu!'s own stack-leniency visual
   cascade, `StackLeniency: 0.7`), matching the document's "stacks are
   acceptable" guidance.
-- **Difficulty settings per tier** — `make_easy.py`'s `TIER_SETTINGS` clamps
-  AR/OD/HP/CS directly to each tier's own document range, not a relative
-  shift from Insane's own settings. SliderMultiplier is deliberately *not*
+- **Difficulty settings per tier** — `make_easy.py`'s `TIER_TARGET` sets
+  AR/OD/HP/CS to explicit per-tier values (taken from the same
+  `example/keha_backstabber/` reference set, so Insane genuinely reads as
+  the hardest difficulty — fast approach rate, tight timing window — and
+  each tier down is a deliberate step easier rather than every tier
+  clamping the same flat defaults into the middle of its own range),
+  clamped into each tier's own document range (`TIER_SETTINGS`) as a
+  safety net, not a relative shift from Insane's own settings.
+  SliderMultiplier is deliberately *not*
   clamped, even though the document's Easy/Normal guideline says to avoid
   slider velocity above 1.3 — a real reference Easy difficulty
   (`example/keha_backstabber/`) uses a SliderMultiplier of 3.54, leaning
