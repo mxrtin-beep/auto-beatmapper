@@ -83,7 +83,31 @@ structures used by every stage.
 
 ## Usage
 
-The easiest way to run the whole pipeline is `main.py`:
+### GUI
+
+`gui.py` wraps `main.py` in a desktop window — a file picker for the song,
+a field or checkbox for every argument below, and a Generate button:
+
+```bash
+pip install -r requirements.txt
+python3 gui.py
+```
+
+It runs the same pipeline `main.py` does (there's no separate logic to
+keep in sync), streams the pipeline's own console output into a log box
+so you can watch each stage run, and — if "Open the finished map when
+done" is checked — opens the resulting `.osz` (or, without `--osz`, the
+Insane `.osu`) with whatever your OS has registered for that file type
+once generation finishes.
+
+Built with Tkinter, which ships with the Python standard library on
+Windows and macOS installers; on Linux it's usually a separate distro
+package (`sudo apt install python3-tk` on Debian/Ubuntu, `sudo dnf
+install python3-tkinter` on Fedora).
+
+### Command line
+
+The easiest way to run the whole pipeline from a shell is `main.py`:
 
 ```bash
 pip install -r requirements.txt
