@@ -62,22 +62,17 @@ def detect_bpm_and_offset(y: np.ndarray, sr: int) -> tuple[float, float]:
        every sample of the envelope at each beat position rather than a
        handful of discrete peaks, which is far less sensitive to a single
        noisy detection or to being pulled off-phase by other percussion/
-       vocal chops that don't land on the kick. The best-scoring (bpm,
-       phase) pair gives a reliable whole-number BPM and an offset that's
-       *close*, but a raw onset-strength envelope's peak lags a kick's
-       actual attack — low-frequency transients have a real rise time, so
-       the envelope keeps climbing for a few tens of milliseconds after
-       the beat a player would actually feel. Landing on that peak reads
-       as noticeably late.
-    3. Every grid beat position from step 2 is backtracked (same technique
-       librosa's own onset detector uses) to the local minimum immediately
-       before it — the point the envelope started rising from, not where
-       it finished rising to — and the offset is nudged by the median of
-       how far that backtracked instant sits from the original grid
-       position. Anchored to the phase step 2 already validated (unlike
-       backtracking a fresh, independent onset list, which has no such
-       guarantee and can drift a full beat off), this only ever corrects
-       for the envelope's own attack lag.
+       vocal chops that don't land on the kick. This gives a reliable
+       whole-number BPM and a *close* phase to refine.
+    3. The same way a mapper sets the beat marker by eye in the editor's
+       waveform view — a kick's amplitude rises fast and decays slowly, so
+       the marker goes right at the peak, not before or after it — every
+       grid beat position from step 2 is refined to the actual local
+       amplitude peak of the raw (low-passed, same kick band as step 2)
+       waveform in a narrow window around it, and the offset is nudged by
+       the median of that correction. Anchored to the phase step 2 already
+       validated, this only ever locates the true peak near where the grid
+       already says a beat is, never a full beat off.
     """
     hop_length = 512
     times_seconds, onset_env = _low_frequency_onset_envelope(y, sr, hop_length)
@@ -109,18 +104,48 @@ def detect_bpm_and_offset(y: np.ndarray, sr: int) -> tuple[float, float]:
                 best_score, bpm, offset_seconds = score, float(candidate_bpm), float(offset)
 
     beat_length = 60.0 / bpm
-    idx = grid_indices(bpm, offset_seconds)
-    if len(idx) > 0:
-        backtracked_idx = librosa.onset.onset_backtrack(idx, onset_env)
-        backtracked_times = times_seconds[backtracked_idx]
-        nearest_grid = offset_seconds + np.round((backtracked_times - offset_seconds) / beat_length) * beat_length
-        residuals = backtracked_times - nearest_grid
-        offset_seconds += float(np.median(residuals))
-        offset_seconds %= beat_length
-        if offset_seconds < 0:
-            offset_seconds += beat_length
+    refined = _refine_offset_to_waveform_peak(y, sr, bpm, offset_seconds)
+    if refined is not None:
+        offset_seconds = refined % beat_length
 
     return bpm, offset_seconds
+
+
+def _refine_offset_to_waveform_peak(y: np.ndarray, sr: int, bpm: float, offset_seconds: float,
+                                     window_ms: float = 60.0) -> float | None:
+    """Nudge `offset_seconds` to the median actual amplitude-peak position
+    of the raw, low-passed waveform near each grid beat — literally where a
+    mapper's eye would put the marker on a fast-attack, slow-decay kick,
+    rather than a smoothed/delayed feature derived from it. Returns None if
+    there's nothing to refine against (e.g. a near-silent track).
+    """
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        from scipy.signal import butter, sosfiltfilt
+        sos = butter(4, 200, btype="low", fs=sr, output="sos")
+        envelope = np.abs(sosfiltfilt(sos, y))
+
+    beat_length = 60.0 / bpm
+    window = window_ms / 1000.0
+    n_beats = int((len(y) / sr - offset_seconds) / beat_length)
+    beat_times = offset_seconds + np.arange(n_beats) * beat_length
+
+    corrections = []
+    for bt in beat_times:
+        lo = int((bt - window) * sr)
+        hi = int((bt + window) * sr)
+        if lo < 0 or hi >= len(envelope):
+            continue
+        local = envelope[lo:hi]
+        if local.max() <= 0:
+            continue
+        peak_t = (lo + int(np.argmax(local))) / sr
+        corrections.append(peak_t - bt)
+
+    if not corrections:
+        return None
+    return offset_seconds + float(np.median(corrections))
 
 
 def build_half_beat_grid(offset_seconds: float, bpm: float, duration_seconds: float) -> list[float]:

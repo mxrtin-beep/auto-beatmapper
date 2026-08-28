@@ -11,15 +11,17 @@ every step.
    offset (the time of the first beat) — every integer BPM near a rough
    broadband guess is scored, at every possible phase, against how well a
    beat grid lines up with a low-frequency ("kick drum") onset envelope,
-   giving a reliable BPM and a *close* offset; a low-frequency transient's
-   onset-strength envelope peaks a real (if small) amount after the actual
-   attack a player would feel as "the beat," so that offset is refined
-   once more by backtracking each grid beat to the local minimum right
-   before it (the same technique librosa's own onset detector uses),
-   anchored to the phase already found rather than an independent guess —
-   then places a hit-circle on every half beat for the whole track. Pure
-   rhythm skeleton, no styling. Pass `--bpm`/`--offset` (ms) to set either
-   manually instead of auto-detecting it.
+   giving a reliable BPM and a *close* offset; that offset is then refined
+   the way a mapper sets it by eye in the editor's waveform view — a
+   kick's amplitude rises fast and decays slowly, so the marker goes right
+   at the peak — by finding the actual local amplitude peak of the raw
+   (low-passed, same kick band) waveform near each grid beat and nudging
+   the offset by the median correction — then places a hit-circle on
+   every half beat for the whole track. Pure rhythm skeleton, no styling.
+   Pass `--bpm`/`--offset` (ms) to set either manually instead of
+   auto-detecting it — any value works for `--offset`, since it's wrapped
+   to the equivalent position within one beat (e.g. `-118` and `334` at
+   137 BPM name the same beat).
 
 2. **`add_variety.py`** — takes a base beatmap and reshapes it using the
    song's loudness (RMS energy) over time:
@@ -50,34 +52,31 @@ every step.
 
 4. **`make_easy.py`** *(runs 4 times by default, once per tier; skip with
    `--no-spread` to get just Insane)* — derives Hard, Normal, and Easy from
-   Insane: each tier's Difficulty settings are clamped to osu!'s own
-   ranking-criteria range for that tier, and note density is thinned a lot
-   further at each step down, calibrated against a real hand-mapped
-   Easy/Normal/Hard/Insane spread (`example/keha_backstabber/`) rather
-   than just "somewhat less than Insane" — a real Easy never has two
-   objects closer than a full beat, and leans heavily on long slider
-   chains over individual clicks. `merge_gap_beats` (a quarter beat for
-   Hard, up to a full beat for Easy) controls how wide a net the merge
-   pass casts: **any** run of adjacent circles that close together — not
-   just add_variety.py's own fast "stream" bursts — becomes one held
-   slider chain instead of several clicks, with a tier-scaled probability
-   of even happening at all (so density actually falls off tier to tier,
-   instead of Hard converging on Normal's level), on top of a tier-scaled
-   chance to drop a note outright — plus more predictable, regular
-   hitsounds where it thins (only ever adding a downbeat accent, never
-   silencing an existing one). Hard only thins the song's *repetitive*
-   sections (a verse/chorus that recurs), lightly; Normal and Easy thin
-   everywhere, progressively more. Also derives Insane itself (no
-   thinning, just Difficulty-setting clamping) from the Styled output, so
-   all four tiers go through the same clamping logic. SliderMultiplier is
-   never touched at any tier — a real Easy's long, slow-*reading* sliders
-   actually use a *higher* slider velocity (more on-screen distance per
-   beat) than Insane's, not a lower one.
-
-   The same merge-adjacent-circles-into-one-slider mechanism
-   (`merge_chain` in `make_easy.py`) is a general style tool, not just a
-   thinning one — reach for it anywhere a run of circles reads better as
-   one held slider than several separate clicks, on any difficulty.
+   Insane by deleting objects, nothing else: no merging, no reshaping. An
+   object either survives exactly as apply_style.py placed it, or it's
+   gone entirely — never partially edited into something new, which used
+   to be exactly what produced "bad spacing" complaints from checkers (a
+   merged slider's geometry doesn't automatically read as correctly
+   spaced the way two untouched, already-validated objects do). Circles on
+   a quarter/eighth-beat subdivision are deleted first and most often —
+   the fast subdivisions a lower tier has the least business keeping —
+   then half-beat circles, then (rarely) whole-beat circles or whole
+   sliders, at a tier-scaled probability per category. A downbeat is never
+   deleted, so `regularize_hitsounds` can always find something to accent
+   every measure (only ever *adding* an accent there, never silencing an
+   existing one elsewhere) — no gap without a hitsound. A deterministic
+   final pass also clears any pair still closer than the tier's own
+   minimum gap (a coin flip can, by chance, still leave one too many close
+   together, and that reads as a real visual overlap at a lower tier's
+   larger circle size). Hard only thins the song's *repetitive* sections
+   (a verse/chorus that recurs), lightly; Normal and Easy thin everywhere,
+   progressively more. Also derives Insane itself (no thinning, just
+   Difficulty-setting clamping) from the Styled output, so all four tiers
+   go through the same clamping logic. SliderMultiplier is never touched
+   at any tier — a real hand-mapped Easy's long, slow-*reading* sliders
+   (see `example/keha_backstabber/`) actually use a *higher* slider
+   velocity (more on-screen distance per beat) than Insane's, not a lower
+   one.
 
 `beatmap_utils.py` holds the shared `.osu` parsing/writing code and data
 structures used by every stage.
@@ -248,28 +247,31 @@ that document:
   (`example/keha_backstabber/`) uses a SliderMultiplier of 3.54, leaning
   on long, slow-*reading* sliders rather than a cramped multiplier; that
   concrete example took priority over the document's guideline here.
-- **Drain time spread** — `make_easy.py` asserts each tier's first/last
-  object *end* time exactly matches Insane's (a merged slider's own start
-  can be earlier than the last original object it absorbed, so the
-  comparison uses each side's actual end); thinning only ever touches
-  objects strictly between the first and last.
+- **Drain time spread** — deletion never touches the first or last object,
+  so `make_easy.py`'s assertion that each tier's first/last object time
+  exactly matches Insane's should always hold trivially.
 - **Objects never off-screen, snapping, timing overlaps** — enforced
   throughout (playfield margin, `slider_length_for_gap`'s rounded-gap
-  derivation, `rounded_gap_ms`); see the pipeline stage docstrings.
+  derivation, `rounded_gap_ms`); see the pipeline stage docstrings. A
+  deterministic final pass in `make_easy.py` (`enforce_min_gap`) also
+  clears any remaining pair closer than a tier's own minimum gap, which
+  otherwise reads as a real visual overlap at that tier's larger circle
+  size even though the two objects' declared positions don't literally
+  coincide.
 - **Combo colours / hitsounds** — `beatmap_utils.default_metadata` sets
   three custom combo colours and every hittable edge gets an audible
   hitsound (never silent); `make_easy.py`'s `regularize_hitsounds` only
   ever *adds* a downbeat accent in a thinned measure, never removes an
   existing one, so a tier that thins broadly (Normal/Easy) can't end up
-  with long silent-feeling stretches the way blanket-simplifying every
-  non-downbeat hit down to plain would.
+  with long silent-feeling stretches. Downbeats are also never deleted,
+  which is what guarantees regularize_hitsounds always has something to
+  accent every measure in the first place.
 - **Known gap**: the document's Easy/Normal-tier note-density guideline
-  ("mostly 1/1, 2/1, or slower") is met for objects `make_easy.py` can
-  touch (plain circle runs), but not for sliders `add_variety.py` already
-  built for Insane's intense sections (bounce/chain sliders) — `make_easy.py`
-  only ever merges/drops *circles*, never reshapes an existing slider, so
-  a fast passage that Insane already turned entirely into sliders keeps
-  that same density in Easy too. Spinner rules, skinning rules, and
+  ("mostly 1/1, 2/1, or slower") is closer than before but not fully met
+  — `make_easy.py` deletes whole objects only, and a downbeat is never
+  deleted, so a genuine downbeat-to-downbeat gap shorter than a full beat
+  at a fast tempo can survive even in Easy (verified rare: 3 of ~260
+  objects on the reference song). Spinner rules, skinning rules, and
   BPM-scaling nuances aren't addressed — this tool doesn't generate
   spinners or skin elements at all.
 
