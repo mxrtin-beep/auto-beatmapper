@@ -318,3 +318,36 @@ def clamp_to_playfield(x: float, y: float, margin: int = 20) -> Tuple[int, int]:
     x = max(margin, min(PLAYFIELD_W - margin, x))
     y = max(margin, min(PLAYFIELD_H - margin, y))
     return int(round(x)), int(round(y))
+
+
+def fix_time_overlaps(objects: List[HitObject], beat_length_ms: float, slider_multiplier: float,
+                       min_gap_ms: float = 1.0) -> int:
+    """Guarantee no slider's *on-disk* end time reaches into the next object's start.
+
+    `HitObject.time` is written to the .osu file rounded to a whole
+    millisecond (`to_line` uses `:.0f`), but a slider's rendered duration is
+    reconstructed by osu! from its unrounded `length` — so two objects whose
+    gap was computed to be exactly one subdivision apart can, after each
+    object's start time is independently rounded, end up with the slider's
+    rounded end landing at or past the next object's rounded start: a
+    same-time-slot overlap that osu! (and any beatmap checker) flags as
+    illegal, even though nothing here ever intended it. This shrinks the
+    offending slider's `length` just enough to leave `min_gap_ms` of
+    clearance — never moves any object's `time`, which would instead
+    un-snap it from the beat grid. Mutates `objects` (sorted by time) in
+    place; returns how many sliders were shrunk.
+    """
+    px_per_beat = slider_multiplier * 100.0
+    fixed = 0
+    for a, b in zip(objects, objects[1:]):
+        if not a.is_slider:
+            continue
+        a_start = round(a.time)
+        b_start = round(b.time)
+        a_end = a_start + a.duration_ms(beat_length_ms, slider_multiplier)
+        if a_end > b_start - min_gap_ms:
+            allowed_duration = max(1.0, (b_start - a_start) - min_gap_ms)
+            allowed_one_slide_ms = allowed_duration / max(1, a.slides)
+            a.length = max(1.0, px_per_beat * (allowed_one_slide_ms / beat_length_ms))
+            fixed += 1
+    return fixed

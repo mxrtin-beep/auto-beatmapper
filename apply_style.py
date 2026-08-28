@@ -62,7 +62,7 @@ import random
 
 import numpy as np
 
-from beatmap_utils import HitObject, PLAYFIELD_H, PLAYFIELD_W, clamp_to_playfield, read_osu, write_osu
+from beatmap_utils import HitObject, PLAYFIELD_H, PLAYFIELD_W, clamp_to_playfield, fix_time_overlaps, read_osu, write_osu
 
 MARGIN = 30
 MIN_SPACING = 10.0    # px, safety floor only — the distance-snap formula rarely needs it
@@ -163,14 +163,19 @@ def motif_turn_degrees(tier: str, time_ms: float, offset_ms: float, beat_length_
 
 
 def next_angle(prev_angle: float, tier: str, time_ms: float, offset_ms: float, beat_length_ms: float,
-               measure_length_ms: float, measure_buckets: dict[int, int], rng: random.Random) -> float:
+               measure_length_ms: float, measure_buckets: dict[int, int], rng: random.Random,
+               jitter_degrees: float = 4.0) -> float:
     """Advance the flow angle using the tier's motif, plus a small humanizing jitter.
 
-    The jitter is intentionally small (a few degrees) — the point of a motif
-    is that it repeats recognizably; too much randomness would wash that out.
+    The jitter is `jitter_degrees` wide by default — small, since the point
+    of a motif is that it repeats recognizably and too much randomness
+    would wash that out — but callers can widen it (e.g. `--angle-jitter`)
+    to get more angle variety without touching anything about timing: this
+    function only ever changes the flow *angle*, never `time_ms`, so a
+    wider jitter still can't move an object off the beat grid.
     """
     turn_degrees = motif_turn_degrees(tier, time_ms, offset_ms, beat_length_ms, measure_length_ms, measure_buckets)
-    turn_degrees += rng.uniform(-4.0, 4.0)
+    turn_degrees += rng.uniform(-jitter_degrees, jitter_degrees)
     return prev_angle + math.radians(turn_degrees)
 
 
@@ -248,8 +253,10 @@ def snap_distance(gap_ms: float, beat_length_ms: float, slider_multiplier: float
     return slider_multiplier * 100.0 * (gap_ms / beat_length_ms)
 
 
-def build_stream_runs(objects: list[HitObject], beat_length_ms: float,
-                       rng: random.Random) -> dict[int, tuple[int, str]]:
+def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: random.Random, seed: int,
+                       offset_ms: float = 0.0, measure_length_ms: float = 0.0,
+                       measure_buckets: dict[int, int] | None = None,
+                       stack_probability: float = 0.5) -> dict[int, tuple[int, str]]:
     """Decide a stack/line mode for every object that's part of a stream.
 
     A stream is a maximal run of consecutive circles (never sliders) each a
@@ -271,6 +278,17 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float,
     beyond that it continues as "line" — so a literal stack (everything
     piled on one spot) never lasts longer than that, while a run can still
     go the rest of the way to the 8-circle cap as an overlapping line.
+
+    Which of the two a given run picks is keyed to its measure's energy
+    bucket (the same signal apply_style's motifs use), not a fresh coin
+    flip every time: a bucket-seeded RNG makes the choice, so every run
+    that lands in "this kind of section" (a verse's second and third
+    repeat, say) reuses the *same* stack-vs-line choice every time it
+    recurs, instead of re-rolling and looking different on each repeat.
+    `stack_probability` still controls the overall mix (both are still
+    good, per the design brief — this only makes the mix repeat
+    consistently within a given section rather than changing which mix it
+    is).
     """
     quarter_beat_ms = beat_length_ms / 4.0
     half_beat_ms = beat_length_ms / 2.0
@@ -290,8 +308,14 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float,
             j += 1
         run_len = j - i
         if run_len >= 2:
-            base_mode = "stack" if rng.random() < 0.5 else "line"
             run_start_time = objects[i].time
+            if measure_buckets and measure_length_ms:
+                measure_index = int((run_start_time - offset_ms) // measure_length_ms)
+                bucket = measure_buckets.get(measure_index, 0)
+                bucket_rng = random.Random(f"stream_mode:{bucket}:{seed}")
+                base_mode = "stack" if bucket_rng.random() < stack_probability else "line"
+            else:
+                base_mode = "stack" if rng.random() < stack_probability else "line"
             for k in range(i, j):
                 elapsed = objects[k].time - run_start_time
                 mode = base_mode if (base_mode == "line" or elapsed < half_beat_ms) else "line"
@@ -310,6 +334,16 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=None,
                          help="Random seed. Omit for different styling every run; pass a fixed "
                               "value (printed on every run) to reproduce the exact same map later.")
+    parser.add_argument("--angle-jitter", type=float, default=4.0,
+                         help="Degrees of random jitter added on top of each motif's turn angle "
+                              "(circles and slider curves alike). Widening this only changes "
+                              "angles/flow, never timing, note count, or object type — a way to "
+                              "get more (or less) variety in the flow without being restrictive.")
+    parser.add_argument("--stack-probability", type=float, default=0.5,
+                         help="Overall mix between stream runs that stack in one spot and runs "
+                              "that trace a straight line (0 = always line, 1 = always stack). "
+                              "Which one a given repeating section picks stays consistent across "
+                              "its repeats either way.")
     args = parser.parse_args()
 
     if args.seed is None:
@@ -337,8 +371,10 @@ def main() -> None:
         energy_at = lambda t: 0.5
         q_low, q_high = 0.35, 0.75
 
-    stream_mode = build_stream_runs(objects, beat_length_ms, rng)
     measure_buckets = compute_measure_energy_buckets(energy_at, offset_ms, measure_length_ms, objects[-1].time)
+    stream_mode = build_stream_runs(objects, beat_length_ms, rng, args.seed, offset_ms=offset_ms,
+                                     measure_length_ms=measure_length_ms, measure_buckets=measure_buckets,
+                                     stack_probability=args.stack_probability)
 
     # Start roughly centered.
     cur_x, cur_y = PLAYFIELD_W / 2.0, PLAYFIELD_H / 2.0
@@ -377,7 +413,7 @@ def main() -> None:
                 # unrelated object several beats away that just happened
                 # to precede it.
                 spacing = max(MIN_SPACING, min(MAX_SPACING, snap_distance(gap_ms, beat_length_ms, slider_multiplier)))
-                cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng)
+                cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
                 new_x, new_y, cur_angle = place_at_distance(cur_x, cur_y, spacing, cur_angle)
                 cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
                 stack_anchor = (cur_x, cur_y)
@@ -390,7 +426,7 @@ def main() -> None:
             # overlap along a straight line rather than zigzagging.
             if line_run_angle is None:
                 line_run_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
-                                             measure_length_ms, measure_buckets, rng)
+                                             measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
             spacing = max(MIN_SPACING, min(MAX_SPACING, snap_distance(gap_ms, beat_length_ms, slider_multiplier)))
             new_x, new_y, line_run_angle = place_at_distance(cur_x, cur_y, spacing, line_run_angle)
             cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
@@ -398,7 +434,7 @@ def main() -> None:
         else:
             # Outside a stream: normal distance-snap + motif-driven flow.
             spacing = max(MIN_SPACING, min(MAX_SPACING, snap_distance(gap_ms, beat_length_ms, slider_multiplier)))
-            cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng)
+            cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
             new_x, new_y, cur_angle = place_at_distance(cur_x, cur_y, spacing, cur_angle)
             cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
 
@@ -415,7 +451,7 @@ def main() -> None:
                 # a more pronounced circular arc that actually guides the
                 # cursor through a real curve.
                 end_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
-                                        measure_length_ms, measure_buckets, rng)
+                                        measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
                 end_x, end_y, end_angle = place_at_distance(cur_x, cur_y, segment_length, end_angle)
                 end_x, end_y = clamp_to_playfield(end_x, end_y, margin=MARGIN)
 
@@ -462,7 +498,7 @@ def main() -> None:
                 new_points = []
                 for _ in range(num_segments):
                     cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
-                                            measure_length_ms, measure_buckets, rng)
+                                            measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
                     px, py, cur_angle = place_at_distance(cur_x, cur_y, segment_length, cur_angle)
                     cur_x, cur_y = clamp_to_playfield(px, py, margin=MARGIN)
                     new_points.append((cur_x, cur_y))
@@ -471,6 +507,11 @@ def main() -> None:
             prev_end_time = obj.end_time(beat_length_ms, slider_multiplier)
         else:
             prev_end_time = obj.time
+
+    # apply_style.py never changes a slider's length/duration, so this
+    # should be a no-op in practice — kept as a defensive final check since
+    # the input Variety file might have been hand-edited.
+    fix_time_overlaps(objects, beat_length_ms, slider_multiplier)
 
     bm.hit_objects = objects
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)

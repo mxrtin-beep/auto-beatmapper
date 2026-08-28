@@ -61,7 +61,7 @@ import random
 import librosa
 import numpy as np
 
-from beatmap_utils import HitObject, read_osu, write_osu
+from beatmap_utils import HitObject, fix_time_overlaps, read_osu, write_osu
 
 # Hitsound bit flags (osu! HitObject hitSound field / slider edgeHitsounds).
 HS_NORMAL = 0
@@ -619,6 +619,12 @@ def main() -> None:
                 obj.edge_hitsounds = [hs] + [HS_NORMAL] * obj.slides
             else:
                 obj.edge_hitsounds = [hs] * (obj.slides + 1)
+
+    # Close any overlap that only shows up once times are rounded to whole
+    # milliseconds on disk (see fix_time_overlaps) before the final check.
+    shrunk = fix_time_overlaps(new_objects, beat_length_ms, slider_multiplier)
+    if shrunk:
+        print(f"Trimmed {shrunk} slider(s) to clear a rounding-induced overlap with the next object")
 
     # Sanity check: nothing should overlap in time.
     for a, b in zip(new_objects, new_objects[1:]):

@@ -5,12 +5,13 @@ Optional Stage 4 — Make an easier difficulty.
 Takes the final Styled beatmap (positions already set by apply_style.py)
 and derives a second, easier difficulty from it: lower Difficulty settings,
 and fewer clicks in the song's *repetitive* sections (a verse or chorus
-that recurs) — a run of closely-spaced circles there gets thinned by
-merging adjacent pairs into short sliders, using the exact positions
+that recurs) — a run of closely-spaced circles there gets thinned, either
+by merging adjacent pairs into short sliders (using the exact positions
 apply_style.py already chose, so it still looks like the same map, just
-calmer. Non-repetitive sections (a bridge, an intro/outro, anything that
-only happens once) are left untouched — simplifying material the player
-only ever sees once doesn't help them learn anything.
+calmer) or by dropping some of them outright, so it still looks like the
+same map, just calmer. Non-repetitive sections (a bridge, an intro/outro,
+anything that only happens once) are left untouched — simplifying material
+the player only ever sees once doesn't help them learn anything.
 
 "Repetitive" is decided the same way apply_style.py's motif regularity is:
 each measure gets an energy bucket (its own average loudness, quantized),
@@ -30,7 +31,9 @@ from __future__ import annotations
 import argparse
 import os
 
-from beatmap_utils import HitObject, read_osu, write_osu
+import random
+
+from beatmap_utils import HitObject, fix_time_overlaps, read_osu, write_osu
 from apply_style import compute_energy_lookup, compute_measure_energy_buckets
 from add_variety import is_on_downbeat
 
@@ -78,7 +81,16 @@ def find_repetitive_measures(measure_buckets: dict[int, int], window: int = 4) -
 
 
 def easier_difficulty(difficulty: dict[str, str]) -> dict[str, str]:
-    """Lower HP/CS/OD/AR (larger circles, more reaction time, more forgiving timing/health)."""
+    """Lower HP/CS/OD/AR (larger circles, more reaction time, more forgiving timing/health).
+
+    Deliberately does *not* touch SliderMultiplier: every slider's `length`
+    in the map was chosen to produce a specific duration at the *original*
+    multiplier (that's the whole point of distance snap), so changing the
+    multiplier here would silently change every existing slider's timing —
+    exactly what this stage promises never to do. "Slower" instead comes
+    from thin_repetitive_streams below turning fast circle pairs into
+    calmer sliders, plus the extra reaction time from a lower AR.
+    """
 
     def shift(key: str, delta: float, lo: float, hi: float) -> str:
         try:
@@ -123,19 +135,42 @@ def recompute_combos(objects: list[HitObject], offset_ms: float, measure_length_
 
 def thin_repetitive_streams(objects: list[HitObject], beat_length_ms: float, slider_multiplier: float,
                              offset_ms: float, measure_length_ms: float,
-                             repetitive_measures: set[int]) -> list[HitObject]:
+                             repetitive_measures: set[int], rng: random.Random,
+                             drop_probability: float = 0.12) -> list[HitObject]:
     """Merge adjacent close-together circle pairs into sliders, only in repetitive measures.
 
     A quarter-beat-or-less gap between two circles is exactly what
     add_variety.py calls a stream note. Merging a pair into a slider keeps
     the same two positions (so it still looks like the same map) but cuts
     the click count for that pair in half.
+
+    Only pairs whose gap is (within 2ms of) an exact eighth- or
+    quarter-beat multiple are merged. add_variety.py's stream subdivisions
+    are packed to fill an arbitrary gap in a *whole number* of equal steps
+    (see its own docstring), which can land a fraction off the canonical
+    beat grid the editor's own snap divisor uses — turning such a pair into
+    a slider bakes that drift into the slider's declared duration, which is
+    exactly what an editor flags as "not snapped". Skipping those pairs
+    instead of merging them keeps every slider this stage introduces
+    genuinely on-grid.
+
+    Some of the stream notes left unmerged (still a plain quarter/eighth-beat
+    circle) are instead dropped outright at `drop_probability`, for a
+    further, gentler reduction in click count beyond just merging pairs —
+    dropping a note can never introduce a timing overlap, so it's safe
+    wherever thinning already applies.
     """
     quarter_beat_ms = beat_length_ms / 4.0
+    eighth_beat_ms = beat_length_ms / 8.0
     threshold = quarter_beat_ms + 1.0
+    grid_tolerance_ms = 2.0
 
     def measure_of(time_ms: float) -> int:
         return int((time_ms - offset_ms) // measure_length_ms)
+
+    def on_grid(duration_ms: float) -> bool:
+        nearest = round(duration_ms / eighth_beat_ms) * eighth_beat_ms
+        return abs(duration_ms - nearest) <= grid_tolerance_ms
 
     result: list[HitObject] = []
     i = 0
@@ -143,22 +178,32 @@ def thin_repetitive_streams(objects: list[HitObject], beat_length_ms: float, sli
     while i < n:
         obj = objects[i]
         has_next = i + 1 < n
+        gap_ms = (objects[i + 1].time - obj.time) if has_next else None
         can_merge = (has_next and not obj.is_slider and not objects[i + 1].is_slider
-                     and (objects[i + 1].time - obj.time) <= threshold
+                     and gap_ms <= threshold and on_grid(gap_ms)
                      and measure_of(obj.time) in repetitive_measures
                      and measure_of(objects[i + 1].time) in repetitive_measures)
         if can_merge:
             nxt = objects[i + 1]
-            duration_ms = nxt.time - obj.time
+            duration_ms = round((nxt.time - obj.time) / eighth_beat_ms) * eighth_beat_ms
             length = slider_multiplier * 100.0 * (duration_ms / beat_length_ms)
             result.append(HitObject(
                 x=obj.x, y=obj.y, time=obj.time, is_new_combo=obj.is_new_combo, hitsound=obj.hitsound,
                 is_slider=True, curve_type="L", points=[(nxt.x, nxt.y)], slides=1, length=length,
             ))
             i += 2
-        else:
-            result.append(obj)
-            i += 1
+            continue
+
+        is_dense_stream_note = (not obj.is_slider and has_next
+                                 and gap_ms is not None and gap_ms <= threshold)
+        if (is_dense_stream_note and result and not result[-1].is_slider
+                and measure_of(obj.time) in repetitive_measures
+                and rng.random() < drop_probability):
+            i += 1  # drop this note entirely
+            continue
+
+        result.append(obj)
+        i += 1
     return result
 
 
@@ -190,7 +235,19 @@ def main() -> None:
     parser.add_argument("--audio", required=True, help="Path to the same song's MP3 (used to find repetitive sections).")
     parser.add_argument("--output", required=True)
     parser.add_argument("--version", default="Auto Easy", help="Difficulty/version name to write into the map.")
+    parser.add_argument("--drop-probability", type=float, default=0.12,
+                         help="Chance an unmerged repetitive-section stream note is dropped "
+                              "entirely for extra thinning (0-1).")
+    parser.add_argument("--seed", type=int, default=None,
+                         help="Random seed for which notes get dropped. Omit for a different "
+                              "result every run; pass a fixed value (printed on every run) to "
+                              "reproduce it later.")
     args = parser.parse_args()
+
+    if args.seed is None:
+        args.seed = random.SystemRandom().randrange(2**32)
+    rng = random.Random(args.seed)
+    print(f"Using seed: {args.seed}")
 
     bm = read_osu(args.beatmap)
     bm.metadata["Version"] = args.version
@@ -211,14 +268,21 @@ def main() -> None:
 
     before = len(objects)
     objects = thin_repetitive_streams(objects, beat_length_ms, slider_multiplier, offset_ms,
-                                       measure_length_ms, repetitive_measures)
-    print(f"Thinned {before - len(objects)} object(s) by merging stream pairs into sliders")
+                                       measure_length_ms, repetitive_measures, rng,
+                                       drop_probability=args.drop_probability)
+    print(f"Thinned {before - len(objects)} object(s) by merging stream pairs into sliders or dropping them")
 
     regularize_hitsounds(objects, offset_ms, measure_length_ms, repetitive_measures)
     recompute_combos(objects, offset_ms, measure_length_ms)
 
     bm.hit_objects = objects
     bm.difficulty = easier_difficulty(bm.difficulty)
+
+    # Close any overlap that only shows up once times are rounded to whole
+    # milliseconds on disk (see fix_time_overlaps) before the final check.
+    shrunk = fix_time_overlaps(objects, beat_length_ms, slider_multiplier)
+    if shrunk:
+        print(f"Trimmed {shrunk} slider(s) to clear a rounding-induced overlap with the next object")
 
     # Sanity check: thinning must never introduce an overlap.
     for a, b in zip(objects, objects[1:]):

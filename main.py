@@ -13,8 +13,9 @@ This produces, in --outdir (default: output/<song name>/):
     <Song> (Base).osu
     <Song> (Variety).osu
     <Song> (Styled).osu
+    <Song> (Easy).osu
 
-Pass --osz to also zip those three .osu files together with the MP3 into a
+Pass --osz to also zip those .osu files together with the MP3 into a
 single .osz package that can be dragged straight into osu!.
 
 Pass --restyle-only to re-run *just* Stage 3 against an already-generated
@@ -25,11 +26,13 @@ the rhythm at all:
 
     python3 main.py song.mp3 --restyle-only "out/Song (Variety).osu" --seed 123
 
-Pass --easy to also derive a second, easier difficulty from the Styled
-beatmap (make_easy.py): lower Difficulty settings, and some of the
-song's repetitive (verse/chorus-like) stream density thinned into
-sliders. Non-repetitive sections (a bridge, an intro/outro) are left as
-the Styled difficulty had them.
+A second, easier difficulty is derived from the Styled beatmap
+(make_easy.py) automatically: lower Difficulty settings, and some of the
+song's repetitive (verse/chorus-like) stream density thinned — merged into
+sliders or dropped outright — plus more predictable hitsounds there.
+Non-repetitive sections (a bridge, an intro/outro) are left as the Styled
+difficulty had them. Pass --no-easy to skip it and produce only the three
+main difficulties.
 """
 
 from __future__ import annotations
@@ -60,8 +63,9 @@ def main() -> None:
                          help="Skip stages 1-2 and just re-run apply_style.py against this existing "
                               "Variety .osu with a new --seed — a way to get a different flow/angle "
                               "pattern without changing the rhythm at all.")
-    parser.add_argument("--easy", action="store_true",
-                         help="Also derive an easier difficulty from the Styled beatmap (make_easy.py).")
+    parser.add_argument("--no-easy", dest="easy", action="store_false", default=True,
+                         help="Skip deriving the easier difficulty from the Styled beatmap "
+                              "(make_easy.py) — by default it's generated automatically.")
     args = parser.parse_args()
 
     if args.seed is None:
@@ -87,7 +91,7 @@ def main() -> None:
         output_paths = [styled_path]
         if args.easy:
             print("=== Stage 4: make easy ===")
-            _run_module_main(make_easy, [styled_path, "--audio", args.audio, "--output", easy_path])
+            _run_module_main(make_easy, [styled_path, "--audio", args.audio, "--output", easy_path, "--seed", str(args.seed)])
             output_paths.append(easy_path)
         if args.osz:
             osz_path = os.path.join(outdir, f"{title}.osz")
@@ -113,7 +117,7 @@ def main() -> None:
 
     if args.easy:
         print("=== Stage 4: make easy ===")
-        _run_module_main(make_easy, [styled_path, "--audio", args.audio, "--output", easy_path])
+        _run_module_main(make_easy, [styled_path, "--audio", args.audio, "--output", easy_path, "--seed", str(args.seed)])
         output_paths.append(easy_path)
 
     if args.osz:
