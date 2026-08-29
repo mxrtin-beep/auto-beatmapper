@@ -79,6 +79,10 @@ def main() -> None:
     parser.add_argument("--curviness", type=float, default=None,
                          help="Forwarded to apply_style.py's --curviness (0-1, how curvy sliders "
                               "feel). Omit to use apply_style.py's own default.")
+    parser.add_argument("--slider-length-bias", type=float, default=None,
+                         help="Forwarded to add_variety.py's --slider-length-bias (0-1, fewer/"
+                              "longer sliders vs. more/shorter ones). Omit to use add_variety.py's "
+                              "own default.")
     parser.add_argument("--stream-frequency", type=float, default=None,
                          help="Forwarded to both add_variety.py's and apply_style.py's own "
                               "--stream-frequency (add_variety.py decides how often fast runs of "
@@ -133,6 +137,8 @@ def main() -> None:
     variety_extra_args: list[str] = []
     if args.stream_frequency is not None:
         variety_extra_args += ["--stream-frequency", str(args.stream_frequency)]
+    if args.slider_length_bias is not None:
+        variety_extra_args += ["--slider-length-bias", str(args.slider_length_bias)]
 
     title = args.title or os.path.splitext(os.path.basename(args.audio))[0]
     outdir = args.outdir

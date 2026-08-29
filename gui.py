@@ -75,18 +75,17 @@ SLIDER_PARAMS = [
                 "arcs. Min 0 (straight), max 1 (very curved). Default 0.5.",
                 0.0, 1.0, 0.5),
     SliderParam("--stream-frequency", "Stream frequency",
-                "How often a fast run of notes (on quarter or eighth beats) becomes a "
-                "deliberate stream — either piled into one stacked spot or spread along a "
-                "straight line — instead of just following the normal flow like any other "
-                "note. Min 0 (never a stream; a run is still capped at 3 notes in a row, but "
-                "they're never piled up or locked onto one line), max 1 (always a stream). "
-                "Default 0.5.",
+                "How often fast bursts (4+ notes a quarter beat or less apart) happen at all. "
+                "Min 0 (none — fast notes stay in short 2-3 note bursts or spread out to half "
+                "beats), max 1 (as many long streams as the song's energy allows). Default 0.5.",
                 0.0, 1.0, 0.5),
     SliderParam("--stack-probability", "Stack vs. line mix",
-                "Of whichever streams Stream frequency above already decided to make: how many "
-                "pile into one stacked spot instead of spreading along a short straight line. "
-                "Has no effect on how often you get a stream in the first place — only on what "
-                "the ones you get look like. Min 0 (always a line), max 1 (always a stack). "
+                "For streams that do happen: piled onto one spot vs. spread along a straight "
+                "line. Min 0 (always a line), max 1 (always a stack). Default 0.5.",
+                0.0, 1.0, 0.5),
+    SliderParam("--slider-length-bias", "Slider length",
+                "How long a merged slider tends to run, in normal (non-intense) sections. "
+                "Min 0 (more, shorter/choppier sliders), max 1 (fewer, longer sliders). "
                 "Default 0.5.",
                 0.0, 1.0, 0.5),
     SliderParam("--temperature", "Creativity",
@@ -530,8 +529,11 @@ class App:
 
             pipeline_main.main()
 
+            # Printing the same stats to the log is only useful when there's
+            # no PDF report being generated for them — with the report
+            # checked, the log dump is just noisy duplication of the file.
             insane_path = os.path.join(outdir, f"{title} [Insane].osu")
-            if os.path.isfile(insane_path):
+            if not self.report_var.get() and os.path.isfile(insane_path):
                 try:
                     stats = beatmap_stats.compute_stats(insane_path)
                     self.log_queue.put("\n" + stats.format() + "\n")

@@ -103,6 +103,21 @@ class HitObject:
     def end_time(self, beat_length_ms: float, slider_multiplier: float) -> float:
         return self.time + self.duration_ms(beat_length_ms, slider_multiplier)
 
+    def end_position(self) -> Tuple[float, float]:
+        """Where the cursor actually sits once this object is done — (x, y)
+        for a circle, but for a slider *not* just its stored (x, y) (its
+        head/start point). A slider with an odd number of slides ends at
+        its far anchor (`points[-1]`); an even number bounces back and ends
+        exactly where it started. Anything that places the *next* object
+        relative to "where this one left off" (distance-snap, direction of
+        travel) needs this, not the raw (x, y) fields — using the head
+        position for a slider that actually ends elsewhere silently breaks
+        distance-snap for the object right after it."""
+        if not self.is_slider:
+            return (self.x, self.y)
+        far = self.points[-1] if self.points else (self.x, self.y)
+        return far if (self.slides % 2 == 1) else (self.x, self.y)
+
     def to_line(self) -> str:
         obj_type = self.object_type()
         if not self.is_slider:
