@@ -28,6 +28,7 @@ import zipfile
 from dataclasses import dataclass
 from tkinter import filedialog, messagebox, ttk
 
+import beatmap_report
 import beatmap_stats
 import main as pipeline_main
 
@@ -324,10 +325,12 @@ class App:
         self.osz_var = tk.BooleanVar(value=True)
         self.keep_osu_var = tk.BooleanVar(value=False)
         self.auto_open_var = tk.BooleanVar(value=True)
+        self.report_var = tk.BooleanVar(value=False)
         options = (
             (self.osz_var, "Package as .osz (ready to import into osu!)"),
             (self.keep_osu_var, "Keep loose .osu files too"),
             (self.auto_open_var, "Open the finished map when done"),
+            (self.report_var, "Generate a statistics report (PDF, plotted against Backstabber)"),
         )
         for i, (var, label) in enumerate(options):
             ttk.Checkbutton(opt_panel, text=label, variable=var).grid(
@@ -534,6 +537,24 @@ class App:
                     self.log_queue.put("\n" + stats.format() + "\n")
                 except Exception as e:  # noqa: BLE001 - stats are a bonus, never fail generation over them
                     self.log_queue.put(f"\n(couldn't compute stats: {e})\n")
+
+            if self.report_var.get():
+                # Report on whichever of the four difficulty .osu files the
+                # user actually kept checked, still on disk at this point
+                # regardless of --osz/--keep-osu-files (those are only
+                # honored further down) — each is plotted against the
+                # matching Backstabber difficulty.
+                tier_paths = {tier: os.path.join(outdir, f"{title} [{tier}].osu")
+                              for tier, v in self.difficulty_vars.items() if v.get()}
+                tier_paths = {tier: path for tier, path in tier_paths.items() if os.path.isfile(path)}
+                if tier_paths:
+                    try:
+                        report_path = os.path.join(outdir, f"{title} (Statistics Report).pdf")
+                        beatmap_report.build_report_for_tiers(
+                            {t.lower(): p for t, p in tier_paths.items()}, report_path, gen_label=title)
+                        self.log_queue.put(f"\nWrote statistics report: {report_path}\n")
+                    except Exception as e:  # noqa: BLE001 - the report is a bonus, never fail generation over it
+                        self.log_queue.put(f"\n(couldn't generate statistics report: {e})\n")
 
             excluded = [t for t, v in self.difficulty_vars.items() if not v.get()]
             osz_path = os.path.join(outdir, f"{title}.osz")

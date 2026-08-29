@@ -356,6 +356,15 @@ def main() -> None:
                               "back-and-forth slider instead of a run of circles (0-1).")
     parser.add_argument("--rest-probability", type=float, default=0.03,
                          help="Chance any non-quiet beat is dropped entirely as a short rest (0-1).")
+    parser.add_argument("--stream-frequency", type=float, default=0.5,
+                         help="How often an intense chunk becomes an actual stream (individually-"
+                              "clicked circles on quarter/eighth-note subdivisions) versus a bounce "
+                              "slider or a rest (0-1, default 0.5). Also scales the hard cap on how "
+                              "many quarter/eighth-spaced circles may ever appear consecutively: 3 "
+                              "at 0 (a stream, by definition, needs 4+ — so 0 means a run of "
+                              "quarter/eighth-note circles is never long enough to read as a stream "
+                              "at all) up to 8 at 1. That cap is enforced globally, at the very end, "
+                              "regardless of the choices made per chunk here.")
     parser.add_argument("--category-smoothing-beats", type=float, default=2.0,
                          help="Smooth energy over this many beats before classifying quiet/normal/"
                               "intense, so categories track the song's actual sections instead of "
@@ -364,6 +373,10 @@ def main() -> None:
                          help="Random seed. Omit for a different map every run; pass a fixed "
                               "value (printed on every run) to reproduce the exact same map later.")
     args = parser.parse_args()
+    args.stream_frequency = max(0.0, min(1.0, args.stream_frequency))
+    # 3 at frequency 0 (never long enough to be a stream, per the 4-note
+    # definition), 8 at frequency 1 (matches the pre-existing hard cap).
+    stream_max_len = round(3 + args.stream_frequency * 5)
 
     if args.seed is None:
         args.seed = random.SystemRandom().randrange(2**32)
@@ -487,17 +500,24 @@ def main() -> None:
             lookahead_end = min(pos + chunk_slots - 1, run_end)
             lookahead_len = lookahead_end - pos + 1
 
-            # A short (1-2 slot) burst is always the "triplet" feel,
-            # regardless of what came before — it's too short to read as a
-            # repetitive wall on its own. Only chunks long enough to
-            # meaningfully become a stream or a bounce slider (3+ slots)
-            # are subject to the no-repeat-treatment rule.
+            # How often a chunk becomes a genuine stream at all is
+            # --stream-frequency's job; whatever's left over keeps the
+            # original 0.45:0.10 bounce:rest ratio. A short (1-2 slot)
+            # burst used to always force the "stream" treatment regardless
+            # of this setting — that's exactly the "frequency does
+            # nothing" bug: at frequency 0 it kept producing quarter/
+            # eighth-note runs anyway. It's now subject to the same
+            # frequency-weighted choice as everything else; only the
+            # no-repeat-treatment rule is skipped for it (too short to
+            # read as a repetitive wall either way).
+            p_stream = 0.9 * args.stream_frequency
+            p_rest_of = 1.0 - p_stream
+            weights = {"stream": p_stream, "bounce": p_rest_of * 0.818, "rest": p_rest_of * 0.182}
             if lookahead_len < 3:
-                treatment = "stream"
+                options = ["stream", "bounce", "rest"]
             else:
                 options = [t for t in ("stream", "bounce", "rest") if t != last_treatment]
-                weights = {"stream": 0.45, "bounce": 0.45, "rest": 0.10}
-                treatment = rng.choices(options, weights=[weights[t] for t in options])[0]
+            treatment = rng.choices(options, weights=[weights[t] for t in options])[0]
             last_treatment = treatment
 
             chunk_end = lookahead_end
@@ -513,7 +533,7 @@ def main() -> None:
                 # doesn't really break anything up.
                 chunk_avg_energy = float(np.mean(slot_energy[pos:lookahead_end + 1]))
                 steps_per_slot = 4 if chunk_avg_energy > q_climax else 2
-                max_slots_for_cap = max(1, 8 // steps_per_slot)
+                max_slots_for_cap = max(1, stream_max_len // steps_per_slot)
                 chunk_end = min(lookahead_end, pos + max_slots_for_cap - 1)
 
             chunk_len = chunk_end - pos + 1
@@ -599,11 +619,14 @@ def main() -> None:
         print(f"Trimmed {trimmed} object(s) in the trailing fade-out (after {track_end_ms:.0f}ms)")
 
     # Guarantee no run of quarter/eighth-beat circles ("stream") is longer
-    # than 8 — the chunk-level bounce/circle decisions above already aim
-    # for this, but this is the hard backstop regardless of how those rolls
-    # landed: the (max_len+1)'th circle in a row always becomes a slider.
+    # than stream_max_len (3-8, from --stream-frequency) — the chunk-level
+    # bounce/circle decisions above already aim for this, but this is the
+    # hard backstop regardless of how those rolls landed, and regardless of
+    # a run built from several adjacent chunks: the (max_len+1)'th circle
+    # in a row always becomes a slider.
     before_cap = sum(1 for o in new_objects if not o.is_slider)
-    new_objects = cap_stream_length(new_objects, beat_length_ms, slider_multiplier, quarter_beat_ms)
+    new_objects = cap_stream_length(new_objects, beat_length_ms, slider_multiplier, quarter_beat_ms,
+                                     max_len=stream_max_len)
     after_cap = sum(1 for o in new_objects if not o.is_slider)
     if before_cap != after_cap:
         print(f"Capped long streams: converted {before_cap - after_cap} circle(s) into sliders")

@@ -80,8 +80,10 @@ def main() -> None:
                          help="Forwarded to apply_style.py's --curviness (0-1, how curvy sliders "
                               "feel). Omit to use apply_style.py's own default.")
     parser.add_argument("--stream-frequency", type=float, default=None,
-                         help="Forwarded to apply_style.py's --stream-frequency. Omit to use "
-                              "apply_style.py's own default.")
+                         help="Forwarded to both add_variety.py's and apply_style.py's own "
+                              "--stream-frequency (add_variety.py decides how often fast runs of "
+                              "notes exist at all; apply_style.py decides how they're placed on "
+                              "screen once they do). Omit to use each stage's own default.")
     parser.add_argument("--stack-probability", type=float, default=None,
                          help="Forwarded to apply_style.py's --stack-probability. Omit to use "
                               "apply_style.py's own default.")
@@ -122,6 +124,15 @@ def main() -> None:
                          ("--temperature", args.temperature)):
         if value is not None:
             style_extra_args += [flag, str(value)]
+
+    # add_variety.py's own --stream-frequency governs whether fast runs of
+    # notes exist at all (see its own help text); apply_style.py's same-
+    # named flag only decides how an already-existing run is placed on
+    # screen (stacked/lined up vs. normal flow). Both need the same value
+    # forwarded independently — they're two different stages' parsers.
+    variety_extra_args: list[str] = []
+    if args.stream_frequency is not None:
+        variety_extra_args += ["--stream-frequency", str(args.stream_frequency)]
 
     title = args.title or os.path.splitext(os.path.basename(args.audio))[0]
     outdir = args.outdir
@@ -183,7 +194,8 @@ def main() -> None:
 
     print("=== Stage 2: add variety ===")
     _run_module_main(add_variety, [base_path, args.audio, "--output", variety_path,
-                                    "--version", "Auto Variety", "--seed", str(args.seed)])
+                                    "--version", "Auto Variety", "--seed", str(args.seed)]
+                      + variety_extra_args)
 
     print("=== Stage 3: apply style ===")
     _run_module_main(apply_style, [variety_path, "--output", styled_path, "--audio", args.audio,

@@ -83,6 +83,8 @@ class Distribution:
 @dataclass
 class BeatmapStats:
     source: str
+    bpm: float
+    beat_length_ms: float
     n_objects: int
     n_circles: int
     n_sliders: int
@@ -92,6 +94,7 @@ class BeatmapStats:
     multi_anchor_angled: int
     stack_fraction: float  # fraction of consecutive pairs sitting within 3px of each other
     delay_ms: Distribution | None
+    delay_beats: Distribution | None  # delay_ms / beat_length_ms -- comparable across different BPMs
     spacing_px: Distribution | None
     slider_length_px: Distribution | None
     slider_beats: Distribution | None
@@ -99,6 +102,7 @@ class BeatmapStats:
 
     def format(self) -> str:
         lines = [f"=== {self.source} ===",
+                 f"BPM: {self.bpm:.1f}",
                  f"Objects: {self.n_objects}  (circles: {self.n_circles}, sliders: {self.n_sliders})"]
 
         total_single_anchor = self.single_anchor_straight + self.single_anchor_curved
@@ -114,6 +118,7 @@ class BeatmapStats:
 
         for label, dist, unit in (
             ("Delay between consecutive objects", self.delay_ms, "ms"),
+            ("Delay between consecutive objects (BPM-normalized)", self.delay_beats, " beats"),
             ("Spacing (on-screen distance) between consecutive objects", self.spacing_px, "px"),
             ("Slider length", self.slider_length_px, "px"),
             ("Slider duration", self.slider_beats, " beats"),
@@ -153,6 +158,7 @@ def compute_stats(osu_path: str) -> BeatmapStats:
             slider_beats.append(o.length / (slider_multiplier * 100.0))
 
     delays = [b.time - a.time for a, b in zip(objects, objects[1:]) if b.time > a.time]
+    delays_beats = [d / beat_length_ms for d in delays]
     spacings = [math.hypot(b.x - a.x, b.y - a.y) for a, b in zip(objects, objects[1:])]
     stack_fraction = (sum(1 for d in spacings if d < 3.0) / len(spacings)) if spacings else 0.0
 
@@ -168,12 +174,15 @@ def compute_stats(osu_path: str) -> BeatmapStats:
 
     return BeatmapStats(
         source=osu_path,
+        bpm=60000.0 / beat_length_ms if beat_length_ms > 0 else 0.0,
+        beat_length_ms=beat_length_ms,
         n_objects=len(objects), n_circles=n_circles, n_sliders=n_sliders,
         curve_type_counts=curve_type_counts,
         single_anchor_straight=single_anchor_straight, single_anchor_curved=single_anchor_curved,
         multi_anchor_angled=multi_anchor_angled,
         stack_fraction=stack_fraction,
         delay_ms=Distribution.from_values(delays),
+        delay_beats=Distribution.from_values(delays_beats),
         spacing_px=Distribution.from_values(spacings),
         slider_length_px=Distribution.from_values(slider_lengths),
         slider_beats=Distribution.from_values(slider_beats),

@@ -315,13 +315,16 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
     gap between them either way.
 
     A run longer than MAX_RUN_LEN objects is split into consecutive bursts
-    of at most MAX_RUN_LEN, each with its own mode decision and its own
-    entry/exit transition — a chain of, say, 8 eighth-notes doesn't read as
-    "click here 8 times in a pile/line," it reads as an arbitrary blob to
-    count or a line so long it either bends to stay on screen or runs off
-    it. Capped at MAX_RUN_LEN, the same 8 notes become up to 3 short,
-    clearly separated bursts instead — this applies to every mode, not
-    just stacks, and regardless of `stream_frequency` below.
+    of at most MAX_RUN_LEN (matching add_variety.py's own hard cap on how
+    long a run of quarter/eighth-spaced circles is ever allowed to get),
+    each with its own mode decision and its own entry/exit transition.
+
+    A burst only counts as an actual "stream" — eligible to be forced into
+    a stack or a line at all — once it's 4 or more notes long; that's the
+    definition (a run of 2-3 fast notes is just a quick triplet, not a
+    stream). Shorter bursts always use ordinary motif-driven flow, the
+    same as an object outside any fast run, regardless of
+    `stream_frequency` below.
 
     Two independent knobs govern this, deliberately kept separate since
     they answer two different questions:
@@ -360,7 +363,8 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
     quarter_beat_ms = beat_length_ms / 4.0
     half_beat_ms = beat_length_ms / 2.0
     threshold = quarter_beat_ms + 1.0
-    MAX_RUN_LEN = 3  # a run/burst longer than this reads as a smear or an overlong line, not a countable unit
+    MAX_RUN_LEN = 8  # matches add_variety.py's own hard cap (cap_stream_length's max_len at frequency 1)
+    MIN_STREAM_LEN = 4  # fewer than this is a quick triplet, not a stream (see docstring)
 
     mode_of: dict[int, tuple[int, str]] = {}
     i = 0
@@ -382,7 +386,7 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
             while burst_start < j:
                 burst_end = min(burst_start + MAX_RUN_LEN, j)
                 burst_len = burst_end - burst_start
-                if burst_len >= 2:
+                if burst_len >= MIN_STREAM_LEN:
                     burst_start_time = objects[burst_start].time
                     burst_span_ms = objects[burst_end - 1].time - burst_start_time
                     stack_eligible = burst_span_ms <= half_beat_ms
