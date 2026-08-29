@@ -56,20 +56,28 @@ DIFFICULTIES = ("Easy", "Normal", "Hard", "Insane")
 class SliderParam:
     """A bounded numeric style knob, shown as a slider with its live
     value, a plain-language label, and a phrase-long description of what
-    it does and its range."""
+    it does and its range.
+
+    `scale` lets the slider's displayed 0-1 range stand in for a narrower
+    actual range passed to the pipeline (displayed_value * scale is what's
+    forwarded) — Stream frequency needs this: the user-facing knob should
+    read as a plain 0-1 dial, but even a modest fraction of the pipeline's
+    own 0-1 range already makes streams a constant occurrence, so the real
+    value forwarded is capped much lower."""
     flag: str
     label: str
     description: str
     lo: float
     hi: float
     default: float
+    scale: float = 1.0
 
 
 SLIDER_PARAMS = [
     SliderParam("--spacing", "Jump distance",
                 "How far apart notes are placed for a given time gap between them. "
-                "Min 0.5 (tight, close together), max 2.5 (wide, dramatic jumps). Default 1.3.",
-                0.5, 2.5, 1.3),
+                "Min 0.5 (tight, close together), max 2.5 (wide, dramatic jumps). Default 1.8.",
+                0.5, 2.5, 1.8),
     SliderParam("--curviness", "Slider curviness",
                 "How curved slider paths look, from mostly straight lines to pronounced "
                 "arcs. Min 0 (straight), max 1 (very curved). Default 0.5.",
@@ -77,12 +85,9 @@ SLIDER_PARAMS = [
     SliderParam("--stream-frequency", "Stream frequency",
                 "How often fast bursts (4+ notes a quarter beat or less apart) happen at all. "
                 "Min 0 (none — fast notes stay in short 2-3 note bursts or spread out to half "
-                "beats), max 1 (as many long streams as the song's energy allows). Default 0.5.",
-                0.0, 1.0, 0.5),
-    SliderParam("--stack-probability", "Stack vs. line mix",
-                "For streams that do happen: piled onto one spot vs. spread along a straight "
-                "line. Min 0 (always a line), max 1 (always a stack). Default 0.5.",
-                0.0, 1.0, 0.5),
+                "beats), max 1 (streams are a regular occurrence — even this end of the dial "
+                "stays deliberately restrained). Default 0.5.",
+                0.0, 1.0, 0.5, scale=0.2),
     SliderParam("--slider-length-bias", "Slider length",
                 "How long a merged slider tends to run, in normal (non-intense) sections. "
                 "Min 0 (more, shorter/choppier sliders), max 1 (fewer, longer sliders). "
@@ -325,11 +330,13 @@ class App:
         self.keep_osu_var = tk.BooleanVar(value=False)
         self.auto_open_var = tk.BooleanVar(value=True)
         self.report_var = tk.BooleanVar(value=False)
+        self.keep_intermediate_var = tk.BooleanVar(value=False)
         options = (
             (self.osz_var, "Package as .osz (ready to import into osu!)"),
             (self.keep_osu_var, "Keep loose .osu files too"),
             (self.auto_open_var, "Open the finished map when done"),
             (self.report_var, "Generate a statistics report (PDF, plotted against Backstabber)"),
+            (self.keep_intermediate_var, "Keep intermediate beatmaps (Base and Variety stages)"),
         )
         for i, (var, label) in enumerate(options):
             ttk.Checkbutton(opt_panel, text=label, variable=var).grid(
@@ -462,7 +469,7 @@ class App:
             argv += ["--title", self.title_var.get().strip()]
 
         for p in SLIDER_PARAMS:
-            argv += [p.flag, f"{self.slider_vars[p.flag].get():.3f}"]
+            argv += [p.flag, f"{self.slider_vars[p.flag].get() * p.scale:.3f}"]
 
         for p in (*STYLE_ENTRY_PARAMS, *TIMING_PARAMS, SEED_PARAM):
             value = self.entry_vars[p.flag].get().strip()
@@ -489,6 +496,8 @@ class App:
             argv.append("--keep-osu-files")
         elif self.keep_osu_var.get():
             argv.append("--keep-osu-files")
+        if self.keep_intermediate_var.get():
+            argv.append("--keep-intermediate-files")
         return argv
 
     def _on_generate(self) -> None:

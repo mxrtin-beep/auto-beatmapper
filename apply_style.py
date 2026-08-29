@@ -444,30 +444,31 @@ def main() -> None:
                               "angles/flow, never timing, note count, or object type — a way to "
                               "get more (or less) variety in the flow without being restrictive. "
                               "Defaults to a value derived from --temperature (roughly 1-10).")
-    parser.add_argument("--stream-frequency", type=float, default=0.5,
-                         help="How often a fast (quarter-beat-or-closer) run of notes becomes a "
-                              "deliberate stream unit (stacked in one spot, or spread along one "
+    parser.add_argument("--stream-frequency", type=float, default=0.1,
+                         help="How often a fast (quarter-beat-or-closer) burst of 4+ notes is placed "
+                              "as a deliberate stream unit (stacked in one spot, or spread along one "
                               "locked-in line) versus just following ordinary flow like any other "
-                              "note (0 = never a stream, 1 = always one). A run longer than 3 is "
-                              "always split into separate bursts of at most 3 regardless of this "
+                              "note (0 = never a stream, 1 = always one). A run longer than 8 is "
+                              "always split into separate bursts of at most 8 regardless of this "
                               "setting. Which one a given repeating section picks stays consistent "
-                              "across its repeats either way.")
-    parser.add_argument("--stack-probability", type=float, default=0.5,
+                              "across its repeats either way. Default 0.1 — deliberately low, since "
+                              "even a modest value here already makes streams a regular occurrence.")
+    parser.add_argument("--stack-probability", type=float, default=1.0,
                          help="Of whichever bursts --stream-frequency already decided ARE a "
                               "stream: the mix between piling into one stacked spot and spreading "
-                              "along a line (0 = always line, 1 = always stack, whenever the burst "
-                              "is short enough to stack at all). Has no effect on whether a burst "
-                              "streams in the first place — that's --stream-frequency's job.")
+                              "along a line (0 = always line, 1 = always stack). Has no effect on "
+                              "whether a burst streams in the first place — that's "
+                              "--stream-frequency's job. Default 1.0 (always stack).")
     parser.add_argument("--curviness", type=float, default=0.5,
                          help="How curvy the map feels, 0-1. 0 makes almost every slider a "
                               "straight line; 1 makes almost every slider a pronounced curve "
                               "(and makes the bow of every curved slider more pronounced too). "
                               "0.5 (default) matches the original straight/gentle-arc/pronounced-arc "
                               "mix.")
-    parser.add_argument("--spacing", type=float, default=1.3,
+    parser.add_argument("--spacing", type=float, default=1.8,
                          help="Multiplier on jump/spacing distance (1.0 = the base distance-snap "
-                              "formula; default 1.3, the top of the ranking-criteria-recommended "
-                              "range, since lower values still read as too close together / "
+                              "formula; default 1.8, above the ranking-criteria-recommended "
+                              "0.8x-1.3x range, since lower values still read as too close together / "
                               "prone to crisscrossing).")
     args = parser.parse_args()
     args.curviness = max(0.0, min(1.0, args.curviness))
