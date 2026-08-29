@@ -330,49 +330,96 @@ def estimate_spacing_scale(objects: list[HitObject], beat_length_ms: float,
     return scale_at
 
 
-def _resnap_after_drop(obj: HitObject, prev: HitObject, dropped_pred: HitObject,
-                        beat_length_ms: float, slider_multiplier: float,
-                        spacing_scale_at: Callable[[float], float]) -> HitObject:
-    """`obj` is the next kept object after one or more deletions; re-snap it
-    to the correct distance-snap spacing from its new predecessor `prev`,
-    along the same direction apply_style.py originally sent it in (measured
-    against `dropped_pred`, whichever object it immediately followed before
-    any deletions) — so distance-snap still holds across the hole, instead
-    of `obj` sitting exactly where it was for a since-deleted predecessor,
-    now visually too close for the larger time gap it's really separated
-    by. `spacing_scale_at` must be the same estimate_spacing_scale(...)
-    result the caller also passes to every other resnap on this tier (see
-    thin_by_deletion's docstring) — not the bare formula, and not a single
-    constant either, now that apply_style.py can vary --spacing by song
-    section: querying it at this specific gap's own midpoint keeps the
-    re-snap consistent with whichever section it actually falls in. If
-    `obj` is itself a slider, it's translated as one rigid unit — head and
-    every curve point shifted by the *same* offset, scaled down (never
-    per-point clamped) just enough that all of them stay in bounds.
+def _translate_object(obj: HitObject, dx: float, dy: float) -> tuple[HitObject, float, float]:
+    """Return `obj` rigidly shifted by (dx, dy) — head and every curve point
+    moved by the *same* offset, scaled down (never per-point clamped) just
+    enough that all of them stay in bounds — plus the (dx, dy) actually
+    achieved, which can be smaller than requested near a playfield edge.
     Clamping each point independently would distort the shape (points
     moving by different amounts), and a distorted "P" (perfect-circle) or
     "B" (Bezier) curve's actual rendered arc can bulge well outside its own
     anchor points even when every anchor is individually in bounds — the
     same failure mode apply_style.py's own curve-shape comments warn
     about. A uniformly-scaled rigid shift can't distort anything.
-    """
-    angle = math.atan2(obj.y - dropped_pred.y, obj.x - dropped_pred.x)
-    new_gap_ms = max(1.0, obj.time - prev.time)
-    px_per_beat = slider_multiplier * 100.0 * spacing_scale_at((prev.time + obj.time) / 2.0)
-    spacing = px_per_beat * (new_gap_ms / beat_length_ms)
-    target_x = prev.x + spacing * math.cos(angle)
-    target_y = prev.y + spacing * math.sin(angle)
-    delta_x, delta_y = target_x - obj.x, target_y - obj.y
 
+    The caller (_delete_and_cascade_resnap) must propagate the *achieved*
+    delta this returns to every subsequent object, not the delta it asked
+    for — otherwise an offset that saturates against the edge for one
+    object keeps compounding at its full, physically-unrealized size for
+    everything downstream of it, which very quickly produces wildly wrong
+    positions (the exact "distance error" this whole cascading scheme
+    exists to prevent, just relocated to the boundary case instead).
+    """
+    if dx == 0.0 and dy == 0.0:
+        return obj, 0.0, 0.0
     all_points = [(obj.x, obj.y)] + list(obj.points)
-    fraction = _safe_translation_fraction(all_points, delta_x, delta_y)
-    new_x, new_y = clamp_to_playfield(obj.x + fraction * delta_x, obj.y + fraction * delta_y)
-    new_points = [clamp_to_playfield(px + fraction * delta_x, py + fraction * delta_y)
-                  for px, py in obj.points]
-    return HitObject(x=new_x, y=new_y, time=obj.time, is_new_combo=obj.is_new_combo,
-                      hitsound=obj.hitsound, is_slider=obj.is_slider, curve_type=obj.curve_type,
-                      points=new_points, slides=obj.slides, length=obj.length,
-                      edge_hitsounds=obj.edge_hitsounds, edge_samplesets=obj.edge_samplesets)
+    fraction = _safe_translation_fraction(all_points, dx, dy)
+    achieved_dx, achieved_dy = fraction * dx, fraction * dy
+    new_x, new_y = clamp_to_playfield(obj.x + achieved_dx, obj.y + achieved_dy)
+    new_points = [clamp_to_playfield(px + achieved_dx, py + achieved_dy) for px, py in obj.points]
+    new_obj = HitObject(x=new_x, y=new_y, time=obj.time, is_new_combo=obj.is_new_combo,
+                         hitsound=obj.hitsound, is_slider=obj.is_slider, curve_type=obj.curve_type,
+                         points=new_points, slides=obj.slides, length=obj.length,
+                         edge_hitsounds=obj.edge_hitsounds, edge_samplesets=obj.edge_samplesets)
+    return new_obj, achieved_dx, achieved_dy
+
+
+def _delete_and_cascade_resnap(objects: list[HitObject], beat_length_ms: float, slider_multiplier: float,
+                                spacing_scale_at: Callable[[float], float],
+                                should_delete: Callable[[HitObject, int, list[HitObject]], bool]
+                                ) -> list[HitObject]:
+    """Walk `objects` once, dropping whichever ones `should_delete(obj, index,
+    kept_so_far)` says to, and keeping the rest — but every *kept* object
+    downstream of a deletion is rigidly translated by a running (dx, dy)
+    offset, not just the one immediately after the gap.
+
+    Re-snapping only the single object right after a deletion (an earlier
+    version of this did exactly that) fixes distance-snap across that one
+    gap but silently breaks it for the pair *after* it: that next object
+    was originally placed relative to the moved object's old position, so
+    once the old position is gone, the untouched object is now the wrong
+    distance/direction from where its new predecessor actually ended up —
+    even though nothing was deleted next to it. This is what was producing
+    "expected object at X px, got Y px" complaints regardless of how
+    conservative the per-category deletion odds were.
+
+    The fix is to treat every deletion as opening a rigid seam: once the
+    object right after a gap is moved to (target_x, target_y), every kept
+    object after it — until the *next* deletion recomputes a fresh local
+    correction — is shifted by that exact same (dx, dy), preserving the
+    original relative geometry apply_style.py placed them with. A pure
+    translation doesn't change directions, so the angle for a fresh local
+    correction is still measured off each object's original, un-shifted
+    coordinates and its original predecessor (`objects[index - 1]`) — only
+    the *magnitude* (spacing, from the real elapsed gap to the new,
+    already-shifted `prev`) needs the new gap.
+    """
+    n = len(objects)
+    result: list[HitObject] = []
+    cum_dx = cum_dy = 0.0
+    dropped_since_last_keep = False
+    for i, obj in enumerate(objects):
+        if should_delete(obj, i, result):
+            dropped_since_last_keep = True
+            continue
+
+        if dropped_since_last_keep and result:
+            pred_x, pred_y = objects[i - 1].end_position()
+            angle = math.atan2(obj.y - pred_y, obj.x - pred_x)
+            prev = result[-1]
+            prev_x, prev_y = prev.end_position()
+            prev_end_time = prev.end_time(beat_length_ms, slider_multiplier)
+            new_gap_ms = max(1.0, obj.time - prev_end_time)
+            px_per_beat = slider_multiplier * 100.0 * spacing_scale_at((prev_end_time + obj.time) / 2.0)
+            spacing = px_per_beat * (new_gap_ms / beat_length_ms)
+            target_x = prev_x + spacing * math.cos(angle)
+            target_y = prev_y + spacing * math.sin(angle)
+            cum_dx, cum_dy = target_x - obj.x, target_y - obj.y
+
+        dropped_since_last_keep = False
+        shifted, cum_dx, cum_dy = _translate_object(obj, cum_dx, cum_dy)
+        result.append(shifted)
+    return result
 
 
 def thin_by_deletion(objects: list[HitObject], beat_length_ms: float, slider_multiplier: float,
@@ -392,22 +439,19 @@ def thin_by_deletion(objects: list[HitObject], beat_length_ms: float, slider_mul
     sitting on a downbeat (so regularize_hitsounds below can always find
     something to accent every measure — no gap without a hitsound).
     Deleting an object can never introduce a timing overlap, since nothing
-    is left there to overlap — but it does leave the *next* kept object
-    sitting exactly where apply_style.py put it for a since-deleted
-    predecessor, no longer matching the (now larger) time gap it's really
-    separated by. That object is re-snapped to the correct distance from
-    its new predecessor, in the same direction apply_style.py originally
-    sent it (measured against whichever object it immediately followed
-    before any deletions), so distance-snap always holds across a deleted
-    run regardless of how many objects in a row got removed or what type
-    they were. `spacing_scale_at` (see estimate_spacing_scale) must be the same
-    function the caller also passes to enforce_min_gap on this same tier —
-    estimating it separately in each pass from whatever's survived so far
-    would let the two land on very slightly different scales (worse the
-    more aggressively a tier thins, since fewer untouched pairs survive to
-    sample from), producing exactly the kind of tier-only spacing
-    inconsistency a checker flags between an object this pass re-snapped
-    and one enforce_min_gap re-snaps right next to it.
+    is left there to overlap — but it does leave every *kept* object
+    downstream of the deletion sitting exactly where apply_style.py put it
+    for a since-deleted predecessor, no longer matching the (now larger)
+    time gap it's really separated by; see _delete_and_cascade_resnap for
+    how that whole downstream run gets carried, not just the object right
+    after the gap. `spacing_scale_at` (see estimate_spacing_scale) must be
+    the same function the caller also passes to enforce_min_gap on this
+    same tier — estimating it separately in each pass from whatever's
+    survived so far would let the two land on very slightly different
+    scales (worse the more aggressively a tier thins, since fewer untouched
+    pairs survive to sample from), producing exactly the kind of tier-only
+    spacing inconsistency a checker flags between an object this pass
+    re-snapped and one enforce_min_gap re-snaps right next to it.
     """
 
     def measure_of(time_ms: float) -> int:
@@ -420,22 +464,14 @@ def thin_by_deletion(objects: list[HitObject], beat_length_ms: float, slider_mul
         return "slider" if obj.is_slider else classify_beat_position(obj.time, offset_ms, beat_length_ms)
 
     n = len(objects)
-    result: list[HitObject] = []
-    dropped_since_last_keep = False
-    for i, obj in enumerate(objects):
+
+    def should_delete(obj: HitObject, i: int, kept: list[HitObject]) -> bool:
         can_delete = (0 < i < n - 1 and is_eligible(obj.time)
                       and not is_on_downbeat(obj.time, offset_ms, measure_length_ms))
-        if can_delete and rng.random() < delete_probability[category_of(obj)]:
-            dropped_since_last_keep = True
-            continue
+        return can_delete and rng.random() < delete_probability[category_of(obj)]
 
-        if dropped_since_last_keep and result:
-            obj = _resnap_after_drop(obj, result[-1], objects[i - 1], beat_length_ms,
-                                      slider_multiplier, spacing_scale_at)
-
-        dropped_since_last_keep = False
-        result.append(obj)
-    return result
+    return _delete_and_cascade_resnap(objects, beat_length_ms, slider_multiplier,
+                                       spacing_scale_at, should_delete)
 
 
 def enforce_min_gap(objects: list[HitObject], beat_length_ms: float, slider_multiplier: float,
@@ -461,21 +497,20 @@ def enforce_min_gap(objects: list[HitObject], beat_length_ms: float, slider_mult
     """
     min_gap_ms = beat_length_ms * min_gap_beats - 1.0
     n = len(objects)
-    result: list[HitObject] = []
-    dropped_since_last_keep = False
-    for i, obj in enumerate(objects):
-        if (0 < i < n - 1 and result and (obj.time - result[-1].time) < min_gap_ms
-                and not is_on_downbeat(obj.time, offset_ms, measure_length_ms)):
-            dropped_since_last_keep = True
-            continue
 
-        if dropped_since_last_keep and result:
-            obj = _resnap_after_drop(obj, result[-1], objects[i - 1], beat_length_ms,
-                                      slider_multiplier, spacing_scale_at)
+    def should_delete(obj: HitObject, i: int, kept: list[HitObject]) -> bool:
+        if not (0 < i < n - 1 and kept):
+            return False
+        # Measured from the last kept object's *end* (its slider tail, if
+        # it's a slider still occupying the timeline), not its head time —
+        # the same head-vs-end distinction _delete_and_cascade_resnap makes
+        # for distance, this time for how much time has actually elapsed.
+        prev_end_time = kept[-1].end_time(beat_length_ms, slider_multiplier)
+        return ((obj.time - prev_end_time) < min_gap_ms
+                and not is_on_downbeat(obj.time, offset_ms, measure_length_ms))
 
-        dropped_since_last_keep = False
-        result.append(obj)
-    return result
+    return _delete_and_cascade_resnap(objects, beat_length_ms, slider_multiplier,
+                                       spacing_scale_at, should_delete)
 
 
 def regularize_hitsounds(objects: list[HitObject], offset_ms: float, measure_length_ms: float,

@@ -72,13 +72,27 @@ def main() -> None:
                               "delete them, since the .osz already contains everything they hold). "
                               "Ignored if --osz isn't passed — the .osu files are the only output then. "
                               "The Base/Variety/Styled intermediate files are always deleted once the "
-                              "difficulties are derived from them, regardless of this flag.")
+                              "difficulties are derived from them, regardless of this flag — see "
+                              "--keep-intermediate-files for those.")
+    parser.add_argument("--keep-intermediate-files", action="store_true",
+                         help="Also keep the Base and Variety pipeline-stage .osu files (stages 1 and "
+                              "2 — the plain beat skeleton, and that skeleton with sliders/density "
+                              "variation added, both before apply_style.py's positioning) instead of "
+                              "deleting them once the difficulty spread is derived. Useful for "
+                              "inspecting or debugging what an earlier stage produced on its own. "
+                              "The Styled file is still always deleted — it's redundant with the "
+                              "Insane difficulty, which is identical to it bar Difficulty-setting "
+                              "clamping. Ignored with --restyle-only (stages 1-2 aren't run then).")
     parser.add_argument("--spacing", type=float, default=None,
                          help="Forwarded to apply_style.py's --spacing (jump/spacing distance "
                               "multiplier). Omit to use apply_style.py's own default.")
     parser.add_argument("--curviness", type=float, default=None,
                          help="Forwarded to apply_style.py's --curviness (0-1, how curvy sliders "
                               "feel). Omit to use apply_style.py's own default.")
+    parser.add_argument("--slider-length-bias", type=float, default=None,
+                         help="Forwarded to add_variety.py's --slider-length-bias (0-1, fewer/"
+                              "longer sliders vs. more/shorter ones). Omit to use add_variety.py's "
+                              "own default.")
     parser.add_argument("--stream-frequency", type=float, default=None,
                          help="Forwarded to both add_variety.py's and apply_style.py's own "
                               "--stream-frequency (add_variety.py decides how often fast runs of "
@@ -133,6 +147,8 @@ def main() -> None:
     variety_extra_args: list[str] = []
     if args.stream_frequency is not None:
         variety_extra_args += ["--stream-frequency", str(args.stream_frequency)]
+    if args.slider_length_bias is not None:
+        variety_extra_args += ["--slider-length-bias", str(args.slider_length_bias)]
 
     title = args.title or os.path.splitext(os.path.basename(args.audio))[0]
     outdir = args.outdir
@@ -204,10 +220,13 @@ def main() -> None:
     tier_output_paths = derive_tiers()
 
     # Base/Variety/Styled are internal working files, not one of the four
-    # finished difficulties — always cleaned up once the difficulties are
-    # derived from them, regardless of --osz/--keep-osu-files (which only
-    # ever govern the four difficulty files themselves).
-    _cleanup_osu_files([base_path, variety_path, styled_path], keep=False)
+    # finished difficulties. Styled is always cleaned up regardless — it's
+    # redundant with Insane, which is identical to it bar Difficulty-setting
+    # clamping. Base/Variety are kept only if --keep-intermediate-files was
+    # passed; this is a separate knob from --osz/--keep-osu-files, which
+    # only ever govern the four difficulty files themselves.
+    _cleanup_osu_files([styled_path], keep=False)
+    _cleanup_osu_files([base_path, variety_path], keep=args.keep_intermediate_files)
 
     if args.osz:
         osz_path = os.path.join(outdir, f"{title}.osz")

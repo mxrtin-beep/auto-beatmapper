@@ -356,6 +356,13 @@ def main() -> None:
                               "back-and-forth slider instead of a run of circles (0-1).")
     parser.add_argument("--rest-probability", type=float, default=0.03,
                          help="Chance any non-quiet beat is dropped entirely as a short rest (0-1).")
+    parser.add_argument("--slider-length-bias", type=float, default=0.5,
+                         help="Which chain length a merged slider in a normal-energy section tends "
+                              "to pick, 0-1 (default 0.5). 2 nodes = 1 beat, 3 = 1.5 beats, 4 = 2 "
+                              "beats. 0 skews toward the short 1-beat chain (more, choppier "
+                              "sliders); 1 skews toward the long 2-beat chain (fewer, longer "
+                              "sliders). Has no effect on --chain-probability (whether a run "
+                              "becomes a slider at all) or on intense-section bounce sliders.")
     parser.add_argument("--stream-frequency", type=float, default=0.5,
                          help="How often an intense chunk becomes an actual stream (individually-"
                               "clicked circles on quarter/eighth-note subdivisions) versus a bounce "
@@ -377,6 +384,18 @@ def main() -> None:
     # 3 at frequency 0 (never long enough to be a stream, per the 4-note
     # definition), 8 at frequency 1 (matches the pre-existing hard cap).
     stream_max_len = round(3 + args.stream_frequency * 5)
+    args.slider_length_bias = max(0.0, min(1.0, args.slider_length_bias))
+
+    def chain_len_weights(bias: float) -> tuple[float, float, float]:
+        """Weights for chain lengths (2, 3, 4 nodes), interpolated so bias=0.5
+        reproduces the original fixed (50, 30, 20) split exactly (keeping the
+        default behavior identical), tilting toward (2) below that and (4)
+        above it."""
+        SHORT, MID, LONG = (70.0, 22.0, 8.0), (50.0, 30.0, 20.0), (15.0, 30.0, 55.0)
+        a, b, t = (SHORT, MID, bias / 0.5) if bias <= 0.5 else (MID, LONG, (bias - 0.5) / 0.5)
+        return tuple(a[i] + (b[i] - a[i]) * t for i in range(3))
+
+    chain_weights = chain_len_weights(args.slider_length_bias)
 
     if args.seed is None:
         args.seed = random.SystemRandom().randrange(2**32)
@@ -463,7 +482,7 @@ def main() -> None:
                 max_chain += 1
             can_chain = max_chain >= 2 and rng.random() < args.chain_probability
             if can_chain:
-                chain_len = rng.choices([2, 3, 4][:max_chain - 1], weights=[50, 30, 20][:max_chain - 1])[0]
+                chain_len = rng.choices([2, 3, 4][:max_chain - 1], weights=chain_weights[:max_chain - 1])[0]
                 nodes = circles[i:i + chain_len]
                 new_objects.append(make_slider_chain(nodes, beat_length_ms, slider_multiplier))
                 i += chain_len
