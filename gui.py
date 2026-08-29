@@ -42,8 +42,6 @@ FG_MUTED = "#9498a8"
 ACCENT = "#7c9cff"
 ACCENT_ACTIVE = "#9db2ff"
 BORDER = "#3a3e4d"
-EXPERIMENTAL_ACCENT = "#e0a856"   # warm amber — visually flags the standalone v2 pathway as distinct
-EXPERIMENTAL_BORDER = "#6b5330"
 
 FONT_LABEL = ("Segoe UI", 10, "bold")
 FONT_HINT = ("Segoe UI", 9)
@@ -183,17 +181,6 @@ def _configure_style(root: tk.Tk) -> None:
     # text sits with its first letter touching the corner.
     style.configure("TLabelframe.Label", background=BG_PANEL, foreground=ACCENT, font=FONT_LABEL,
                      padding=(4, 6, 4, 6))
-    # A visually distinct variant for the standalone experimental panel —
-    # a different border/title color is what actually reads as "this is a
-    # separate thing" at a glance, not just adjacent copy saying so.
-    style.configure("Experimental.TLabelframe", background=BG_PANEL, bordercolor=EXPERIMENTAL_BORDER,
-                     relief="solid", borderwidth=1, labelmargins=(10, 6, 10, 10))
-    style.configure("Experimental.TLabelframe.Label", background=BG_PANEL, foreground=EXPERIMENTAL_ACCENT,
-                     font=FONT_LABEL, padding=(4, 6, 4, 6))
-    style.configure("ExperimentalButton.TButton", background=EXPERIMENTAL_ACCENT, foreground="#101218",
-                     font=FONT_LABEL, padding=8, borderwidth=0)
-    style.map("ExperimentalButton.TButton", background=[("active", "#e8bb78"), ("disabled", BORDER)],
-              foreground=[("disabled", FG_MUTED)])
 
     style.configure("TEntry", fieldbackground=BG_ENTRY, foreground=FG,
                      bordercolor=BORDER, insertcolor=FG, padding=6)
@@ -235,7 +222,6 @@ class App:
 
         self.log_queue: "queue.Queue[str]" = queue.Queue()
         self.worker: threading.Thread | None = None
-        self.active_button: ttk.Button | None = None  # whichever of generate_button/v2_button is running
         self.result_error: Exception | None = None
         self.result_paths: list[str] = []
         self.slider_vars: dict[str, tk.DoubleVar] = {}
@@ -346,46 +332,21 @@ class App:
         self.auto_open_var = tk.BooleanVar(value=True)
         self.report_var = tk.BooleanVar(value=False)
         self.keep_intermediate_var = tk.BooleanVar(value=False)
+        self.base_v2_var = tk.BooleanVar(value=False)
         options = (
             (self.osz_var, "Package as .osz (ready to import into osu!)"),
             (self.keep_osu_var, "Keep loose .osu files too"),
             (self.auto_open_var, "Open the finished map when done"),
             (self.report_var, "Generate a statistics report (PDF, plotted against Backstabber)"),
             (self.keep_intermediate_var, "Keep intermediate beatmaps (Base and Variety stages)"),
+            (self.base_v2_var, "Also generate Base Map v2 (experimental — a separate, independent "
+                                "beatmap; not used by or mixed into the difficulty spread above)"),
         )
         for i, (var, label) in enumerate(options):
             ttk.Checkbutton(opt_panel, text=label, variable=var).grid(
                 row=i, column=0, sticky="w", padx=PAD_INNER,
                 pady=(PAD_INNER if i == 0 else 6, PAD_INNER if i == len(options) - 1 else 0))
         opt_panel.columnconfigure(0, weight=1)
-
-        # --- Experimental section: Base Map v2, a standalone pathway ---
-        # Visually and functionally separate from the Generate button below:
-        # its own panel style (amber border/title instead of the normal
-        # blue), its own button, and its own explanation that this is NOT
-        # one of the normal pipeline's stages — generate_base_beatmap_v2.py
-        # is a second, independent take on Stage 1 (intensity-adaptive
-        # circle density instead of a fixed half-beat grid), not yet wired
-        # into add_variety.py/apply_style.py/the difficulty spread at all.
-        # It reuses the Song/Song info/Timing fields above (same audio,
-        # output folder, title/artist/creator, and BPM/offset overrides) —
-        # there's no reason to duplicate those just because the output is
-        # a different, standalone file.
-        exp_panel = self._panel(form, "Experimental: Base Map v2 (independent pathway)",
-                                 style="Experimental.TLabelframe")
-        ttk.Label(exp_panel,
-                  text="A separate, standalone generator — NOT part of the Generate pipeline above. "
-                       "It only produces one file: a base beatmap skeleton (plain circles, no "
-                       "sliders/styling/difficulty spread) whose density adapts to the song's own "
-                       "loudness instead of the normal pipeline's fixed half-beat grid — fewer or no "
-                       "circles in quiet sections, up to eighth-beat circles in intense ones, never "
-                       "more than a full beat's worth of fast circles in a row. Uses the Song, Song "
-                       "info, and Timing fields above; ignores Style/Difficulties/Options.",
-                  style="Hint.TLabel").grid(row=0, column=0, sticky="w", padx=PAD_INNER, pady=(PAD_INNER, 10))
-        self.v2_button = ttk.Button(exp_panel, text="Generate Base Map v2", style="ExperimentalButton.TButton",
-                                     command=self._on_generate_v2)
-        self.v2_button.grid(row=1, column=0, sticky="ew", padx=PAD_INNER, pady=(0, PAD_INNER))
-        exp_panel.columnconfigure(0, weight=1)
 
         # --- Generate button + log (outside the scroll area, always visible) ---
         bottom = ttk.Frame(root)
@@ -404,8 +365,8 @@ class App:
 
     # --- Layout helpers ---
 
-    def _panel(self, parent: tk.Widget, title: str, style: str = "TLabelframe") -> ttk.Labelframe:
-        panel = ttk.Labelframe(parent, text=title, style=style)
+    def _panel(self, parent: tk.Widget, title: str) -> ttk.Labelframe:
+        panel = ttk.Labelframe(parent, text=title)
         panel.pack(fill="x", expand=True, padx=PAD_OUTER, pady=(0, PAD_OUTER))
         return panel
 
@@ -554,83 +515,10 @@ class App:
         self.log_text.delete("1.0", "end")
         self.log_text.configure(state="disabled")
         self.generate_button.configure(state="disabled", text="Generating...")
-        self.v2_button.configure(state="disabled")  # shares sys.stdout/argv with this worker
-        self.active_button = self.generate_button
 
         self.worker = threading.Thread(target=self._run_pipeline, args=(argv,), daemon=True)
         self.worker.start()
         self.root.after(200, self._poll_worker)
-
-    def _on_generate_v2(self) -> None:
-        if self.worker is not None and self.worker.is_alive():
-            return
-        argv = self._build_v2_argv()
-        if argv is None:
-            return
-
-        self.log_text.configure(state="normal")
-        self.log_text.delete("1.0", "end")
-        self.log_text.configure(state="disabled")
-        self.v2_button.configure(state="disabled", text="Generating...")
-        self.generate_button.configure(state="disabled")  # shares sys.stdout/argv with this worker
-        self.active_button = self.v2_button
-
-        self.worker = threading.Thread(target=self._run_v2, args=(argv,), daemon=True)
-        self.worker.start()
-        self.root.after(200, self._poll_worker)
-
-    def _build_v2_argv(self) -> list[str] | None:
-        """Standalone argv for generate_base_beatmap_v2.py — reuses the
-        Song/Song info/Timing fields already on the form (same audio file,
-        output folder, title/artist/creator, BPM/offset overrides); ignores
-        every Style/Difficulties/Options field, since this pathway doesn't
-        touch any of what those govern."""
-        audio = self.audio_var.get().strip()
-        if not audio:
-            messagebox.showerror("Missing song", "Choose an MP3 file first.")
-            return None
-        if not os.path.isfile(audio):
-            messagebox.showerror("File not found", f"Can't find:\n{audio}")
-            return None
-
-        title = self.title_var.get().strip() or os.path.splitext(os.path.basename(audio))[0]
-        outdir = self.outdir_var.get().strip() or "output"
-        output_path = os.path.join(outdir, f"{title} (Base v2).osu")
-        argv = [audio, "--output", output_path, "--title", title,
-                "--artist", self.artist_var.get().strip() or "Unknown Artist",
-                "--creator", self.creator_var.get().strip() or "auto-beatmapper"]
-
-        for p in TIMING_PARAMS:
-            value = self.entry_vars[p.flag].get().strip()
-            if value:
-                try:
-                    float(value)
-                except ValueError:
-                    messagebox.showerror("Invalid value", f"{p.label} must be a number, got: {value!r}")
-                    return None
-                argv += [p.flag, value]
-        return argv
-
-    def _run_v2(self, argv: list[str]) -> None:
-        old_stdout, old_stderr, old_argv = sys.stdout, sys.stderr, sys.argv
-        redirector = TextRedirector(self.log_queue)
-        sys.stdout = redirector
-        sys.stderr = redirector
-        sys.argv = ["generate_base_beatmap_v2.py"] + argv
-        self.result_error = None
-        self.result_paths = []
-        try:
-            output_path = argv[argv.index("--output") + 1]
-            generate_base_beatmap_v2.main()
-            if os.path.isfile(output_path):
-                self.result_paths = [output_path]
-        except SystemExit as e:
-            if e.code not in (None, 0):
-                self.result_error = RuntimeError(f"Base Map v2 exited with code {e.code}")
-        except Exception as e:  # noqa: BLE001 - surfaced to the user as-is
-            self.result_error = e
-        finally:
-            sys.stdout, sys.stderr, sys.argv = old_stdout, old_stderr, old_argv
 
     def _run_pipeline(self, argv: list[str]) -> None:
         old_stdout, old_stderr, old_argv = sys.stdout, sys.stderr, sys.argv
@@ -653,6 +541,39 @@ class App:
                     outdir = argv[i + 1]
 
             pipeline_main.main()
+
+            if self.base_v2_var.get():
+                # Base Map v2 is a completely separate, standalone
+                # generator (see generate_base_beatmap_v2.py) — it doesn't
+                # feed into add_variety.py/apply_style.py or any of the
+                # four difficulties above, it just writes its own file
+                # alongside them for comparison. Reuses whatever audio/
+                # title/artist/creator/BPM/offset the main run already
+                # used (pulled back out of `argv` rather than rebuilt from
+                # the form, so it's guaranteed to match this exact run).
+                def arg_value(flag: str) -> str | None:
+                    for i, a in enumerate(argv):
+                        if a == flag:
+                            return argv[i + 1]
+                    return None
+
+                v2_argv = [argv[0], "--output", os.path.join(outdir, f"{title} (Base v2).osu"),
+                           "--title", title,
+                           "--artist", arg_value("--artist") or "Unknown Artist",
+                           "--creator", arg_value("--creator") or "auto-beatmapper"]
+                for flag in ("--bpm", "--offset"):
+                    value = arg_value(flag)
+                    if value is not None:
+                        v2_argv += [flag, value]
+                try:
+                    old_v2_argv = sys.argv
+                    sys.argv = ["generate_base_beatmap_v2.py"] + v2_argv
+                    try:
+                        generate_base_beatmap_v2.main()
+                    finally:
+                        sys.argv = old_v2_argv
+                except Exception as e:  # noqa: BLE001 - Base Map v2 is a bonus, never fail generation over it
+                    self.log_queue.put(f"\n(couldn't generate Base Map v2: {e})\n")
 
             # Printing the same stats to the log is only useful when there's
             # no PDF report being generated for them — with the report
@@ -725,10 +646,8 @@ class App:
             self.root.after(200, self._poll_worker)
             return
         self.generate_button.configure(state="normal", text="Generate")
-        self.v2_button.configure(state="normal", text="Generate Base Map v2")
         if self.result_error is not None:
-            title = "Base Map v2 failed" if self.active_button is self.v2_button else "Generation failed"
-            messagebox.showerror(title, str(self.result_error))
+            messagebox.showerror("Generation failed", str(self.result_error))
             return
         if self.auto_open_var.get() and self.result_paths:
             _open_path(self.result_paths[0])
