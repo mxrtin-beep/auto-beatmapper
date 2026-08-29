@@ -97,8 +97,14 @@ class EntryParam:
 
 STYLE_ENTRY_PARAMS = [
     EntryParam("--angle-jitter", "Slider angles",
-               "Random wobble added on top of every turn angle, in degrees. Leave blank to "
-               "derive it from Creativity automatically (roughly 1-10)."),
+               "The map repeats a handful of fixed turn shapes (e.g. always turning 90 "
+               "degrees traces a square, 60 traces a hexagon) so patterns stay recognizable. "
+               "This adds a small random +/- degrees on top of every one of those turns, so "
+               "the shape isn't perfectly identical each time it repeats. Since the shapes "
+               "themselves turn 60-144 degrees, the default (roughly 1-10) is a subtle, "
+               "hand-drawn-feeling wobble; try 20-45 for an obviously looser, less crisp "
+               "shape, or higher still to mostly break the shape apart. Leave blank to "
+               "derive it from Creativity automatically."),
 ]
 
 TIMING_PARAMS = [
@@ -151,8 +157,13 @@ def _configure_style(root: tk.Tk) -> None:
     style.configure("Value.TLabel", background=BG_PANEL, foreground=ACCENT, font=FONT_LABEL)
 
     style.configure("TLabelframe", background=BG_PANEL, bordercolor=BORDER,
-                     relief="solid", borderwidth=1)
-    style.configure("TLabelframe.Label", background=BG_PANEL, foreground=ACCENT, font=FONT_LABEL)
+                     relief="solid", borderwidth=1, labelmargins=(10, 6, 10, 10))
+    # `padding` here is what actually gives the section title breathing
+    # room from the frame's border — the border is drawn snug against
+    # whatever the label widget's own bounding box is, so without this the
+    # text sits with its first letter touching the corner.
+    style.configure("TLabelframe.Label", background=BG_PANEL, foreground=ACCENT, font=FONT_LABEL,
+                     padding=(4, 6, 4, 6))
 
     style.configure("TEntry", fieldbackground=BG_ENTRY, foreground=FG,
                      bordercolor=BORDER, insertcolor=FG, padding=6)
