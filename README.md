@@ -83,7 +83,38 @@ structures used by every stage.
 
 ## Usage
 
-The easiest way to run the whole pipeline is `main.py`:
+### GUI
+
+`gui.py` wraps `main.py` in a desktop window — a file picker for the song,
+a field or checkbox for every argument below, and a Generate button:
+
+```bash
+pip install -r requirements.txt
+python3 gui.py
+```
+
+It runs the same pipeline `main.py` does (there's no separate logic to
+keep in sync), streams the pipeline's own console output into a log box
+so you can watch each stage run, prints a statistics report on the
+finished Insane difficulty once generation completes (see
+`beatmap_stats.py` below), and — if "Open the finished map when done" is
+checked — opens the resulting `.osz` (or, without `--osz`, the Insane
+`.osu`) with whatever your OS has registered for that file type.
+
+The Difficulties section lets you uncheck any of Easy/Normal/Hard/Insane
+— every tier is still generated internally (an easier tier is always
+derived from the one above it, so there's no way to skip one mid-spread),
+an unchecked one is just deleted from the result afterward, including
+being stripped back out of an already-built `.osz`.
+
+Built with Tkinter, which ships with the Python standard library on
+Windows and macOS installers; on Linux it's usually a separate distro
+package (`sudo apt install python3-tk` on Debian/Ubuntu, `sudo dnf
+install python3-tkinter` on Fedora).
+
+### Command line
+
+The easiest way to run the whole pipeline from a shell is `main.py`:
 
 ```bash
 pip install -r requirements.txt
@@ -118,10 +149,10 @@ default — pass `--no-spread` to skip that and produce only Insane:
 python3 main.py song.mp3 --no-spread --osz
 ```
 
-`main.py` also forwards `--spacing`, `--curviness`, `--stack-probability`,
-`--angle-jitter`, and `--temperature` straight through to `apply_style.py`
-(see below), and `--bpm`/`--offset` straight through to
-`generate_base_beatmap.py`, if you pass them.
+`main.py` also forwards `--spacing`, `--curviness`, `--stream-frequency`,
+`--stack-probability`, `--angle-jitter`, and `--temperature` straight
+through to `apply_style.py` (see below), and `--bpm`/`--offset` straight
+through to `generate_base_beatmap.py`, if you pass them.
 
 ### Re-styling without changing the rhythm
 
@@ -151,9 +182,14 @@ recurs — the same seed always reproduces the same wobble.
   close together or prone to crisscrossing.
 - `--temperature T` (default `0.5`, `0`-`1`) — how creative vs. structured
   the styling gets. Scales `--angle-jitter`, how much a section's
-  curviness can drift from the `--curviness` baseline, and how strongly
-  the path wanders around the playfield, all together — low is tight and
-  predictable, high is loose and varied. Passing one of those flags
+  curviness can drift from the `--curviness` baseline, how strongly the
+  path wanders around the playfield, and how many times `--spacing`
+  itself shifts over the course of the song, all together — low is tight
+  and predictable, high is loose and varied. At `0`, spacing never
+  changes at all (one constant multiplier the whole way through); higher
+  values allow up to 3 shifts, each large enough to actually notice
+  (roughly ±15-25%) without being jarring, and never more than a
+  handful of changes in one song regardless. Passing `--angle-jitter`
   explicitly overrides temperature's value for that one knob only.
 - `--angle-jitter DEGREES` (default: derived from `--temperature`, roughly
   `1`-`10`) — how much extra random wiggle gets added on top of each
@@ -161,14 +197,34 @@ recurs — the same seed always reproduces the same wobble.
   Turning this up gives more varied flow/angles without changing when
   anything is hit; turning it down makes the motif patterns read more
   rigidly.
-- `--stack-probability P` (default `0.5`) — the overall mix between stream
-  runs that stack in one spot and runs that trace a straight line (`0` =
-  always line, `1` = always stack). A run picks exactly one of the two for
-  its whole length (never a mix), and whichever one a given repeating
-  section picks stays consistent every time that section recurs. A run
-  spanning more than half a beat is never a stack (only ever a line),
-  matching the ranking criteria's Hard-difficulty rule against fully
-  overlapping objects more than half a beat apart.
+- `--stream-frequency F` (default `0.5`) — how often a fast (quarter-beat
+  -or-closer) run of notes becomes a deliberate *stream* at all — stacked
+  in one spot, or spread along a locked-in straight line — rather than
+  just following the ordinary motif-driven flow any other note would, one
+  at a time with no forced overlap or fixed direction (`0` = never a
+  stream, `1` = always one). This only controls *whether* a run streams,
+  not what it looks like when it does — see `--stack-probability` for
+  that. Any run longer than 3 is split into consecutive bursts of at most
+  3 regardless of this setting — each its own independent unit with its
+  own mode and its own entry/exit gap — so a chain of, say, 8 eighth-notes
+  never reads as one long pile, one long line, or (at `0`) one
+  undifferentiated wall of 8 individually-flowing notes either.
+- `--stack-probability P` (default `0.5`) — of whichever bursts
+  `--stream-frequency` already decided *are* a stream, the mix between
+  piling into one stacked spot and spreading along a line (`0` = always
+  line, `1` = always stack, whenever the burst is short enough to stack at
+  all — see below). Has no say over whether a burst streams in the first
+  place; that's `--stream-frequency`'s job alone. A burst is only eligible
+  for "stack" if its whole span (first member to last) is half a beat or
+  less — piling more than that much elapsed time onto one spot is a real
+  overlap the ranking criteria's Hard-difficulty rule forbids ("objects
+  1/2 of a beat apart or less must not fully overlap"); a burst failing
+  that check is "line" instead whenever it streams. The single gap
+  entering a burst, and the single gap leaving one (including between two
+  consecutive bursts of the same long run, streaming or not), is also
+  widened a bit past ordinary distance snap, so a burst reads as a clearly
+  set-apart unit instead of bleeding into the normal flow — or the next
+  burst — on either side.
 - `--curviness C` (default `0.5`) — how curvy the map feels, `0`-`1`. `0`
   makes almost every slider a straight line; `1` makes almost every
   slider a pronounced curve, and makes the bow of every curved slider
@@ -205,6 +261,24 @@ python3 build_osz.py song.mp3 "out/Song (Base).osu" "out/Song (Variety).osu" \
     "out/Song (Styled).osu" --output "out/Song.osz"
 ```
 
+### Beatmap statistics
+
+`beatmap_stats.py` computes distribution statistics (not just single
+numbers — full min/p25/median/p75/max/mean/stdev plus an ASCII histogram)
+for any `.osu` file: delay between consecutive objects, on-screen jump
+spacing, slider length and duration, turn-angle at each object, the
+straight/curved/chain slider mix, and what fraction of consecutive pairs
+are stacked:
+
+```bash
+python3 beatmap_stats.py "out/Song [Insane].osu"
+```
+
+Pass several paths to compare difficulties (or a real hand-mapped
+beatmap) side by side. The GUI runs this automatically against the
+Insane difficulty after every generation and prints the result in its
+log box.
+
 ### Running the stages individually
 
 Each stage is also its own script, useful if you want to inspect or tweak
@@ -239,9 +313,15 @@ that document:
   same-spot stacks are kept (relying on osu!'s own stack-leniency visual
   cascade, `StackLeniency: 0.7`), matching the document's "stacks are
   acceptable" guidance.
-- **Difficulty settings per tier** — `make_easy.py`'s `TIER_SETTINGS` clamps
-  AR/OD/HP/CS directly to each tier's own document range, not a relative
-  shift from Insane's own settings. SliderMultiplier is deliberately *not*
+- **Difficulty settings per tier** — `make_easy.py`'s `TIER_TARGET` sets
+  AR/OD/HP/CS to explicit per-tier values (taken from the same
+  `example/keha_backstabber/` reference set, so Insane genuinely reads as
+  the hardest difficulty — fast approach rate, tight timing window — and
+  each tier down is a deliberate step easier rather than every tier
+  clamping the same flat defaults into the middle of its own range),
+  clamped into each tier's own document range (`TIER_SETTINGS`) as a
+  safety net, not a relative shift from Insane's own settings.
+  SliderMultiplier is deliberately *not*
   clamped, even though the document's Easy/Normal guideline says to avoid
   slider velocity above 1.3 — a real reference Easy difficulty
   (`example/keha_backstabber/`) uses a SliderMultiplier of 3.54, leaning
