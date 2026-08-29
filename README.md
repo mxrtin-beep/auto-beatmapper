@@ -150,9 +150,9 @@ python3 main.py song.mp3 --no-spread --osz
 ```
 
 `main.py` also forwards `--spacing`, `--curviness`, `--stream-frequency`,
-`--angle-jitter`, and `--temperature` straight through to `apply_style.py`
-(see below), and `--bpm`/`--offset` straight through to
-`generate_base_beatmap.py`, if you pass them.
+`--stack-probability`, `--angle-jitter`, and `--temperature` straight
+through to `apply_style.py` (see below), and `--bpm`/`--offset` straight
+through to `generate_base_beatmap.py`, if you pass them.
 
 ### Re-styling without changing the rhythm
 
@@ -198,29 +198,33 @@ recurs — the same seed always reproduces the same wobble.
   anything is hit; turning it down makes the motif patterns read more
   rigidly.
 - `--stream-frequency F` (default `0.5`) — how often a fast (quarter-beat
-  -or-closer) run of notes becomes a deliberate *stream* — stacked in one
-  spot, or spread along a locked-in straight line — rather than just
-  following the ordinary motif-driven flow any other note would, one at a
-  time with no forced overlap or fixed direction (`0` = never a stream,
-  `1` = always one). Any run longer than 3 is split into consecutive
-  bursts of at most 3 regardless of this setting — each its own
-  independent unit with its own mode and its own entry/exit gap — so a
-  chain of, say, 8 eighth-notes never reads as one long pile, one long
-  line, or (at `0`) one undifferentiated wall of 8 individually-flowing
-  notes either. Whichever bursts do become a stream still split roughly
-  50/50 between stack and line (weighted by whether the burst is short
-  enough to stack at all — see below); that mix isn't separately
-  exposed, since "how often do I get a stream at all" was the genuinely
-  useful knob here. A burst is only eligible for "stack" if its whole
-  span (first member to last) is half a beat or less — piling more than
-  that much elapsed time onto one spot is a real overlap the ranking
-  criteria's Hard-difficulty rule forbids ("objects 1/2 of a beat apart or
-  less must not fully overlap"); a burst failing that check is "line"
-  instead whenever it streams. The single gap entering a burst, and the
-  single gap leaving one (including between two consecutive bursts of the
-  same long run, streaming or not), is also widened a bit past ordinary
-  distance snap, so a burst reads as a clearly set-apart unit instead of
-  bleeding into the normal flow — or the next burst — on either side.
+  -or-closer) run of notes becomes a deliberate *stream* at all — stacked
+  in one spot, or spread along a locked-in straight line — rather than
+  just following the ordinary motif-driven flow any other note would, one
+  at a time with no forced overlap or fixed direction (`0` = never a
+  stream, `1` = always one). This only controls *whether* a run streams,
+  not what it looks like when it does — see `--stack-probability` for
+  that. Any run longer than 3 is split into consecutive bursts of at most
+  3 regardless of this setting — each its own independent unit with its
+  own mode and its own entry/exit gap — so a chain of, say, 8 eighth-notes
+  never reads as one long pile, one long line, or (at `0`) one
+  undifferentiated wall of 8 individually-flowing notes either.
+- `--stack-probability P` (default `0.5`) — of whichever bursts
+  `--stream-frequency` already decided *are* a stream, the mix between
+  piling into one stacked spot and spreading along a line (`0` = always
+  line, `1` = always stack, whenever the burst is short enough to stack at
+  all — see below). Has no say over whether a burst streams in the first
+  place; that's `--stream-frequency`'s job alone. A burst is only eligible
+  for "stack" if its whole span (first member to last) is half a beat or
+  less — piling more than that much elapsed time onto one spot is a real
+  overlap the ranking criteria's Hard-difficulty rule forbids ("objects
+  1/2 of a beat apart or less must not fully overlap"); a burst failing
+  that check is "line" instead whenever it streams. The single gap
+  entering a burst, and the single gap leaving one (including between two
+  consecutive bursts of the same long run, streaming or not), is also
+  widened a bit past ordinary distance snap, so a burst reads as a clearly
+  set-apart unit instead of bleeding into the normal flow — or the next
+  burst — on either side.
 - `--curviness C` (default `0.5`) — how curvy the map feels, `0`-`1`. `0`
   makes almost every slider a straight line; `1` makes almost every
   slider a pronounced curve, and makes the bow of every curved slider

@@ -82,6 +82,9 @@ def main() -> None:
     parser.add_argument("--stream-frequency", type=float, default=None,
                          help="Forwarded to apply_style.py's --stream-frequency. Omit to use "
                               "apply_style.py's own default.")
+    parser.add_argument("--stack-probability", type=float, default=None,
+                         help="Forwarded to apply_style.py's --stack-probability. Omit to use "
+                              "apply_style.py's own default.")
     parser.add_argument("--angle-jitter", type=float, default=None,
                          help="Forwarded to apply_style.py's --angle-jitter. Omit to use "
                               "apply_style.py's own default.")
@@ -114,6 +117,7 @@ def main() -> None:
     style_extra_args: list[str] = []
     for flag, value in (("--spacing", args.spacing), ("--curviness", args.curviness),
                          ("--stream-frequency", args.stream_frequency),
+                         ("--stack-probability", args.stack_probability),
                          ("--angle-jitter", args.angle_jitter),
                          ("--temperature", args.temperature)):
         if value is not None:

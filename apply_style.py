@@ -293,7 +293,8 @@ def styled_spacing(gap_ms: float, beat_length_ms: float, slider_multiplier: floa
 def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: random.Random, seed: int,
                        offset_ms: float = 0.0, measure_length_ms: float = 0.0,
                        measure_buckets: dict[int, int] | None = None,
-                       stream_frequency: float = 0.5) -> dict[int, tuple[int, str]]:
+                       stream_frequency: float = 0.5,
+                       stack_probability: float = 0.5) -> dict[int, tuple[int, str]]:
     """Decide a mode — "stack", "line", or "flow" — for every object that's
     part of a fast (quarter-beat-or-closer) run.
 
@@ -322,29 +323,32 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
     clearly separated bursts instead — this applies to every mode, not
     just stacks, and regardless of `stream_frequency` below.
 
-    `stream_frequency` (0-1) is the chance that an eligible burst becomes a
-    deliberate stream unit — stacked in one spot or spread along a locked-
-    in straight line — at all, rather than "flow": its members just follow
-    the ordinary motif-driven placement any other note would, one at a
-    time, with no forced overlap or fixed direction. At 0, no burst is
-    ever forced into a stack or line; the notes are still there (bursts
-    are still split at MAX_RUN_LEN, and the surrounding transition gap
-    still applies), they just never get piled up or locked onto one line.
-    At 1, every eligible burst becomes a stream, same as before this knob
-    existed. Whichever bursts *do* become a stream still split 50/50
-    between stack and line, weighted only by whether the burst is short
-    enough to stack at all (see below) — that internal mix isn't exposed
-    separately since "how often do I get a stream" was the actually
-    confusing thing about the old, differently-named --stack-probability
-    (0 there still forced *every* burst into a locked line, never actually
-    turning streaming off).
+    Two independent knobs govern this, deliberately kept separate since
+    they answer two different questions:
 
-    Both the frequency roll and the stack-vs-line roll are keyed to the
-    burst's measure energy bucket (the same signal apply_style's motifs
-    use), not a fresh coin flip every time: a bucket-seeded RNG makes the
-    choice, so every burst that lands in "this kind of section" (a verse's
-    second and third repeat, say) reuses the exact same choices every time
-    it recurs, instead of re-rolling and looking different on each repeat.
+    `stream_frequency` (0-1) is the chance that an eligible burst becomes
+    a deliberate stream unit *at all* — stacked in one spot or spread
+    along a locked-in straight line — rather than "flow": its members just
+    follow the ordinary motif-driven placement any other note would, one
+    at a time, with no forced overlap or fixed direction. At 0, no burst
+    is ever forced into a stack or line at all; the notes are still there
+    (bursts are still split at MAX_RUN_LEN, and the surrounding transition
+    gap still applies), they just never get piled up or locked onto one
+    line. At 1, every eligible burst becomes a stream.
+
+    `stack_probability` (0-1) only matters for whichever bursts
+    `stream_frequency` already decided *are* a stream: of those, how many
+    pile into one stacked spot versus spread along a line (0 = always
+    line, 1 = always stack, whenever the burst is short enough to stack at
+    all — see below). It has no say over whether a burst streams in the
+    first place; that's `stream_frequency`'s job alone.
+
+    Every roll (frequency, then stack-vs-line) is keyed to the burst's
+    measure energy bucket (the same signal apply_style's motifs use), not
+    a fresh coin flip every time: a bucket-seeded RNG makes the choice, so
+    every burst that lands in "this kind of section" (a verse's second and
+    third repeat, say) reuses the exact same choices every time it
+    recurs, instead of re-rolling and looking different on each repeat.
 
     A burst is only *eligible* for "stack" if its whole span (first member
     to last) is half a beat or less — piling more than that much elapsed
@@ -389,10 +393,10 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
                         freq_rng = random.Random(f"stream_freq:{bucket}:{burst_index}:{seed}")
                         is_stream = freq_rng.random() < stream_frequency
                         mix_rng = random.Random(f"stream_mode:{bucket}:{burst_index}:{seed}")
-                        wants_stack = mix_rng.random() < 0.5
+                        wants_stack = mix_rng.random() < stack_probability
                     else:
                         is_stream = rng.random() < stream_frequency
-                        wants_stack = rng.random() < 0.5
+                        wants_stack = rng.random() < stack_probability
 
                     if is_stream:
                         base_mode = "stack" if (stack_eligible and wants_stack) else "line"
@@ -438,6 +442,12 @@ def main() -> None:
                               "always split into separate bursts of at most 3 regardless of this "
                               "setting. Which one a given repeating section picks stays consistent "
                               "across its repeats either way.")
+    parser.add_argument("--stack-probability", type=float, default=0.5,
+                         help="Of whichever bursts --stream-frequency already decided ARE a "
+                              "stream: the mix between piling into one stacked spot and spreading "
+                              "along a line (0 = always line, 1 = always stack, whenever the burst "
+                              "is short enough to stack at all). Has no effect on whether a burst "
+                              "streams in the first place — that's --stream-frequency's job.")
     parser.add_argument("--curviness", type=float, default=0.5,
                          help="How curvy the map feels, 0-1. 0 makes almost every slider a "
                               "straight line; 1 makes almost every slider a pronounced curve "
@@ -486,7 +496,8 @@ def main() -> None:
     measure_buckets = compute_measure_energy_buckets(energy_at, offset_ms, measure_length_ms, objects[-1].time)
     stream_mode = build_stream_runs(objects, beat_length_ms, rng, args.seed, offset_ms=offset_ms,
                                      measure_length_ms=measure_length_ms, measure_buckets=measure_buckets,
-                                     stream_frequency=args.stream_frequency)
+                                     stream_frequency=args.stream_frequency,
+                                     stack_probability=args.stack_probability)
 
     # --spacing itself shifts a little, a handful of times over the course
     # of the song, instead of staying exactly one multiplier the whole way

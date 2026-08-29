@@ -81,6 +81,13 @@ SLIDER_PARAMS = [
                 "they're never piled up or locked onto one line), max 1 (always a stream). "
                 "Default 0.5.",
                 0.0, 1.0, 0.5),
+    SliderParam("--stack-probability", "Stack vs. line mix",
+                "Of whichever streams Stream frequency above already decided to make: how many "
+                "pile into one stacked spot instead of spreading along a short straight line. "
+                "Has no effect on how often you get a stream in the first place — only on what "
+                "the ones you get look like. Min 0 (always a line), max 1 (always a stack). "
+                "Default 0.5.",
+                0.0, 1.0, 0.5),
     SliderParam("--temperature", "Creativity",
                 "How much variation the whole map has — turn angles, slider curviness, how "
                 "far the pattern wanders around the screen, and how many times the jump "
