@@ -506,22 +506,32 @@ def main() -> None:
     # stays consistently curvy, a verse that stays consistently straight
     # and bendy) rather than every slider independently coin-flipping its
     # own shape regardless of what the rest of its section looks like.
+    # The variance itself tapers to zero as --curviness nears either
+    # extreme (full strength only at 0.5) — otherwise a bucket could drift
+    # *away* from an explicit 0 or 1, e.g. landing at curviness 0.15 on a
+    # bucket even though the user asked for dead straight (0), producing
+    # exactly the "still curvy at 0" complaint this taper fixes.
     bucket_curviness: dict[int, float] = {}
+    variance_taper = min(args.curviness, 1.0 - args.curviness) / 0.5  # 0 at the extremes, 1 at 0.5
     for bucket in range(NUM_ENERGY_BUCKETS):
         bucket_rng = random.Random(f"curviness:{bucket}:{args.seed}")
         bucket_curviness[bucket] = max(0.0, min(1.0, args.curviness
-                                                 + bucket_rng.uniform(-curviness_variance, curviness_variance)))
+                                                 + bucket_rng.uniform(-curviness_variance, curviness_variance)
+                                                 * variance_taper))
 
     def shape_mix_for(time_ms: float) -> tuple[float, float, float, float]:
         """(curviness, straight_prob, bezier_prob, bow_scale) for the slider
-        at time_ms, from its measure's own curviness level. 0.5 reproduces
-        the original fixed 35% straight / 30% gentle-Bezier / 35%
-        pronounced-arc split; higher shifts the mix toward curved shapes
-        and makes bows bigger."""
+        at time_ms, from its measure's own curviness level. `curviness`
+        maps linearly onto how often a slider is straight at all (0 ->
+        always straight, 1 -> never straight), so the two ends of the
+        slider are honored exactly, not just "mostly"; whatever's left over
+        is split between a gentle Bezier arc and a pronounced circular one
+        the same way as before (0.5 reproduces the original ~35% straight
+        / 30% gentle-Bezier / 35% pronounced-arc split)."""
         measure_index = int((time_ms - offset_ms) // measure_length_ms)
         bucket = measure_buckets.get(measure_index, 0)
         curviness = bucket_curviness.get(bucket, args.curviness)
-        straight = max(0.0, 0.7 * (1.0 - curviness))
+        straight = 1.0 - curviness
         bezier = straight + (1.0 - straight) * 0.46
         return curviness, straight, bezier, 0.5 + curviness
 
@@ -630,13 +640,20 @@ def main() -> None:
             # between two points for the rest of its length — a run visibly
             # doubling back over its own earlier members and anything else
             # nearby. So a genuine wall conflict re-aims the run *once*,
-            # back toward the open field, rather than re-bouncing forever;
-            # a run that doesn't hit a wall never re-aims at all.
+            # via a proper mirror reflection off whichever wall(s) it hit
+            # (not a jump to face the playfield's dead center, which can
+            # point back roughly the way the run *came from* and send it
+            # straight over its own earlier members again) — a reflection
+            # keeps whatever momentum the run had along the wall, the same
+            # way a ball bouncing off a surface keeps moving past it rather
+            # than doubling back the way it arrived. A run that doesn't hit
+            # a wall never re-aims at all.
             raw_x = cur_x + spacing * math.cos(line_run_angle)
             raw_y = cur_y + spacing * math.sin(line_run_angle)
-            if not (MARGIN <= raw_x <= PLAYFIELD_W - MARGIN and MARGIN <= raw_y <= PLAYFIELD_H - MARGIN):
-                line_run_angle = math.atan2(PLAYFIELD_H / 2.0 - cur_y, PLAYFIELD_W / 2.0 - cur_x)
-                line_run_angle += math.radians(rng.uniform(-20.0, 20.0))
+            if raw_x < MARGIN or raw_x > PLAYFIELD_W - MARGIN:
+                line_run_angle = math.pi - line_run_angle
+            if raw_y < MARGIN or raw_y > PLAYFIELD_H - MARGIN:
+                line_run_angle = -line_run_angle
             new_x, new_y, _ = place_at_distance(cur_x, cur_y, spacing, line_run_angle)
             cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
             cur_angle = line_run_angle

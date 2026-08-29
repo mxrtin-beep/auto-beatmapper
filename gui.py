@@ -24,6 +24,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+import zipfile
 from dataclasses import dataclass
 from tkinter import filedialog, messagebox, ttk
 
@@ -43,41 +44,45 @@ FONT_LABEL = ("Segoe UI", 10, "bold")
 FONT_HINT = ("Segoe UI", 9)
 FONT_MONO = ("Consolas", 9)
 
+PAD_OUTER = 18   # panel-to-window and section-to-section spacing
+PAD_INNER = 16   # content-to-panel-border spacing (labels sat flush against the border before)
+
+DIFFICULTIES = ("Easy", "Normal", "Hard", "Insane")
+
 
 @dataclass
 class SliderParam:
-    """A 0-1 (or otherwise bounded) numeric style knob, shown as a slider
-    with its live value, a plain-language label, and a phrase-long
-    description of what it does and its range."""
+    """A bounded numeric style knob, shown as a slider with its live
+    value, a plain-language label, and a phrase-long description of what
+    it does and its range."""
     flag: str
     label: str
     description: str
     lo: float
     hi: float
     default: float
-    resolution: float = 0.01
 
 
 SLIDER_PARAMS = [
     SliderParam("--spacing", "Jump distance",
                 "How far apart notes are placed for a given time gap between them. "
                 "Min 0.5 (tight, close together), max 2.5 (wide, dramatic jumps). Default 1.3.",
-                0.5, 2.5, 1.3, 0.05),
+                0.5, 2.5, 1.3),
     SliderParam("--curviness", "Slider curviness",
                 "How curved slider paths look, from mostly straight lines to pronounced "
                 "arcs. Min 0 (straight), max 1 (very curved). Default 0.5.",
-                0.0, 1.0, 0.5, 0.01),
+                0.0, 1.0, 0.5),
     SliderParam("--stack-probability", "Stack vs. line mix",
                 "For a fast run of notes: how often they pile into one stacked spot "
                 "instead of spreading along a short straight line. Min 0 (always a line), "
                 "max 1 (always a stack). Default 0.5.",
-                0.0, 1.0, 0.5, 0.01),
+                0.0, 1.0, 0.5),
     SliderParam("--temperature", "Creativity",
                 "How much variation the whole map has — turn angles, slider curviness, how "
                 "far the pattern wanders around the screen, and how many times the jump "
                 "distance shifts over the course of the song. Min 0 (tight and repetitive, "
                 "spacing never changes), max 1 (loose and varied). Default 0.5.",
-                0.0, 1.0, 0.5, 0.01),
+                0.0, 1.0, 0.5),
 ]
 
 
@@ -90,20 +95,24 @@ class EntryParam:
     description: str
 
 
-ENTRY_PARAMS = [
-    EntryParam("--angle-jitter", "Angle jitter (degrees)",
+STYLE_ENTRY_PARAMS = [
+    EntryParam("--angle-jitter", "Slider angles",
                "Random wobble added on top of every turn angle, in degrees. Leave blank to "
                "derive it from Creativity automatically (roughly 1-10)."),
+]
+
+TIMING_PARAMS = [
     EntryParam("--bpm", "BPM override",
                "Force a specific tempo instead of detecting it from the song automatically. "
                "Leave blank to auto-detect."),
     EntryParam("--offset", "Beat offset override (ms)",
                "Force the time of the very first beat, in milliseconds, instead of detecting "
                "it automatically. Leave blank to auto-detect."),
-    EntryParam("--seed", "Random seed",
-               "A fixed whole number so re-running with the same song and settings produces "
-               "the exact same map. Leave blank for a different result every time."),
 ]
+
+SEED_PARAM = EntryParam("--seed", "Random seed",
+                         "A fixed whole number so re-running with the same song and settings "
+                         "produces the exact same map. Leave blank for a different result every time.")
 
 
 class TextRedirector:
@@ -158,8 +167,16 @@ def _configure_style(root: tk.Tk) -> None:
                      font=FONT_HINT, padding=6, borderwidth=1)
     style.map("Secondary.TButton", background=[("active", BORDER)])
 
-    style.configure("TCheckbutton", background=BG_PANEL, foreground=FG, font=FONT_HINT)
-    style.map("TCheckbutton", background=[("active", BG_PANEL)])
+    # A plain ttk Checkbutton's "indicator" (the little box) renders as a
+    # bare glyph that reads as an X rather than a checkbox on several
+    # platforms unless these are set explicitly — this gives it an actual
+    # square that fills in the accent color when checked.
+    style.configure("TCheckbutton", background=BG_PANEL, foreground=FG, font=FONT_HINT,
+                     indicatorsize=16, indicatormargin=8, indicatorrelief="flat",
+                     indicatordiameter=14)
+    style.map("TCheckbutton", background=[("active", BG_PANEL)],
+              indicatorbackground=[("selected", ACCENT), ("!selected", BG_ENTRY)],
+              indicatorforeground=[("selected", "#101218"), ("!selected", BG_ENTRY)])
 
     style.configure("TScale", background=BG_PANEL, troughcolor=BG_ENTRY)
     style.configure("TSeparator", background=BORDER)
@@ -171,7 +188,7 @@ class App:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         root.title("Auto Beatmapper")
-        root.geometry("700x820")
+        root.geometry("700x860")
         root.minsize(560, 500)
         _configure_style(root)
 
@@ -181,6 +198,7 @@ class App:
         self.result_paths: list[str] = []
         self.slider_vars: dict[str, tk.DoubleVar] = {}
         self.entry_vars: dict[str, tk.StringVar] = {}
+        self.difficulty_vars: dict[str, tk.BooleanVar] = {}
 
         # --- Scrollable form area (the form is long — sections stack) ---
         outer = ttk.Frame(root)
@@ -204,92 +222,100 @@ class App:
         canvas.bind_all("<Button-4>", on_mousewheel)      # Linux scroll up
         canvas.bind_all("<Button-5>", on_mousewheel)      # Linux scroll down
 
-        pad = {"padx": 14, "pady": 10}
-
-        # --- Song & output section ---
+        # --- Song section ---
         song_panel = self._panel(form, "Song")
-        ttk.Label(song_panel, text="Song file", style="Heading.TLabel").grid(
-            row=0, column=0, sticky="w", padx=14, pady=(12, 2))
-        ttk.Label(song_panel, text="The MP3 (or WAV/OGG) to build a beatmap from.",
-                  style="Hint.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", padx=14)
+        self._section_heading(song_panel, 0, "Song file",
+                               "The MP3 (or WAV/OGG) to build a beatmap from.")
         self.audio_var = tk.StringVar()
-        row_frame = ttk.Frame(song_panel, style="Panel.TFrame")
-        row_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 10))
-        row_frame.columnconfigure(0, weight=1)
-        ttk.Entry(row_frame, textvariable=self.audio_var).grid(row=0, column=0, sticky="ew")
-        ttk.Button(row_frame, text="Browse...", style="Secondary.TButton",
-                   command=self._browse_audio).grid(row=0, column=1, padx=(8, 0))
+        self._file_row(song_panel, 2, self.audio_var, self._browse_audio)
 
-        ttk.Label(song_panel, text="Output folder", style="Heading.TLabel").grid(
-            row=3, column=0, sticky="w", padx=14, pady=(2, 2))
-        ttk.Label(song_panel, text="Where the finished files are written. Every song lands in "
-                                    "the same flat folder.", style="Hint.TLabel").grid(
-            row=4, column=0, columnspan=2, sticky="w", padx=14)
+        self._section_heading(song_panel, 3, "Output folder",
+                               "Where the finished files are written. Every song lands in "
+                               "the same flat folder.", first=False)
         self.outdir_var = tk.StringVar(value="output")
-        row_frame2 = ttk.Frame(song_panel, style="Panel.TFrame")
-        row_frame2.grid(row=5, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 12))
-        row_frame2.columnconfigure(0, weight=1)
-        ttk.Entry(row_frame2, textvariable=self.outdir_var).grid(row=0, column=0, sticky="ew")
-        ttk.Button(row_frame2, text="Browse...", style="Secondary.TButton",
-                   command=self._browse_outdir).grid(row=0, column=1, padx=(8, 0))
+        self._file_row(song_panel, 5, self.outdir_var, self._browse_outdir, last=True)
         song_panel.columnconfigure(0, weight=1)
 
-        # --- Metadata section ---
+        # --- Song info section ---
         meta_panel = self._panel(form, "Song info")
         self.title_var = tk.StringVar()
         self.artist_var = tk.StringVar(value="Unknown Artist")
         self.creator_var = tk.StringVar(value="auto-beatmapper")
-        for i, (label, desc, var) in enumerate((
+        meta_fields = (
             ("Title", "Song title. Leave blank to use the audio file's name.", self.title_var),
             ("Artist", "Who performed the song.", self.artist_var),
             ("Creator", "Your mapper name, credited in the beatmap.", self.creator_var),
-        )):
-            self._labeled_entry(meta_panel, i, label, desc, var)
+        )
+        for i, (label, desc, var) in enumerate(meta_fields):
+            self._labeled_entry(meta_panel, i, label, desc, var,
+                                 first=(i == 0), last=(i == len(meta_fields) - 1))
         meta_panel.columnconfigure(1, weight=1)
 
-        # --- Style section ---
+        # --- Style section (sliders, plus the one freeform angle field) ---
         style_panel = self._panel(form, "Style")
         for i, p in enumerate(SLIDER_PARAMS):
-            self._slider_row(style_panel, i, p)
-        style_panel.columnconfigure(0, weight=1)
-
-        # --- Advanced / overrides section ---
-        adv_panel = self._panel(form, "Advanced overrides")
-        for i, p in enumerate(ENTRY_PARAMS):
+            self._slider_row(style_panel, i, p, first=(i == 0))
+        # An arbitrarily large row offset for whatever comes after the
+        # sliders — grid rows with no widget in them take up no space, so
+        # this only needs to sort after every row _slider_row used (it
+        # doesn't need to be contiguous with them).
+        entry_row_base = 1000
+        for j, p in enumerate(STYLE_ENTRY_PARAMS):
             var = tk.StringVar()
             self.entry_vars[p.flag] = var
-            self._labeled_entry(adv_panel, i, p.label, p.description, var)
-        adv_panel.columnconfigure(1, weight=1)
+            self._labeled_entry(style_panel, entry_row_base + j, p.label, p.description, var,
+                                 first=False, last=True)
+        style_panel.columnconfigure(0, weight=1)
 
-        # --- Options section ---
+        # --- Timing section ---
+        timing_panel = self._panel(form, "Timing")
+        for i, p in enumerate(TIMING_PARAMS):
+            var = tk.StringVar()
+            self.entry_vars[p.flag] = var
+            self._labeled_entry(timing_panel, i, p.label, p.description, var,
+                                 first=(i == 0), last=(i == len(TIMING_PARAMS) - 1))
+        timing_panel.columnconfigure(1, weight=1)
+
+        # --- Seed section ---
+        seed_panel = self._panel(form, "Seed")
+        seed_var = tk.StringVar()
+        self.entry_vars[SEED_PARAM.flag] = seed_var
+        self._labeled_entry(seed_panel, 0, SEED_PARAM.label, SEED_PARAM.description, seed_var,
+                             first=True, last=True)
+        seed_panel.columnconfigure(1, weight=1)
+
+        # --- Difficulties section ---
+        diff_panel = self._panel(form, "Difficulties")
+        ttk.Label(diff_panel, text="All four are always generated; unchecked ones are simply "
+                                    "left out of the result.", style="Hint.TLabel").grid(
+            row=0, column=0, columnspan=4, sticky="w", padx=PAD_INNER, pady=(PAD_INNER, 6))
+        for i, tier in enumerate(DIFFICULTIES):
+            var = tk.BooleanVar(value=True)
+            self.difficulty_vars[tier] = var
+            ttk.Checkbutton(diff_panel, text=tier, variable=var).grid(
+                row=1, column=i, sticky="w", padx=(PAD_INNER if i == 0 else 8, 8),
+                pady=(0, PAD_INNER))
+        diff_panel.columnconfigure(len(DIFFICULTIES), weight=1)
+
+        # --- Options section (checkboxes only, no explanatory text) ---
         opt_panel = self._panel(form, "Options")
-        self.spread_var = tk.BooleanVar(value=True)
         self.osz_var = tk.BooleanVar(value=True)
         self.keep_osu_var = tk.BooleanVar(value=False)
         self.auto_open_var = tk.BooleanVar(value=True)
-        checks = (
-            (self.spread_var, "Generate all four difficulties",
-             "Easy, Normal, Hard, and Insane. Uncheck to generate only the hardest (Insane)."),
-            (self.osz_var, "Package as .osz",
-             "Bundle the finished difficulties and the song into one file ready to drag "
-             "straight into osu!."),
-            (self.keep_osu_var, "Keep loose .osu files too",
-             "Only matters with Package as .osz checked — normally the loose files are "
-             "deleted once they're safely inside the .osz."),
-            (self.auto_open_var, "Open the finished map when done",
-             "Launch the .osz (or the Insane .osu, if not packaging) with whatever your "
-             "system uses to open that file type."),
+        options = (
+            (self.osz_var, "Package as .osz (ready to import into osu!)"),
+            (self.keep_osu_var, "Keep loose .osu files too"),
+            (self.auto_open_var, "Open the finished map when done"),
         )
-        for i, (var, label, desc) in enumerate(checks):
+        for i, (var, label) in enumerate(options):
             ttk.Checkbutton(opt_panel, text=label, variable=var).grid(
-                row=i * 2, column=0, sticky="w", padx=14, pady=(10 if i == 0 else 4, 0))
-            ttk.Label(opt_panel, text=desc, style="Hint.TLabel").grid(
-                row=i * 2 + 1, column=0, sticky="w", padx=32, pady=(0, 4 if i < len(checks) - 1 else 12))
+                row=i, column=0, sticky="w", padx=PAD_INNER,
+                pady=(PAD_INNER if i == 0 else 6, PAD_INNER if i == len(options) - 1 else 0))
         opt_panel.columnconfigure(0, weight=1)
 
         # --- Generate button + log (outside the scroll area, always visible) ---
         bottom = ttk.Frame(root)
-        bottom.pack(fill="both", padx=14, pady=(6, 14))
+        bottom.pack(fill="both", padx=PAD_OUTER, pady=(6, PAD_OUTER))
         self.generate_button = ttk.Button(bottom, text="Generate", command=self._on_generate)
         self.generate_button.pack(fill="x", pady=(0, 8))
 
@@ -297,7 +323,7 @@ class App:
         log_frame.pack(fill="both", expand=True)
         self.log_text = tk.Text(log_frame, height=10, state="disabled", wrap="word",
                                  background=BG_ENTRY, foreground=FG, insertbackground=FG,
-                                 font=FONT_MONO, relief="flat", padx=8, pady=8)
+                                 font=FONT_MONO, relief="flat", padx=10, pady=10)
         self.log_text.pack(fill="both", expand=True)
 
         self.root.after(100, self._drain_log_queue)
@@ -306,38 +332,57 @@ class App:
 
     def _panel(self, parent: tk.Widget, title: str) -> ttk.Labelframe:
         panel = ttk.Labelframe(parent, text=title)
-        panel.pack(fill="x", expand=True, padx=14, pady=(0, 14))
+        panel.pack(fill="x", expand=True, padx=PAD_OUTER, pady=(0, PAD_OUTER))
         return panel
 
-    def _labeled_entry(self, parent: tk.Widget, row: int, label: str, desc: str,
-                        var: tk.StringVar) -> None:
+    def _section_heading(self, parent: tk.Widget, row: int, label: str, desc: str,
+                          first: bool = True) -> None:
         ttk.Label(parent, text=label, style="Heading.TLabel").grid(
-            row=row * 3, column=0, columnspan=2, sticky="w", padx=14, pady=(10 if row == 0 else 8, 2))
+            row=row, column=0, columnspan=2, sticky="w",
+            padx=PAD_INNER, pady=(PAD_INNER if first else 14, 2))
         ttk.Label(parent, text=desc, style="Hint.TLabel").grid(
-            row=row * 3 + 1, column=0, columnspan=2, sticky="w", padx=14)
-        ttk.Entry(parent, textvariable=var).grid(
-            row=row * 3 + 2, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 4))
+            row=row + 1, column=0, columnspan=2, sticky="w", padx=PAD_INNER)
 
-    def _slider_row(self, parent: tk.Widget, row: int, p: SliderParam) -> None:
+    def _file_row(self, parent: tk.Widget, row: int, var: tk.StringVar, browse_cmd, last: bool = False) -> None:
+        row_frame = ttk.Frame(parent, style="Panel.TFrame")
+        row_frame.grid(row=row, column=0, columnspan=2, sticky="ew",
+                        padx=PAD_INNER, pady=(4, PAD_INNER if last else 4))
+        row_frame.columnconfigure(0, weight=1)
+        ttk.Entry(row_frame, textvariable=var).grid(row=0, column=0, sticky="ew")
+        ttk.Button(row_frame, text="Browse...", style="Secondary.TButton",
+                   command=browse_cmd).grid(row=0, column=1, padx=(8, 0))
+
+    def _labeled_entry(self, parent: tk.Widget, row: int, label: str, desc: str,
+                        var: tk.StringVar, first: bool = False, last: bool = False) -> None:
+        ttk.Label(parent, text=label, style="Heading.TLabel").grid(
+            row=row * 3, column=0, columnspan=2, sticky="w",
+            padx=PAD_INNER, pady=(PAD_INNER if first else 14, 2))
+        ttk.Label(parent, text=desc, style="Hint.TLabel").grid(
+            row=row * 3 + 1, column=0, columnspan=2, sticky="w", padx=PAD_INNER)
+        ttk.Entry(parent, textvariable=var).grid(
+            row=row * 3 + 2, column=0, columnspan=2, sticky="ew",
+            padx=PAD_INNER, pady=(4, PAD_INNER if last else 0))
+
+    def _slider_row(self, parent: tk.Widget, row: int, p: SliderParam, first: bool = False) -> None:
         var = tk.DoubleVar(value=p.default)
         self.slider_vars[p.flag] = var
         base_row = row * 4
         ttk.Label(parent, text=p.label, style="Heading.TLabel").grid(
-            row=base_row, column=0, sticky="w", padx=14, pady=(10 if row == 0 else 8, 2))
+            row=base_row, column=0, sticky="w", padx=PAD_INNER, pady=(PAD_INNER if first else 14, 2))
         value_label = ttk.Label(parent, style="Value.TLabel", width=6, anchor="e")
-        value_label.grid(row=base_row, column=1, sticky="e", padx=14)
+        value_label.grid(row=base_row, column=1, sticky="e", padx=PAD_INNER)
 
-        def on_change(_evt=None, var=var, value_label=value_label, p=p) -> None:
+        def on_change(_evt=None, var=var, value_label=value_label) -> None:
             value_label.configure(text=f"{var.get():.2f}")
 
         on_change()
         ttk.Label(parent, text=p.description, style="Hint.TLabel").grid(
-            row=base_row + 1, column=0, columnspan=2, sticky="w", padx=14)
+            row=base_row + 1, column=0, columnspan=2, sticky="w", padx=PAD_INNER)
         scale = ttk.Scale(parent, from_=p.lo, to=p.hi, orient="horizontal",
                            variable=var, command=on_change)
-        scale.grid(row=base_row + 2, column=0, columnspan=2, sticky="ew", padx=14, pady=(6, 0))
+        scale.grid(row=base_row + 2, column=0, columnspan=2, sticky="ew", padx=PAD_INNER, pady=(6, 0))
         range_frame = ttk.Frame(parent, style="Panel.TFrame")
-        range_frame.grid(row=base_row + 3, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 4))
+        range_frame.grid(row=base_row + 3, column=0, columnspan=2, sticky="ew", padx=PAD_INNER, pady=(0, 4))
         range_frame.columnconfigure(1, weight=1)
         ttk.Label(range_frame, text=f"min {p.lo:g}", style="Hint.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(range_frame, text=f"max {p.hi:g}", style="Hint.TLabel").grid(row=0, column=2, sticky="e")
@@ -381,6 +426,9 @@ class App:
         if not os.path.isfile(audio):
             messagebox.showerror("File not found", f"Can't find:\n{audio}")
             return None
+        if not any(var.get() for var in self.difficulty_vars.values()):
+            messagebox.showerror("No difficulties selected", "Check at least one difficulty to generate.")
+            return None
 
         argv = [audio, "--outdir", self.outdir_var.get().strip() or "output",
                 "--artist", self.artist_var.get().strip() or "Unknown Artist",
@@ -392,7 +440,7 @@ class App:
         for p in SLIDER_PARAMS:
             argv += [p.flag, f"{self.slider_vars[p.flag].get():.3f}"]
 
-        for p in ENTRY_PARAMS:
+        for p in (*STYLE_ENTRY_PARAMS, *TIMING_PARAMS, SEED_PARAM):
             value = self.entry_vars[p.flag].get().strip()
             if value:
                 try:
@@ -402,8 +450,11 @@ class App:
                     return None
                 argv += [p.flag, value]
 
-        if not self.spread_var.get():
-            argv.append("--no-spread")
+        # Difficulties are always all generated (--no-spread is never
+        # passed) — an unchecked one is deleted afterward instead, since
+        # make_easy.py derives each easier tier from the one above it, so
+        # skipping a tier mid-spread isn't something the pipeline itself
+        # supports doing any other way.
         if self.osz_var.get():
             argv.append("--osz")
         if self.keep_osu_var.get():
@@ -445,14 +496,26 @@ class App:
             for i, a in enumerate(argv):
                 if a == "--outdir":
                     outdir = argv[i + 1]
+
             pipeline_main.main()
+
+            excluded = [t for t, v in self.difficulty_vars.items() if not v.get()]
             osz_path = os.path.join(outdir, f"{title}.osz")
+            if excluded:
+                if os.path.isfile(osz_path):
+                    _remove_difficulties_from_osz(osz_path, title, excluded)
+                for tier in excluded:
+                    loose_path = os.path.join(outdir, f"{title} [{tier}].osu")
+                    if os.path.isfile(loose_path):
+                        os.remove(loose_path)
+
             if os.path.isfile(osz_path):
                 self.result_paths = [osz_path]
             else:
                 self.result_paths = [os.path.join(outdir, f"{title} [{tier}].osu")
                                       for tier in ("Insane", "Hard", "Normal", "Easy")
-                                      if os.path.isfile(os.path.join(outdir, f"{title} [{tier}].osu"))]
+                                      if tier not in excluded
+                                      and os.path.isfile(os.path.join(outdir, f"{title} [{tier}].osu"))]
         except SystemExit as e:
             if e.code not in (None, 0):
                 self.result_error = RuntimeError(f"Pipeline exited with code {e.code}")
@@ -471,6 +534,22 @@ class App:
             return
         if self.auto_open_var.get() and self.result_paths:
             _open_path(self.result_paths[0])
+
+
+def _remove_difficulties_from_osz(osz_path: str, title: str, excluded_tiers: list[str]) -> None:
+    """Rewrite the .osz without the .osu entries for `excluded_tiers` — a
+    .osz is just a zip file, and build_osz.py names each entry by its own
+    basename (`{title} [{Tier}].osu`), so this is a plain filter-and-
+    recompress rather than anything beatmap-specific. Every other entry
+    (the audio file, any images) is carried over untouched."""
+    to_remove = {f"{title} [{tier}].osu" for tier in excluded_tiers}
+    tmp_path = osz_path + ".tmp"
+    with zipfile.ZipFile(osz_path, "r") as zin, zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            if item.filename in to_remove:
+                continue
+            zout.writestr(item, zin.read(item.filename))
+    os.replace(tmp_path, osz_path)
 
 
 def _open_path(path: str) -> None:
