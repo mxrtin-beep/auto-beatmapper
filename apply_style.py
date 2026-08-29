@@ -320,15 +320,21 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
     fine, but switching stack behavior mid-pattern is the specific thing
     to avoid.
 
+    A run longer than MAX_RUN_LEN objects is split into consecutive bursts
+    of at most MAX_RUN_LEN, each a fully independent run with its own mode
+    decision and its own entry/exit transition — a chain of, say, 8
+    eighth-notes doesn't read as "click here 8 times in a pile/line," it
+    reads as an arbitrary blob to count or a line so long it either bends
+    to stay on screen or runs off it. Capped at MAX_RUN_LEN, the same 8
+    notes become up to 3 short, clearly separated bursts instead — this
+    applies regardless of mode, not just to stacks.
+
     A run is only *eligible* for "stack" if its whole span (first member to
-    last) is half a beat or less, *and* it's no more than MAX_STACK_LEN
-    objects — piling more than that much elapsed time, or too many circles,
-    onto one spot is both a real overlap the ranking criteria's Hard rule
-    forbids ("objects 1/2 of a beat apart or less must not fully overlap")
-    and, well before that limit even matters, just unreadable: a pile of
-    5+ circles stacked exactly on top of each other doesn't read as "click
-    here N times," it reads as a smear you can't count. A run failing
-    either check is always "line" instead, in full, not partially.
+    last) is half a beat or less — piling more than that much elapsed time
+    onto one spot is a real overlap the ranking criteria's Hard rule
+    forbids ("objects 1/2 of a beat apart or less must not fully overlap").
+    A run failing that check is always "line" instead, in full, not
+    partially.
 
     Which of the two an eligible run picks is keyed to its measure's energy
     bucket (the same signal apply_style's motifs use), not a fresh coin
@@ -337,12 +343,13 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
     repeat, say) reuses the *same* stack-vs-line choice every time it
     recurs, instead of re-rolling and looking different on each repeat.
     `stack_probability` still controls the overall mix (both are still
-    good, per the design brief).
+    good, per the design brief) — even at 0 (always line), a burst is
+    still capped at MAX_RUN_LEN, so "line" never means one long chain.
     """
     quarter_beat_ms = beat_length_ms / 4.0
     half_beat_ms = beat_length_ms / 2.0
     threshold = quarter_beat_ms + 1.0
-    MAX_STACK_LEN = 4  # beyond this a "pile" reads as a smear, not a countable stack
+    MAX_RUN_LEN = 3  # a run/burst longer than this reads as a smear or an overlong line, not a countable unit
 
     mode_of: dict[int, tuple[int, str]] = {}
     i = 0
@@ -358,22 +365,31 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
             j += 1
         run_len = j - i
         if run_len >= 2:
-            run_start_time = objects[i].time
-            run_span_ms = objects[j - 1].time - run_start_time
-            stack_eligible = run_span_ms <= half_beat_ms and run_len <= MAX_STACK_LEN
-            if stack_eligible:
-                if measure_buckets and measure_length_ms:
-                    measure_index = int((run_start_time - offset_ms) // measure_length_ms)
-                    bucket = measure_buckets.get(measure_index, 0)
-                    bucket_rng = random.Random(f"stream_mode:{bucket}:{seed}")
-                    base_mode = "stack" if bucket_rng.random() < stack_probability else "line"
-                else:
-                    base_mode = "stack" if rng.random() < stack_probability else "line"
-            else:
-                base_mode = "line"
-            for k in range(i, j):
-                mode_of[k] = (run_id, base_mode)
-            run_id += 1
+            # Split into bursts of at most MAX_RUN_LEN, each its own run.
+            burst_start = i
+            burst_index = 0
+            while burst_start < j:
+                burst_end = min(burst_start + MAX_RUN_LEN, j)
+                burst_len = burst_end - burst_start
+                if burst_len >= 2:
+                    burst_start_time = objects[burst_start].time
+                    burst_span_ms = objects[burst_end - 1].time - burst_start_time
+                    stack_eligible = burst_span_ms <= half_beat_ms
+                    if stack_eligible:
+                        if measure_buckets and measure_length_ms:
+                            measure_index = int((burst_start_time - offset_ms) // measure_length_ms)
+                            bucket = measure_buckets.get(measure_index, 0)
+                            bucket_rng = random.Random(f"stream_mode:{bucket}:{burst_index}:{seed}")
+                            base_mode = "stack" if bucket_rng.random() < stack_probability else "line"
+                        else:
+                            base_mode = "stack" if rng.random() < stack_probability else "line"
+                    else:
+                        base_mode = "line"
+                    for k in range(burst_start, burst_end):
+                        mode_of[k] = (run_id, base_mode)
+                    run_id += 1
+                burst_start = burst_end
+                burst_index += 1
         i = j
     return mode_of
 
@@ -455,6 +471,34 @@ def main() -> None:
                                      measure_length_ms=measure_length_ms, measure_buckets=measure_buckets,
                                      stack_probability=args.stack_probability)
 
+    # --spacing itself shifts a little, a handful of times over the course
+    # of the song, instead of staying exactly one multiplier the whole way
+    # through — a song genuinely has a few different sections (verse,
+    # chorus, bridge...), and a spacing change is one more way a section
+    # reads as its own thing. `--temperature` controls how many times it
+    # changes (0 -> never, this tier's whole point; 1 -> up to
+    # MAX_SPACING_SECTION_CHANGES times) — never "every object", and never
+    # more than a few times in one song either way. Each change alternates
+    # the sign of the shift (rather than an independent random draw per
+    # section, which could by chance land two neighboring sections within
+    # a percent of each other — a change too small to actually notice) and
+    # keeps the *magnitude* in a band that reads as a deliberate shift
+    # without being jarring enough to break the flow a player just learned.
+    MAX_SPACING_SECTION_CHANGES = 3
+    num_spacing_changes = round(args.temperature * MAX_SPACING_SECTION_CHANGES)
+    num_spacing_sections = num_spacing_changes + 1
+    section_rng = random.Random(f"spacing_section:{args.seed}")
+    spacing_section_scales = [1.0]
+    for section_i in range(1, num_spacing_sections):
+        sign = 1 if section_i % 2 == 1 else -1
+        spacing_section_scales.append(1.0 + sign * section_rng.uniform(0.15, 0.25))
+    spacing_section_span_ms = max(1.0, (objects[-1].time - objects[0].time) / num_spacing_sections)
+
+    def spacing_scale_for(time_ms: float) -> float:
+        section_index = int((time_ms - objects[0].time) // spacing_section_span_ms)
+        section_index = max(0, min(num_spacing_sections - 1, section_index))
+        return spacing_section_scales[section_index]
+
     # Each measure bucket gets its own curviness level, offset from
     # --curviness by a bucket-seeded amount — the same "keyed to the
     # bucket, not a fresh roll" trick the motifs and stream mode use. This
@@ -501,13 +545,16 @@ def main() -> None:
     wander_target = (wander_rng.uniform(MARGIN, PLAYFIELD_W - MARGIN),
                       wander_rng.uniform(MARGIN, PLAYFIELD_H - MARGIN))
 
-    # A stack/line run reads as one deliberate unit only if it's visually
-    # set apart from whatever comes right before and after it — otherwise
-    # a pile of circles bleeds into the normal flow on either side and the
-    # run boundary disappears. STREAM_TRANSITION_BOOST widens just the one
-    # connecting gap on both sides of a run (never a gap inside it, and
-    # never anything more than one gap away) on top of ordinary distance
-    # snap. was_in_stream tracks whether the *previous* object belonged to
+    # A stack/line run (or burst — build_stream_runs splits anything longer
+    # than MAX_RUN_LEN into several) reads as one deliberate unit only if
+    # it's visually set apart from whatever comes right before and after it
+    # — otherwise a pile of circles bleeds into the normal flow, or into the
+    # next burst, and the run boundary disappears. STREAM_TRANSITION_BOOST
+    # widens just the one connecting gap on both sides of a run (never a gap
+    # inside it, and never anything more than one gap away) on top of
+    # ordinary distance snap — including the gap between two consecutive
+    # bursts of the same long stream, not just where a stream meets normal
+    # flow. was_in_stream tracks whether the *previous* object belonged to
     # a run at all, so the boost applies leaving one too, not just entering.
     STREAM_TRANSITION_BOOST = 1.4
     was_in_stream = False
@@ -530,6 +577,7 @@ def main() -> None:
         tier = classify_tier(energy_at(obj.time), q_low, q_high)
         entry = stream_mode.get(idx)
         run_id, mode = entry if entry is not None else (None, None)
+        entering_new_run = run_id is not None and run_id != current_run_id
         if run_id != current_run_id:
             # A new run has started — even a same-mode run immediately
             # following another (the two are more than a quarter beat
@@ -540,7 +588,7 @@ def main() -> None:
             stack_anchor = None
             current_run_id = run_id
 
-        entering_stream = mode is not None and not was_in_stream
+        entering_stream = entering_new_run
         leaving_stream = mode is None and was_in_stream
         boost = STREAM_TRANSITION_BOOST if (entering_stream or leaving_stream) else 1.0
 
@@ -555,7 +603,7 @@ def main() -> None:
                 # arbitrary, and could even coincide with an unrelated
                 # object several beats away that just happened to precede
                 # it.
-                spacing = max(MIN_SPACING, min(MAX_SPACING, boost * styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing, rng)))
+                spacing = max(MIN_SPACING, min(MAX_SPACING, boost * styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing * spacing_scale_for(obj.time), rng)))
                 cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
                 cur_angle = wander_nudge(cur_angle, cur_x, cur_y)
                 new_x, new_y, cur_angle = place_at_distance(cur_x, cur_y, spacing, cur_angle)
@@ -572,7 +620,7 @@ def main() -> None:
                 line_run_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
                                              measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
                 line_run_angle = wander_nudge(line_run_angle, cur_x, cur_y)
-            spacing = max(MIN_SPACING, min(MAX_SPACING, boost * styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing, rng)))
+            spacing = max(MIN_SPACING, min(MAX_SPACING, boost * styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing * spacing_scale_for(obj.time), rng)))
             # A run's direction is locked in once, above — but if it
             # happens to point straight at a wall, letting place_at_distance
             # "bounce" it back on every single step (as every other call
@@ -596,7 +644,7 @@ def main() -> None:
             # Outside a stream: normal distance-snap + motif-driven flow
             # (plus the transition boost on the one gap right after a
             # stream ends, for the same readability reason as entering one).
-            spacing = max(MIN_SPACING, min(MAX_SPACING, boost * styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing, rng)))
+            spacing = max(MIN_SPACING, min(MAX_SPACING, boost * styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing * spacing_scale_for(obj.time), rng)))
             cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
             cur_angle = wander_nudge(cur_angle, cur_x, cur_y)
             new_x, new_y, cur_angle = place_at_distance(cur_x, cur_y, spacing, cur_angle)

@@ -2,7 +2,8 @@
 """
 Desktop GUI for the pipeline — the same thing `main.py` does from the
 shell, but with a file picker for the song, a form for every main.py
-argument, and a button instead of a command line.
+argument (in plain language, not `--flag` form), and a button instead of
+a command line.
 
 Requires no extra dependency beyond what the pipeline itself already
 needs — Tkinter ships with the Python standard library on Windows and
@@ -23,9 +24,86 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+from dataclasses import dataclass
 from tkinter import filedialog, messagebox, ttk
 
 import main as pipeline_main
+
+# --- Color palette (a dark theme instead of Tk's stock gray) ---
+BG = "#1c1e26"
+BG_PANEL = "#242732"
+BG_ENTRY = "#2c2f3c"
+FG = "#e6e6ec"
+FG_MUTED = "#9498a8"
+ACCENT = "#7c9cff"
+ACCENT_ACTIVE = "#9db2ff"
+BORDER = "#3a3e4d"
+
+FONT_LABEL = ("Segoe UI", 10, "bold")
+FONT_HINT = ("Segoe UI", 9)
+FONT_MONO = ("Consolas", 9)
+
+
+@dataclass
+class SliderParam:
+    """A 0-1 (or otherwise bounded) numeric style knob, shown as a slider
+    with its live value, a plain-language label, and a phrase-long
+    description of what it does and its range."""
+    flag: str
+    label: str
+    description: str
+    lo: float
+    hi: float
+    default: float
+    resolution: float = 0.01
+
+
+SLIDER_PARAMS = [
+    SliderParam("--spacing", "Jump distance",
+                "How far apart notes are placed for a given time gap between them. "
+                "Min 0.5 (tight, close together), max 2.5 (wide, dramatic jumps). Default 1.3.",
+                0.5, 2.5, 1.3, 0.05),
+    SliderParam("--curviness", "Slider curviness",
+                "How curved slider paths look, from mostly straight lines to pronounced "
+                "arcs. Min 0 (straight), max 1 (very curved). Default 0.5.",
+                0.0, 1.0, 0.5, 0.01),
+    SliderParam("--stack-probability", "Stack vs. line mix",
+                "For a fast run of notes: how often they pile into one stacked spot "
+                "instead of spreading along a short straight line. Min 0 (always a line), "
+                "max 1 (always a stack). Default 0.5.",
+                0.0, 1.0, 0.5, 0.01),
+    SliderParam("--temperature", "Creativity",
+                "How much variation the whole map has — turn angles, slider curviness, how "
+                "far the pattern wanders around the screen, and how many times the jump "
+                "distance shifts over the course of the song. Min 0 (tight and repetitive, "
+                "spacing never changes), max 1 (loose and varied). Default 0.5.",
+                0.0, 1.0, 0.5, 0.01),
+]
+
+
+@dataclass
+class EntryParam:
+    """An optional, unbounded (or integer) numeric override, shown as a
+    plain text field left blank to use the pipeline's own default."""
+    flag: str
+    label: str
+    description: str
+
+
+ENTRY_PARAMS = [
+    EntryParam("--angle-jitter", "Angle jitter (degrees)",
+               "Random wobble added on top of every turn angle, in degrees. Leave blank to "
+               "derive it from Creativity automatically (roughly 1-10)."),
+    EntryParam("--bpm", "BPM override",
+               "Force a specific tempo instead of detecting it from the song automatically. "
+               "Leave blank to auto-detect."),
+    EntryParam("--offset", "Beat offset override (ms)",
+               "Force the time of the very first beat, in milliseconds, instead of detecting "
+               "it automatically. Leave blank to auto-detect."),
+    EntryParam("--seed", "Random seed",
+               "A fixed whole number so re-running with the same song and settings produces "
+               "the exact same map. Leave blank for a different result every time."),
+]
 
 
 class TextRedirector:
@@ -45,128 +123,226 @@ class TextRedirector:
         pass
 
 
+def _configure_style(root: tk.Tk) -> None:
+    root.configure(bg=BG)
+    style = ttk.Style(root)
+    # 'clam' is the only stock theme that actually honors custom colors on
+    # every widget below — the default themes ignore most background/
+    # foreground overrides on Windows and macOS.
+    style.theme_use("clam")
+
+    style.configure(".", background=BG, foreground=FG, font=FONT_HINT)
+    style.configure("TFrame", background=BG)
+    style.configure("Panel.TFrame", background=BG_PANEL)
+    style.configure("TLabel", background=BG, foreground=FG, font=FONT_HINT)
+    style.configure("Panel.TLabel", background=BG_PANEL, foreground=FG)
+    style.configure("Heading.TLabel", background=BG_PANEL, foreground=FG, font=FONT_LABEL)
+    style.configure("Hint.TLabel", background=BG_PANEL, foreground=FG_MUTED,
+                     font=FONT_HINT, wraplength=460, justify="left")
+    style.configure("Value.TLabel", background=BG_PANEL, foreground=ACCENT, font=FONT_LABEL)
+
+    style.configure("TLabelframe", background=BG_PANEL, bordercolor=BORDER,
+                     relief="solid", borderwidth=1)
+    style.configure("TLabelframe.Label", background=BG_PANEL, foreground=ACCENT, font=FONT_LABEL)
+
+    style.configure("TEntry", fieldbackground=BG_ENTRY, foreground=FG,
+                     bordercolor=BORDER, insertcolor=FG, padding=6)
+    style.map("TEntry", fieldbackground=[("disabled", BG_PANEL)])
+
+    style.configure("TButton", background=ACCENT, foreground="#101218",
+                     font=FONT_LABEL, padding=8, borderwidth=0)
+    style.map("TButton", background=[("active", ACCENT_ACTIVE), ("disabled", BORDER)],
+              foreground=[("disabled", FG_MUTED)])
+
+    style.configure("Secondary.TButton", background=BG_ENTRY, foreground=FG,
+                     font=FONT_HINT, padding=6, borderwidth=1)
+    style.map("Secondary.TButton", background=[("active", BORDER)])
+
+    style.configure("TCheckbutton", background=BG_PANEL, foreground=FG, font=FONT_HINT)
+    style.map("TCheckbutton", background=[("active", BG_PANEL)])
+
+    style.configure("TScale", background=BG_PANEL, troughcolor=BG_ENTRY)
+    style.configure("TSeparator", background=BORDER)
+    style.configure("Vertical.TScrollbar", background=BG_ENTRY, troughcolor=BG,
+                     bordercolor=BG, arrowcolor=FG_MUTED)
+
+
 class App:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         root.title("Auto Beatmapper")
-        root.geometry("640x720")
+        root.geometry("700x820")
+        root.minsize(560, 500)
+        _configure_style(root)
 
         self.log_queue: "queue.Queue[str]" = queue.Queue()
         self.worker: threading.Thread | None = None
         self.result_error: Exception | None = None
         self.result_paths: list[str] = []
+        self.slider_vars: dict[str, tk.DoubleVar] = {}
+        self.entry_vars: dict[str, tk.StringVar] = {}
 
-        pad = {"padx": 8, "pady": 4}
-        frame = ttk.Frame(root)
-        frame.pack(fill="both", expand=True, padx=8, pady=8)
-        frame.columnconfigure(1, weight=1)
+        # --- Scrollable form area (the form is long — sections stack) ---
+        outer = ttk.Frame(root)
+        outer.pack(fill="both", expand=True)
+        canvas = tk.Canvas(outer, background=BG, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
 
-        row = 0
+        form = ttk.Frame(canvas)
+        form_id = canvas.create_window((0, 0), window=form, anchor="nw")
+        form.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(form_id, width=e.width))
 
-        # --- Song file ---
-        ttk.Label(frame, text="Song (MP3)").grid(row=row, column=0, sticky="w", **pad)
+        def on_mousewheel(event: tk.Event) -> None:
+            delta = -1 if event.num == 5 or event.delta < 0 else 1
+            canvas.yview_scroll(-delta, "units")
+
+        canvas.bind_all("<MouseWheel>", on_mousewheel)   # Windows / macOS
+        canvas.bind_all("<Button-4>", on_mousewheel)      # Linux scroll up
+        canvas.bind_all("<Button-5>", on_mousewheel)      # Linux scroll down
+
+        pad = {"padx": 14, "pady": 10}
+
+        # --- Song & output section ---
+        song_panel = self._panel(form, "Song")
+        ttk.Label(song_panel, text="Song file", style="Heading.TLabel").grid(
+            row=0, column=0, sticky="w", padx=14, pady=(12, 2))
+        ttk.Label(song_panel, text="The MP3 (or WAV/OGG) to build a beatmap from.",
+                  style="Hint.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", padx=14)
         self.audio_var = tk.StringVar()
-        ttk.Entry(frame, textvariable=self.audio_var).grid(row=row, column=1, sticky="ew", **pad)
-        ttk.Button(frame, text="Browse...", command=self._browse_audio).grid(row=row, column=2, **pad)
-        row += 1
+        row_frame = ttk.Frame(song_panel, style="Panel.TFrame")
+        row_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 10))
+        row_frame.columnconfigure(0, weight=1)
+        ttk.Entry(row_frame, textvariable=self.audio_var).grid(row=0, column=0, sticky="ew")
+        ttk.Button(row_frame, text="Browse...", style="Secondary.TButton",
+                   command=self._browse_audio).grid(row=0, column=1, padx=(8, 0))
 
-        # --- Output directory ---
-        ttk.Label(frame, text="Output folder").grid(row=row, column=0, sticky="w", **pad)
+        ttk.Label(song_panel, text="Output folder", style="Heading.TLabel").grid(
+            row=3, column=0, sticky="w", padx=14, pady=(2, 2))
+        ttk.Label(song_panel, text="Where the finished files are written. Every song lands in "
+                                    "the same flat folder.", style="Hint.TLabel").grid(
+            row=4, column=0, columnspan=2, sticky="w", padx=14)
         self.outdir_var = tk.StringVar(value="output")
-        ttk.Entry(frame, textvariable=self.outdir_var).grid(row=row, column=1, sticky="ew", **pad)
-        ttk.Button(frame, text="Browse...", command=self._browse_outdir).grid(row=row, column=2, **pad)
-        row += 1
+        row_frame2 = ttk.Frame(song_panel, style="Panel.TFrame")
+        row_frame2.grid(row=5, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 12))
+        row_frame2.columnconfigure(0, weight=1)
+        ttk.Entry(row_frame2, textvariable=self.outdir_var).grid(row=0, column=0, sticky="ew")
+        ttk.Button(row_frame2, text="Browse...", style="Secondary.TButton",
+                   command=self._browse_outdir).grid(row=0, column=1, padx=(8, 0))
+        song_panel.columnconfigure(0, weight=1)
 
-        # --- Metadata ---
+        # --- Metadata section ---
+        meta_panel = self._panel(form, "Song info")
         self.title_var = tk.StringVar()
         self.artist_var = tk.StringVar(value="Unknown Artist")
         self.creator_var = tk.StringVar(value="auto-beatmapper")
-        for label, var in (("Title (optional)", self.title_var),
-                            ("Artist", self.artist_var),
-                            ("Creator", self.creator_var)):
-            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", **pad)
-            ttk.Entry(frame, textvariable=var).grid(row=row, column=1, columnspan=2, sticky="ew", **pad)
-            row += 1
+        for i, (label, desc, var) in enumerate((
+            ("Title", "Song title. Leave blank to use the audio file's name.", self.title_var),
+            ("Artist", "Who performed the song.", self.artist_var),
+            ("Creator", "Your mapper name, credited in the beatmap.", self.creator_var),
+        )):
+            self._labeled_entry(meta_panel, i, label, desc, var)
+        meta_panel.columnconfigure(1, weight=1)
 
-        ttk.Separator(frame, orient="horizontal").grid(row=row, column=0, columnspan=3, sticky="ew", pady=8)
-        row += 1
+        # --- Style section ---
+        style_panel = self._panel(form, "Style")
+        for i, p in enumerate(SLIDER_PARAMS):
+            self._slider_row(style_panel, i, p)
+        style_panel.columnconfigure(0, weight=1)
 
-        # --- Style knobs (all optional -> forwarded only if the user changes them) ---
-        self.spacing_var = tk.StringVar()
-        self.curviness_var = tk.StringVar()
-        self.stack_probability_var = tk.StringVar()
-        self.angle_jitter_var = tk.StringVar()
-        self.temperature_var = tk.StringVar()
-        for label, var, hint in (
-            ("--spacing", self.spacing_var, "jump distance multiplier (default 1.3)"),
-            ("--curviness", self.curviness_var, "0-1 slider curviness (default 0.5)"),
-            ("--stack-probability", self.stack_probability_var, "0-1 stack vs. line mix (default 0.5)"),
-            ("--angle-jitter", self.angle_jitter_var, "degrees (default from --temperature)"),
-            ("--temperature", self.temperature_var, "0-1 creative vs. structured (default 0.5)"),
-        ):
-            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", **pad)
-            ttk.Entry(frame, textvariable=var, width=10).grid(row=row, column=1, sticky="w", **pad)
-            ttk.Label(frame, text=hint, foreground="#666").grid(row=row, column=2, sticky="w", **pad)
-            row += 1
+        # --- Advanced / overrides section ---
+        adv_panel = self._panel(form, "Advanced overrides")
+        for i, p in enumerate(ENTRY_PARAMS):
+            var = tk.StringVar()
+            self.entry_vars[p.flag] = var
+            self._labeled_entry(adv_panel, i, p.label, p.description, var)
+        adv_panel.columnconfigure(1, weight=1)
 
-        ttk.Separator(frame, orient="horizontal").grid(row=row, column=0, columnspan=3, sticky="ew", pady=8)
-        row += 1
-
-        # --- BPM / offset overrides ---
-        self.bpm_var = tk.StringVar()
-        self.offset_var = tk.StringVar()
-        ttk.Label(frame, text="--bpm (optional)").grid(row=row, column=0, sticky="w", **pad)
-        ttk.Entry(frame, textvariable=self.bpm_var, width=10).grid(row=row, column=1, sticky="w", **pad)
-        ttk.Label(frame, text="manual BPM instead of auto-detect", foreground="#666").grid(row=row, column=2, sticky="w", **pad)
-        row += 1
-        ttk.Label(frame, text="--offset ms (optional)").grid(row=row, column=0, sticky="w", **pad)
-        ttk.Entry(frame, textvariable=self.offset_var, width=10).grid(row=row, column=1, sticky="w", **pad)
-        ttk.Label(frame, text="manual offset instead of auto-detect", foreground="#666").grid(row=row, column=2, sticky="w", **pad)
-        row += 1
-
-        self.seed_var = tk.StringVar()
-        ttk.Label(frame, text="--seed (optional)").grid(row=row, column=0, sticky="w", **pad)
-        ttk.Entry(frame, textvariable=self.seed_var, width=10).grid(row=row, column=1, sticky="w", **pad)
-        ttk.Label(frame, text="fixed seed to reproduce a run", foreground="#666").grid(row=row, column=2, sticky="w", **pad)
-        row += 1
-
-        ttk.Separator(frame, orient="horizontal").grid(row=row, column=0, columnspan=3, sticky="ew", pady=8)
-        row += 1
-
-        # --- Checkboxes ---
+        # --- Options section ---
+        opt_panel = self._panel(form, "Options")
         self.spread_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(frame, text="Generate full spread (Easy/Normal/Hard/Insane) — uncheck for Insane only",
-                        variable=self.spread_var).grid(row=row, column=0, columnspan=3, sticky="w", **pad)
-        row += 1
-
         self.osz_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(frame, text="Package as .osz (ready to import into osu!)",
-                        variable=self.osz_var).grid(row=row, column=0, columnspan=3, sticky="w", **pad)
-        row += 1
-
         self.keep_osu_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(frame, text="Keep loose .osu files after building the .osz",
-                        variable=self.keep_osu_var).grid(row=row, column=0, columnspan=3, sticky="w", **pad)
-        row += 1
-
         self.auto_open_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(frame, text="Open the finished map when done",
-                        variable=self.auto_open_var).grid(row=row, column=0, columnspan=3, sticky="w", **pad)
-        row += 1
+        checks = (
+            (self.spread_var, "Generate all four difficulties",
+             "Easy, Normal, Hard, and Insane. Uncheck to generate only the hardest (Insane)."),
+            (self.osz_var, "Package as .osz",
+             "Bundle the finished difficulties and the song into one file ready to drag "
+             "straight into osu!."),
+            (self.keep_osu_var, "Keep loose .osu files too",
+             "Only matters with Package as .osz checked — normally the loose files are "
+             "deleted once they're safely inside the .osz."),
+            (self.auto_open_var, "Open the finished map when done",
+             "Launch the .osz (or the Insane .osu, if not packaging) with whatever your "
+             "system uses to open that file type."),
+        )
+        for i, (var, label, desc) in enumerate(checks):
+            ttk.Checkbutton(opt_panel, text=label, variable=var).grid(
+                row=i * 2, column=0, sticky="w", padx=14, pady=(10 if i == 0 else 4, 0))
+            ttk.Label(opt_panel, text=desc, style="Hint.TLabel").grid(
+                row=i * 2 + 1, column=0, sticky="w", padx=32, pady=(0, 4 if i < len(checks) - 1 else 12))
+        opt_panel.columnconfigure(0, weight=1)
 
-        # --- Generate button ---
-        self.generate_button = ttk.Button(frame, text="Generate", command=self._on_generate)
-        self.generate_button.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
-        row += 1
+        # --- Generate button + log (outside the scroll area, always visible) ---
+        bottom = ttk.Frame(root)
+        bottom.pack(fill="both", padx=14, pady=(6, 14))
+        self.generate_button = ttk.Button(bottom, text="Generate", command=self._on_generate)
+        self.generate_button.pack(fill="x", pady=(0, 8))
 
-        # --- Log output ---
-        self.log_text = tk.Text(frame, height=16, state="disabled", wrap="word")
-        self.log_text.grid(row=row, column=0, columnspan=3, sticky="nsew", **pad)
-        frame.rowconfigure(row, weight=1)
+        log_frame = ttk.Frame(bottom, style="Panel.TFrame")
+        log_frame.pack(fill="both", expand=True)
+        self.log_text = tk.Text(log_frame, height=10, state="disabled", wrap="word",
+                                 background=BG_ENTRY, foreground=FG, insertbackground=FG,
+                                 font=FONT_MONO, relief="flat", padx=8, pady=8)
+        self.log_text.pack(fill="both", expand=True)
 
         self.root.after(100, self._drain_log_queue)
 
-    # --- UI helpers ---
+    # --- Layout helpers ---
+
+    def _panel(self, parent: tk.Widget, title: str) -> ttk.Labelframe:
+        panel = ttk.Labelframe(parent, text=title)
+        panel.pack(fill="x", expand=True, padx=14, pady=(0, 14))
+        return panel
+
+    def _labeled_entry(self, parent: tk.Widget, row: int, label: str, desc: str,
+                        var: tk.StringVar) -> None:
+        ttk.Label(parent, text=label, style="Heading.TLabel").grid(
+            row=row * 3, column=0, columnspan=2, sticky="w", padx=14, pady=(10 if row == 0 else 8, 2))
+        ttk.Label(parent, text=desc, style="Hint.TLabel").grid(
+            row=row * 3 + 1, column=0, columnspan=2, sticky="w", padx=14)
+        ttk.Entry(parent, textvariable=var).grid(
+            row=row * 3 + 2, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 4))
+
+    def _slider_row(self, parent: tk.Widget, row: int, p: SliderParam) -> None:
+        var = tk.DoubleVar(value=p.default)
+        self.slider_vars[p.flag] = var
+        base_row = row * 4
+        ttk.Label(parent, text=p.label, style="Heading.TLabel").grid(
+            row=base_row, column=0, sticky="w", padx=14, pady=(10 if row == 0 else 8, 2))
+        value_label = ttk.Label(parent, style="Value.TLabel", width=6, anchor="e")
+        value_label.grid(row=base_row, column=1, sticky="e", padx=14)
+
+        def on_change(_evt=None, var=var, value_label=value_label, p=p) -> None:
+            value_label.configure(text=f"{var.get():.2f}")
+
+        on_change()
+        ttk.Label(parent, text=p.description, style="Hint.TLabel").grid(
+            row=base_row + 1, column=0, columnspan=2, sticky="w", padx=14)
+        scale = ttk.Scale(parent, from_=p.lo, to=p.hi, orient="horizontal",
+                           variable=var, command=on_change)
+        scale.grid(row=base_row + 2, column=0, columnspan=2, sticky="ew", padx=14, pady=(6, 0))
+        range_frame = ttk.Frame(parent, style="Panel.TFrame")
+        range_frame.grid(row=base_row + 3, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 4))
+        range_frame.columnconfigure(1, weight=1)
+        ttk.Label(range_frame, text=f"min {p.lo:g}", style="Hint.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(range_frame, text=f"max {p.hi:g}", style="Hint.TLabel").grid(row=0, column=2, sticky="e")
+
+    # --- File pickers ---
 
     def _browse_audio(self) -> None:
         path = filedialog.askopenfilename(title="Choose a song",
@@ -178,6 +354,8 @@ class App:
         path = filedialog.askdirectory(title="Choose an output folder")
         if path:
             self.outdir_var.set(path)
+
+    # --- Log ---
 
     def _append_log(self, text: str) -> None:
         self.log_text.configure(state="normal")
@@ -211,20 +389,18 @@ class App:
         if self.title_var.get().strip():
             argv += ["--title", self.title_var.get().strip()]
 
-        for flag, var in (("--spacing", self.spacing_var), ("--curviness", self.curviness_var),
-                           ("--stack-probability", self.stack_probability_var),
-                           ("--angle-jitter", self.angle_jitter_var),
-                           ("--temperature", self.temperature_var),
-                           ("--bpm", self.bpm_var), ("--offset", self.offset_var),
-                           ("--seed", self.seed_var)):
-            value = var.get().strip()
+        for p in SLIDER_PARAMS:
+            argv += [p.flag, f"{self.slider_vars[p.flag].get():.3f}"]
+
+        for p in ENTRY_PARAMS:
+            value = self.entry_vars[p.flag].get().strip()
             if value:
                 try:
                     float(value)
                 except ValueError:
-                    messagebox.showerror("Invalid value", f"{flag} must be a number, got: {value!r}")
+                    messagebox.showerror("Invalid value", f"{p.label} must be a number, got: {value!r}")
                     return None
-                argv += [flag, value]
+                argv += [p.flag, value]
 
         if not self.spread_var.get():
             argv.append("--no-spread")

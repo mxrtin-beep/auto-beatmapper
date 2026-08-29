@@ -175,9 +175,14 @@ recurs — the same seed always reproduces the same wobble.
   close together or prone to crisscrossing.
 - `--temperature T` (default `0.5`, `0`-`1`) — how creative vs. structured
   the styling gets. Scales `--angle-jitter`, how much a section's
-  curviness can drift from the `--curviness` baseline, and how strongly
-  the path wanders around the playfield, all together — low is tight and
-  predictable, high is loose and varied. Passing one of those flags
+  curviness can drift from the `--curviness` baseline, how strongly the
+  path wanders around the playfield, and how many times `--spacing`
+  itself shifts over the course of the song, all together — low is tight
+  and predictable, high is loose and varied. At `0`, spacing never
+  changes at all (one constant multiplier the whole way through); higher
+  values allow up to 3 shifts, each large enough to actually notice
+  (roughly ±15-25%) without being jarring, and never more than a
+  handful of changes in one song regardless. Passing `--angle-jitter`
   explicitly overrides temperature's value for that one knob only.
 - `--angle-jitter DEGREES` (default: derived from `--temperature`, roughly
   `1`-`10`) — how much extra random wiggle gets added on top of each
@@ -188,16 +193,20 @@ recurs — the same seed always reproduces the same wobble.
 - `--stack-probability P` (default `0.5`) — the overall mix between stream
   runs that stack in one spot and runs that trace a straight line (`0` =
   always line, `1` = always stack). A run picks exactly one of the two for
-  its whole length (never a mix), and whichever one a given repeating
-  section picks stays consistent every time that section recurs. A run
-  spanning more than half a beat, or longer than 4 circles, is never a
-  stack (only ever a line) — matching the ranking criteria's Hard-
-  difficulty rule against fully overlapping objects more than half a beat
-  apart, and keeping a pile of circles from growing long enough to read as
-  an unreadable smear rather than a countable stack. The single gap
-  entering a stack or line run, and the single gap leaving one, is also
-  widened a bit past ordinary distance snap, so a run reads as a clearly
-  set-apart unit instead of bleeding into the normal flow on either side.
+  its whole length (never a mix, and a "line" run's direction is locked in
+  once and never bends), and whichever one a given repeating section picks
+  stays consistent every time that section recurs. Any run of quarter-beat
+  -or-closer notes longer than 3 is split into consecutive bursts of at
+  most 3 — each an independent run with its own mode and its own
+  entry/exit gap — rather than one long stack or one long line; `0` still
+  means "always line," but never one long line either. A run spanning more
+  than half a beat is never a stack (only ever a line), matching the
+  ranking criteria's Hard-difficulty rule against fully overlapping
+  objects more than half a beat apart. The single gap entering a run, and
+  the single gap leaving one (including between two consecutive bursts of
+  the same long stream), is also widened a bit past ordinary distance
+  snap, so a run reads as a clearly set-apart unit instead of bleeding
+  into the normal flow — or the next burst — on either side.
 - `--curviness C` (default `0.5`) — how curvy the map feels, `0`-`1`. `0`
   makes almost every slider a straight line; `1` makes almost every
   slider a pronounced curve, and makes the bow of every curved slider
