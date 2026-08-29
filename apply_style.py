@@ -293,52 +293,74 @@ def styled_spacing(gap_ms: float, beat_length_ms: float, slider_multiplier: floa
 def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: random.Random, seed: int,
                        offset_ms: float = 0.0, measure_length_ms: float = 0.0,
                        measure_buckets: dict[int, int] | None = None,
+                       stream_frequency: float = 0.5,
                        stack_probability: float = 0.5) -> dict[int, tuple[int, str]]:
-    """Decide a stack/line mode for every object that's part of a stream.
+    """Decide a mode — "stack", "line", or "flow" — for every object that's
+    part of a fast (quarter-beat-or-closer) run.
 
     A stream is a maximal run of consecutive circles (never sliders) each a
     quarter beat or less from the one before — add_variety.py caps these at
     8 circles, converting any longer run into a slider itself, so nothing
     here needs to re-enforce that length limit.
 
-    Returns {object index: (run_id, "stack" | "line")} for every object
-    that belongs to a run of 2 or more; objects not in the mapping use the
-    general motif-driven flow instead. The run_id matters because two
-    *different* runs can sit back to back with no gap between them (the
-    last object of one run and the first of the next, more than a quarter
-    beat apart but with nothing in between) — the caller needs it to know
-    a new run has started even when the mode happens to repeat, so it
-    re-anchors a fresh stack (or picks a fresh line direction) instead of
-    silently continuing the previous run's.
+    Returns {object index: (run_id, "stack" | "line" | "flow")} for every
+    object that belongs to a run of 2 or more; objects not in the mapping
+    (a run of 1, or not part of any close-together run at all) use the
+    general motif-driven flow directly, with no run/transition handling.
+    The run_id matters because two *different* runs — or bursts, see below
+    — can sit back to back with no gap between them: the caller needs it
+    to know a new one has started even when the mode happens to repeat, so
+    it re-anchors a fresh stack (or picks a fresh line direction) instead
+    of silently continuing the previous one's, and widens the connecting
+    gap between them either way.
 
-    A run picks exactly one mode for its *entire* length — never stack for
-    part of it and line for the rest. Mixing the two within what reads as
-    one run is genuinely confusing to a player (two circles piled on each
-    other followed by the same run suddenly fanning out into a line reads
-    as two different rhythms that happen to look the same at the seam),
-    and it's also what osu!'s own ranking criteria calls out: stacks are
-    fine, but switching stack behavior mid-pattern is the specific thing
-    to avoid.
+    A run longer than MAX_RUN_LEN objects is split into consecutive bursts
+    of at most MAX_RUN_LEN, each with its own mode decision and its own
+    entry/exit transition — a chain of, say, 8 eighth-notes doesn't read as
+    "click here 8 times in a pile/line," it reads as an arbitrary blob to
+    count or a line so long it either bends to stay on screen or runs off
+    it. Capped at MAX_RUN_LEN, the same 8 notes become up to 3 short,
+    clearly separated bursts instead — this applies to every mode, not
+    just stacks, and regardless of `stream_frequency` below.
 
-    A run is only *eligible* for "stack" if its whole span (first member to
-    last) is half a beat or less — piling more than that much elapsed time
-    onto one spot is a real, fully-overlapping stack the ranking criteria's
-    Hard difficulty rule forbids ("objects 1/2 of a beat apart or less must
-    not fully overlap" — days notwithstanding for shorter gaps). A run
-    longer than that is always "line" instead, in full, not partially.
+    Two independent knobs govern this, deliberately kept separate since
+    they answer two different questions:
 
-    Which of the two an eligible run picks is keyed to its measure's energy
-    bucket (the same signal apply_style's motifs use), not a fresh coin
-    flip every time: a bucket-seeded RNG makes the choice, so every run
-    that lands in "this kind of section" (a verse's second and third
-    repeat, say) reuses the *same* stack-vs-line choice every time it
+    `stream_frequency` (0-1) is the chance that an eligible burst becomes
+    a deliberate stream unit *at all* — stacked in one spot or spread
+    along a locked-in straight line — rather than "flow": its members just
+    follow the ordinary motif-driven placement any other note would, one
+    at a time, with no forced overlap or fixed direction. At 0, no burst
+    is ever forced into a stack or line at all; the notes are still there
+    (bursts are still split at MAX_RUN_LEN, and the surrounding transition
+    gap still applies), they just never get piled up or locked onto one
+    line. At 1, every eligible burst becomes a stream.
+
+    `stack_probability` (0-1) only matters for whichever bursts
+    `stream_frequency` already decided *are* a stream: of those, how many
+    pile into one stacked spot versus spread along a line (0 = always
+    line, 1 = always stack, whenever the burst is short enough to stack at
+    all — see below). It has no say over whether a burst streams in the
+    first place; that's `stream_frequency`'s job alone.
+
+    Every roll (frequency, then stack-vs-line) is keyed to the burst's
+    measure energy bucket (the same signal apply_style's motifs use), not
+    a fresh coin flip every time: a bucket-seeded RNG makes the choice, so
+    every burst that lands in "this kind of section" (a verse's second and
+    third repeat, say) reuses the exact same choices every time it
     recurs, instead of re-rolling and looking different on each repeat.
-    `stack_probability` still controls the overall mix (both are still
-    good, per the design brief).
+
+    A burst is only *eligible* for "stack" if its whole span (first member
+    to last) is half a beat or less — piling more than that much elapsed
+    time onto one spot is a real overlap the ranking criteria's Hard rule
+    forbids ("objects 1/2 of a beat apart or less must not fully overlap").
+    A burst failing that check is "line" instead whenever it does stream,
+    never "stack", in full — never partially.
     """
     quarter_beat_ms = beat_length_ms / 4.0
     half_beat_ms = beat_length_ms / 2.0
     threshold = quarter_beat_ms + 1.0
+    MAX_RUN_LEN = 3  # a run/burst longer than this reads as a smear or an overlong line, not a countable unit
 
     mode_of: dict[int, tuple[int, str]] = {}
     i = 0
@@ -354,22 +376,38 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
             j += 1
         run_len = j - i
         if run_len >= 2:
-            run_start_time = objects[i].time
-            run_span_ms = objects[j - 1].time - run_start_time
-            stack_eligible = run_span_ms <= half_beat_ms
-            if stack_eligible:
-                if measure_buckets and measure_length_ms:
-                    measure_index = int((run_start_time - offset_ms) // measure_length_ms)
-                    bucket = measure_buckets.get(measure_index, 0)
-                    bucket_rng = random.Random(f"stream_mode:{bucket}:{seed}")
-                    base_mode = "stack" if bucket_rng.random() < stack_probability else "line"
-                else:
-                    base_mode = "stack" if rng.random() < stack_probability else "line"
-            else:
-                base_mode = "line"
-            for k in range(i, j):
-                mode_of[k] = (run_id, base_mode)
-            run_id += 1
+            # Split into bursts of at most MAX_RUN_LEN, each its own run.
+            burst_start = i
+            burst_index = 0
+            while burst_start < j:
+                burst_end = min(burst_start + MAX_RUN_LEN, j)
+                burst_len = burst_end - burst_start
+                if burst_len >= 2:
+                    burst_start_time = objects[burst_start].time
+                    burst_span_ms = objects[burst_end - 1].time - burst_start_time
+                    stack_eligible = burst_span_ms <= half_beat_ms
+
+                    if measure_buckets and measure_length_ms:
+                        measure_index = int((burst_start_time - offset_ms) // measure_length_ms)
+                        bucket = measure_buckets.get(measure_index, 0)
+                        freq_rng = random.Random(f"stream_freq:{bucket}:{burst_index}:{seed}")
+                        is_stream = freq_rng.random() < stream_frequency
+                        mix_rng = random.Random(f"stream_mode:{bucket}:{burst_index}:{seed}")
+                        wants_stack = mix_rng.random() < stack_probability
+                    else:
+                        is_stream = rng.random() < stream_frequency
+                        wants_stack = rng.random() < stack_probability
+
+                    if is_stream:
+                        base_mode = "stack" if (stack_eligible and wants_stack) else "line"
+                    else:
+                        base_mode = "flow"
+
+                    for k in range(burst_start, burst_end):
+                        mode_of[k] = (run_id, base_mode)
+                    run_id += 1
+                burst_start = burst_end
+                burst_index += 1
         i = j
     return mode_of
 
@@ -396,11 +434,20 @@ def main() -> None:
                               "angles/flow, never timing, note count, or object type — a way to "
                               "get more (or less) variety in the flow without being restrictive. "
                               "Defaults to a value derived from --temperature (roughly 1-10).")
+    parser.add_argument("--stream-frequency", type=float, default=0.5,
+                         help="How often a fast (quarter-beat-or-closer) run of notes becomes a "
+                              "deliberate stream unit (stacked in one spot, or spread along one "
+                              "locked-in line) versus just following ordinary flow like any other "
+                              "note (0 = never a stream, 1 = always one). A run longer than 3 is "
+                              "always split into separate bursts of at most 3 regardless of this "
+                              "setting. Which one a given repeating section picks stays consistent "
+                              "across its repeats either way.")
     parser.add_argument("--stack-probability", type=float, default=0.5,
-                         help="Overall mix between stream runs that stack in one spot and runs "
-                              "that trace a straight line (0 = always line, 1 = always stack). "
-                              "Which one a given repeating section picks stays consistent across "
-                              "its repeats either way.")
+                         help="Of whichever bursts --stream-frequency already decided ARE a "
+                              "stream: the mix between piling into one stacked spot and spreading "
+                              "along a line (0 = always line, 1 = always stack, whenever the burst "
+                              "is short enough to stack at all). Has no effect on whether a burst "
+                              "streams in the first place — that's --stream-frequency's job.")
     parser.add_argument("--curviness", type=float, default=0.5,
                          help="How curvy the map feels, 0-1. 0 makes almost every slider a "
                               "straight line; 1 makes almost every slider a pronounced curve "
@@ -449,7 +496,36 @@ def main() -> None:
     measure_buckets = compute_measure_energy_buckets(energy_at, offset_ms, measure_length_ms, objects[-1].time)
     stream_mode = build_stream_runs(objects, beat_length_ms, rng, args.seed, offset_ms=offset_ms,
                                      measure_length_ms=measure_length_ms, measure_buckets=measure_buckets,
+                                     stream_frequency=args.stream_frequency,
                                      stack_probability=args.stack_probability)
+
+    # --spacing itself shifts a little, a handful of times over the course
+    # of the song, instead of staying exactly one multiplier the whole way
+    # through — a song genuinely has a few different sections (verse,
+    # chorus, bridge...), and a spacing change is one more way a section
+    # reads as its own thing. `--temperature` controls how many times it
+    # changes (0 -> never, this tier's whole point; 1 -> up to
+    # MAX_SPACING_SECTION_CHANGES times) — never "every object", and never
+    # more than a few times in one song either way. Each change alternates
+    # the sign of the shift (rather than an independent random draw per
+    # section, which could by chance land two neighboring sections within
+    # a percent of each other — a change too small to actually notice) and
+    # keeps the *magnitude* in a band that reads as a deliberate shift
+    # without being jarring enough to break the flow a player just learned.
+    MAX_SPACING_SECTION_CHANGES = 3
+    num_spacing_changes = round(args.temperature * MAX_SPACING_SECTION_CHANGES)
+    num_spacing_sections = num_spacing_changes + 1
+    section_rng = random.Random(f"spacing_section:{args.seed}")
+    spacing_section_scales = [1.0]
+    for section_i in range(1, num_spacing_sections):
+        sign = 1 if section_i % 2 == 1 else -1
+        spacing_section_scales.append(1.0 + sign * section_rng.uniform(0.15, 0.25))
+    spacing_section_span_ms = max(1.0, (objects[-1].time - objects[0].time) / num_spacing_sections)
+
+    def spacing_scale_for(time_ms: float) -> float:
+        section_index = int((time_ms - objects[0].time) // spacing_section_span_ms)
+        section_index = max(0, min(num_spacing_sections - 1, section_index))
+        return spacing_section_scales[section_index]
 
     # Each measure bucket gets its own curviness level, offset from
     # --curviness by a bucket-seeded amount — the same "keyed to the
@@ -458,22 +534,32 @@ def main() -> None:
     # stays consistently curvy, a verse that stays consistently straight
     # and bendy) rather than every slider independently coin-flipping its
     # own shape regardless of what the rest of its section looks like.
+    # The variance itself tapers to zero as --curviness nears either
+    # extreme (full strength only at 0.5) — otherwise a bucket could drift
+    # *away* from an explicit 0 or 1, e.g. landing at curviness 0.15 on a
+    # bucket even though the user asked for dead straight (0), producing
+    # exactly the "still curvy at 0" complaint this taper fixes.
     bucket_curviness: dict[int, float] = {}
+    variance_taper = min(args.curviness, 1.0 - args.curviness) / 0.5  # 0 at the extremes, 1 at 0.5
     for bucket in range(NUM_ENERGY_BUCKETS):
         bucket_rng = random.Random(f"curviness:{bucket}:{args.seed}")
         bucket_curviness[bucket] = max(0.0, min(1.0, args.curviness
-                                                 + bucket_rng.uniform(-curviness_variance, curviness_variance)))
+                                                 + bucket_rng.uniform(-curviness_variance, curviness_variance)
+                                                 * variance_taper))
 
     def shape_mix_for(time_ms: float) -> tuple[float, float, float, float]:
         """(curviness, straight_prob, bezier_prob, bow_scale) for the slider
-        at time_ms, from its measure's own curviness level. 0.5 reproduces
-        the original fixed 35% straight / 30% gentle-Bezier / 35%
-        pronounced-arc split; higher shifts the mix toward curved shapes
-        and makes bows bigger."""
+        at time_ms, from its measure's own curviness level. `curviness`
+        maps linearly onto how often a slider is straight at all (0 ->
+        always straight, 1 -> never straight), so the two ends of the
+        slider are honored exactly, not just "mostly"; whatever's left over
+        is split between a gentle Bezier arc and a pronounced circular one
+        the same way as before (0.5 reproduces the original ~35% straight
+        / 30% gentle-Bezier / 35% pronounced-arc split)."""
         measure_index = int((time_ms - offset_ms) // measure_length_ms)
         bucket = measure_buckets.get(measure_index, 0)
         curviness = bucket_curviness.get(bucket, args.curviness)
-        straight = max(0.0, 0.7 * (1.0 - curviness))
+        straight = 1.0 - curviness
         bezier = straight + (1.0 - straight) * 0.46
         return curviness, straight, bezier, 0.5 + curviness
 
@@ -497,6 +583,20 @@ def main() -> None:
     wander_target = (wander_rng.uniform(MARGIN, PLAYFIELD_W - MARGIN),
                       wander_rng.uniform(MARGIN, PLAYFIELD_H - MARGIN))
 
+    # A stack/line run (or burst — build_stream_runs splits anything longer
+    # than MAX_RUN_LEN into several) reads as one deliberate unit only if
+    # it's visually set apart from whatever comes right before and after it
+    # — otherwise a pile of circles bleeds into the normal flow, or into the
+    # next burst, and the run boundary disappears. STREAM_TRANSITION_BOOST
+    # widens just the one connecting gap on both sides of a run (never a gap
+    # inside it, and never anything more than one gap away) on top of
+    # ordinary distance snap — including the gap between two consecutive
+    # bursts of the same long stream, not just where a stream meets normal
+    # flow. was_in_stream tracks whether the *previous* object belonged to
+    # a run at all, so the boost applies leaving one too, not just entering.
+    STREAM_TRANSITION_BOOST = 1.4
+    was_in_stream = False
+
     def wander_nudge(angle: float, x: float, y: float) -> float:
         bias = math.atan2(wander_target[1] - y, wander_target[0] - x)
         diff = (bias - angle + math.pi) % (2 * math.pi) - math.pi
@@ -515,6 +615,7 @@ def main() -> None:
         tier = classify_tier(energy_at(obj.time), q_low, q_high)
         entry = stream_mode.get(idx)
         run_id, mode = entry if entry is not None else (None, None)
+        entering_new_run = run_id is not None and run_id != current_run_id
         if run_id != current_run_id:
             # A new run has started — even a same-mode run immediately
             # following another (the two are more than a quarter beat
@@ -525,16 +626,22 @@ def main() -> None:
             stack_anchor = None
             current_run_id = run_id
 
+        entering_stream = entering_new_run
+        leaving_stream = mode is None and was_in_stream
+        boost = STREAM_TRANSITION_BOOST if (entering_stream or leaving_stream) else 1.0
+
         if mode == "stack":
             if stack_anchor is None:
                 # First member of this stack run: it still moves normally
-                # to establish where the stack sits — freezing it at
-                # whatever position preceded the run (rather than a
-                # deliberately chosen new spot) would make the stack's
-                # location arbitrary, and could even coincide with an
-                # unrelated object several beats away that just happened
-                # to precede it.
-                spacing = max(MIN_SPACING, min(MAX_SPACING, styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing, rng)))
+                # (plus the transition boost, since this gap is what sets
+                # the stack apart from whatever came before it) to
+                # establish where the stack sits — freezing it at whatever
+                # position preceded the run (rather than a deliberately
+                # chosen new spot) would make the stack's location
+                # arbitrary, and could even coincide with an unrelated
+                # object several beats away that just happened to precede
+                # it.
+                spacing = max(MIN_SPACING, min(MAX_SPACING, boost * styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing * spacing_scale_for(obj.time), rng)))
                 cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
                 cur_angle = wander_nudge(cur_angle, cur_x, cur_y)
                 new_x, new_y, cur_angle = place_at_distance(cur_x, cur_y, spacing, cur_angle)
@@ -551,17 +658,44 @@ def main() -> None:
                 line_run_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
                                              measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
                 line_run_angle = wander_nudge(line_run_angle, cur_x, cur_y)
-            spacing = max(MIN_SPACING, min(MAX_SPACING, styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing, rng)))
-            new_x, new_y, line_run_angle = place_at_distance(cur_x, cur_y, spacing, line_run_angle)
+            spacing = max(MIN_SPACING, min(MAX_SPACING, boost * styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing * spacing_scale_for(obj.time), rng)))
+            # A run's direction is locked in once, above — but if it
+            # happens to point straight at a wall, letting place_at_distance
+            # "bounce" it back on every single step (as every other call
+            # site does) doesn't read as one straight line at all: since
+            # cur_x/cur_y barely moves once pinned against the edge, the
+            # very same bounce fires again next step, and the run oscillates
+            # between two points for the rest of its length — a run visibly
+            # doubling back over its own earlier members and anything else
+            # nearby. So a genuine wall conflict re-aims the run *once*,
+            # via a proper mirror reflection off whichever wall(s) it hit
+            # (not a jump to face the playfield's dead center, which can
+            # point back roughly the way the run *came from* and send it
+            # straight over its own earlier members again) — a reflection
+            # keeps whatever momentum the run had along the wall, the same
+            # way a ball bouncing off a surface keeps moving past it rather
+            # than doubling back the way it arrived. A run that doesn't hit
+            # a wall never re-aims at all.
+            raw_x = cur_x + spacing * math.cos(line_run_angle)
+            raw_y = cur_y + spacing * math.sin(line_run_angle)
+            if raw_x < MARGIN or raw_x > PLAYFIELD_W - MARGIN:
+                line_run_angle = math.pi - line_run_angle
+            if raw_y < MARGIN or raw_y > PLAYFIELD_H - MARGIN:
+                line_run_angle = -line_run_angle
+            new_x, new_y, _ = place_at_distance(cur_x, cur_y, spacing, line_run_angle)
             cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
             cur_angle = line_run_angle
         else:
-            # Outside a stream: normal distance-snap + motif-driven flow.
-            spacing = max(MIN_SPACING, min(MAX_SPACING, styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing, rng)))
+            # Outside a stream: normal distance-snap + motif-driven flow
+            # (plus the transition boost on the one gap right after a
+            # stream ends, for the same readability reason as entering one).
+            spacing = max(MIN_SPACING, min(MAX_SPACING, boost * styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing * spacing_scale_for(obj.time), rng)))
             cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
             cur_angle = wander_nudge(cur_angle, cur_x, cur_y)
             new_x, new_y, cur_angle = place_at_distance(cur_x, cur_y, spacing, cur_angle)
             cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
+
+        was_in_stream = mode is not None
 
         obj.x, obj.y = cur_x, cur_y
 
