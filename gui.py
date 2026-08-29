@@ -32,6 +32,7 @@ import beatmap_report
 import beatmap_stats
 import generate_base_beatmap_v2
 import main as pipeline_main
+from build_osz import build_osz
 
 # --- Color palette (a dark theme instead of Tk's stock gray) ---
 BG = "#1c1e26"
@@ -557,8 +558,8 @@ class App:
                             return argv[i + 1]
                     return None
 
-                v2_argv = [argv[0], "--output", os.path.join(outdir, f"{title} (Base v2).osu"),
-                           "--title", title,
+                v2_osu_path = os.path.join(outdir, f"{title} (Base v2).osu")
+                v2_argv = [argv[0], "--output", v2_osu_path, "--title", title,
                            "--artist", arg_value("--artist") or "Unknown Artist",
                            "--creator", arg_value("--creator") or "auto-beatmapper"]
                 for flag in ("--bpm", "--offset"):
@@ -572,6 +573,21 @@ class App:
                         generate_base_beatmap_v2.main()
                     finally:
                         sys.argv = old_v2_argv
+
+                    # Packaged into its own .osz (never merged into the
+                    # main pipeline's .osz — it's a different, independent
+                    # beatmap, not one of the four difficulties) so it
+                    # actually shows up as an importable map in osu!,
+                    # matching whatever the "Package as .osz" checkbox
+                    # already does for the main output. A loose .osu on
+                    # its own doesn't import by double-click/drag the way
+                    # a .osz does.
+                    if self.osz_var.get():
+                        v2_osz_path = os.path.join(outdir, f"{title} (Base v2).osz")
+                        build_osz([v2_osu_path], argv[0], v2_osz_path)
+                        self.log_queue.put(f"Packaged {v2_osz_path}\n")
+                        if not self.keep_osu_var.get():
+                            os.remove(v2_osu_path)
                 except Exception as e:  # noqa: BLE001 - Base Map v2 is a bonus, never fail generation over it
                     self.log_queue.put(f"\n(couldn't generate Base Map v2: {e})\n")
 
