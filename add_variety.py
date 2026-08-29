@@ -165,6 +165,17 @@ def hitsound_for(energy_value: float, is_downbeat: bool, q_high: float, q_climax
     return HS_NORMAL
 
 
+def chain_len_weights(bias: float) -> tuple[float, float, float]:
+    """Weights for chain lengths (2, 3, 4 nodes), interpolated so bias=0.5
+    reproduces the original fixed (50, 30, 20) split exactly (keeping the
+    default behavior identical), tilting toward (2) below that and (4)
+    above it. Shared with add_sliders_v2.py, which uses the exact same
+    length-bias idea for the Base Map v2 pathway's own slider merging."""
+    SHORT, MID, LONG = (70.0, 22.0, 8.0), (50.0, 30.0, 20.0), (15.0, 30.0, 55.0)
+    a, b, t = (SHORT, MID, bias / 0.5) if bias <= 0.5 else (MID, LONG, (bias - 0.5) / 0.5)
+    return tuple(a[i] + (b[i] - a[i]) * t for i in range(3))
+
+
 def cap_stream_length(objects: list[HitObject], beat_length_ms: float, slider_multiplier: float,
                        quarter_beat_ms: float, max_len: int = 8) -> list[HitObject]:
     """Guarantee no run of quarter/eighth-beat circles (a "stream") is longer than max_len.
@@ -385,16 +396,6 @@ def main() -> None:
     # definition), 8 at frequency 1 (matches the pre-existing hard cap).
     stream_max_len = round(3 + args.stream_frequency * 5)
     args.slider_length_bias = max(0.0, min(1.0, args.slider_length_bias))
-
-    def chain_len_weights(bias: float) -> tuple[float, float, float]:
-        """Weights for chain lengths (2, 3, 4 nodes), interpolated so bias=0.5
-        reproduces the original fixed (50, 30, 20) split exactly (keeping the
-        default behavior identical), tilting toward (2) below that and (4)
-        above it."""
-        SHORT, MID, LONG = (70.0, 22.0, 8.0), (50.0, 30.0, 20.0), (15.0, 30.0, 55.0)
-        a, b, t = (SHORT, MID, bias / 0.5) if bias <= 0.5 else (MID, LONG, (bias - 0.5) / 0.5)
-        return tuple(a[i] + (b[i] - a[i]) * t for i in range(3))
-
     chain_weights = chain_len_weights(args.slider_length_bias)
 
     if args.seed is None:

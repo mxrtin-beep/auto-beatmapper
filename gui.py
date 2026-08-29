@@ -30,7 +30,6 @@ from tkinter import filedialog, messagebox, ttk
 
 import beatmap_report
 import beatmap_stats
-import generate_base_beatmap_v2
 import main as pipeline_main
 
 # --- Color palette (a dark theme instead of Tk's stock gray) ---
@@ -332,15 +331,12 @@ class App:
         self.auto_open_var = tk.BooleanVar(value=True)
         self.report_var = tk.BooleanVar(value=False)
         self.keep_intermediate_var = tk.BooleanVar(value=False)
-        self.base_v2_var = tk.BooleanVar(value=False)
         options = (
             (self.osz_var, "Package as .osz (ready to import into osu!)"),
             (self.keep_osu_var, "Keep loose .osu files too"),
             (self.auto_open_var, "Open the finished map when done"),
             (self.report_var, "Generate a statistics report (PDF, plotted against Backstabber)"),
             (self.keep_intermediate_var, "Keep intermediate beatmaps (Base and Variety stages)"),
-            (self.base_v2_var, "Also generate Base Map v2 (experimental — a separate, independent "
-                                "beatmap; not used by or mixed into the difficulty spread above)"),
         )
         for i, (var, label) in enumerate(options):
             ttk.Checkbutton(opt_panel, text=label, variable=var).grid(
@@ -542,57 +538,6 @@ class App:
 
             pipeline_main.main()
 
-            if self.base_v2_var.get():
-                # Base Map v2 is a completely separate, standalone
-                # generator (see generate_base_beatmap_v2.py) — it doesn't
-                # feed into add_variety.py/apply_style.py or any of the
-                # four difficulties above, it just writes its own file
-                # alongside them for comparison. Reuses whatever audio/
-                # title/artist/creator/BPM/offset the main run already
-                # used (pulled back out of `argv` rather than rebuilt from
-                # the form, so it's guaranteed to match this exact run).
-                def arg_value(flag: str) -> str | None:
-                    for i, a in enumerate(argv):
-                        if a == flag:
-                            return argv[i + 1]
-                    return None
-
-                v2_osu_path = os.path.join(outdir, f"{title} (Base v2).osu")
-                v2_argv = [argv[0], "--output", v2_osu_path, "--title", title,
-                           "--artist", arg_value("--artist") or "Unknown Artist",
-                           "--creator", arg_value("--creator") or "auto-beatmapper"]
-                for flag in ("--bpm", "--offset"):
-                    value = arg_value(flag)
-                    if value is not None:
-                        v2_argv += [flag, value]
-                try:
-                    old_v2_argv = sys.argv
-                    sys.argv = ["generate_base_beatmap_v2.py"] + v2_argv
-                    try:
-                        generate_base_beatmap_v2.main()
-                    finally:
-                        sys.argv = old_v2_argv
-
-                    # Bundled into the *same* .osz the main pipeline just
-                    # built, as one more entry — not merged into any of the
-                    # four difficulties (it's still a completely separate,
-                    # independent beatmap), but a loose .osu on its own
-                    # doesn't import into osu! by double-click/drag the way
-                    # a .osz does, and a second, standalone .osz per song is
-                    # more clutter than it's worth when the main one is
-                    # right there. It keeps its own Version name ("Auto
-                    # Base v2"), so it shows up as one more selectable
-                    # difficulty in-game, clearly distinct from Easy/
-                    # Normal/Hard/Insane.
-                    osz_path = os.path.join(outdir, f"{title}.osz")
-                    if self.osz_var.get() and os.path.isfile(osz_path):
-                        _add_files_to_osz(osz_path, [v2_osu_path])
-                        self.log_queue.put(f"Added Base Map v2 to {osz_path}\n")
-                        if not self.keep_osu_var.get():
-                            os.remove(v2_osu_path)
-                except Exception as e:  # noqa: BLE001 - Base Map v2 is a bonus, never fail generation over it
-                    self.log_queue.put(f"\n(couldn't generate Base Map v2: {e})\n")
-
             # Printing the same stats to the log is only useful when there's
             # no PDF report being generated for them — with the report
             # checked, the log dump is just noisy duplication of the file.
@@ -669,25 +614,6 @@ class App:
             return
         if self.auto_open_var.get() and self.result_paths:
             _open_path(self.result_paths[0])
-
-
-def _add_files_to_osz(osz_path: str, file_paths: list[str]) -> None:
-    """Rewrite the .osz with `file_paths` added as new entries (named by
-    their own basename), alongside whatever it already holds — the same
-    filter-and-recompress approach _remove_difficulties_from_osz uses, just
-    adding instead of removing. An entry that already exists under that
-    name is overwritten with the new file's contents rather than
-    duplicated."""
-    to_add = {os.path.basename(p): p for p in file_paths}
-    tmp_path = osz_path + ".tmp"
-    with zipfile.ZipFile(osz_path, "r") as zin, zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zout:
-        for item in zin.infolist():
-            if item.filename in to_add:
-                continue  # superseded by the new version written below
-            zout.writestr(item, zin.read(item.filename))
-        for arcname, path in to_add.items():
-            zout.write(path, arcname=arcname)
-    os.replace(tmp_path, osz_path)
 
 
 def _remove_difficulties_from_osz(osz_path: str, title: str, excluded_tiers: list[str]) -> None:
