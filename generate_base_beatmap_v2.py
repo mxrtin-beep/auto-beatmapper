@@ -15,6 +15,15 @@ sparser before add_variety.py or apply_style.py ever touch it:
   * Intense           -> one circle per quarter beat.
   * Climax            -> one circle per eighth beat.
 
+Classification happens once per *whole beat*, not per finer subdivision —
+every beat gets exactly one intensity tier from its own (smoothed) energy,
+and every circle placed in that beat follows that tier's rate for the
+beat's entire span. Deciding it any finer (e.g. per eighth-beat slot) let
+one beat's density flicker between subdivisions mid-beat, which read as
+haphazard rather than intentional — a circle starting on the weak 2nd or
+4th beat about as often as the strong 1st or 3rd, since a slot's own
+classification cared nothing about which beat it was actually part of.
+
 BPM/offset detection, PreviewTime, and the placeholder Lissajous-curve
 positions are unchanged from v1 (reused directly) — this is purely about
 *when* circles land, the same "timing only, no visual polish yet" scope
@@ -74,34 +83,39 @@ def classify_intensity(energy_value: float, q_silent: float, q_quiet: float,
 def build_intensity_grid(offset_seconds: float, bpm: float, duration_seconds: float,
                           energy_at, q_silent: float, q_quiet: float, q_intense: float, q_climax: float,
                           smoothing_beats: float = 2.0) -> list[float]:
-    """Return hit-object times (ms) on an eighth-beat grid, kept or dropped
-    per-slot according to that slot's own (smoothed) local energy tier.
+    """Return hit-object times (ms), one whole beat classified at a time —
+    every beat gets exactly one intensity tier, and every circle in that
+    beat follows that same tier's subdivision rate for the beat's entire
+    span. This is deliberately *not* decided finer than a beat: classifying
+    each eighth-beat slot on its own let one beat's density flicker between
+    subdivisions mid-beat as smoothed energy drifted past a threshold
+    partway through it, which reads as haphazard — circles starting on the
+    weak 2nd/4th beat as often as the strong 1st/3rd, no coherent "this
+    beat is busy" feel. One classification per beat instead means an
+    intense beat is intense *all the way through*, not just wherever its
+    own eighth-slots individually happened to clear the bar.
 
-    Every slot is evaluated on the same finest (eighth-beat) grid, but a
-    quieter tier only actually keeps the slots that also land on its own
-    coarser subdivision (e.g. "quiet" only keeps slots that land on a whole
-    beat) — the same "keep whichever slot lands on the real coarser beat,
-    not just every Nth array position" trick add_variety.py's own quiet-
-    section thinning uses, so a quiet section that starts on an off-beat
-    eighth slot doesn't end up consistently one subdivision late.
+    "Quiet" places one circle at the beat's own start; "silent" places
+    none; "normal"/"intense"/"climax" each place `TIER_SUBDIVISION[tier]`
+    circles evenly spanning the whole beat (2, 4, or 8 — half/quarter/
+    eighth-beat spacing).
     """
-    eighth_beat_seconds = (60.0 / bpm) / 8.0
-    n = int((duration_seconds - offset_seconds) / eighth_beat_seconds) + 1
-    slot_times_ms = [(offset_seconds + i * eighth_beat_seconds) * 1000.0 for i in range(n)]
+    beat_seconds = 60.0 / bpm
+    n = int((duration_seconds - offset_seconds) / beat_seconds) + 1
+    beat_times_ms = [(offset_seconds + i * beat_seconds) * 1000.0 for i in range(n)]
 
-    raw_energy = np.array([energy_at(t) for t in slot_times_ms])
-    smoothing_window = max(1, round(smoothing_beats * 8))  # beats -> eighth-beat slots
+    raw_energy = np.array([energy_at(t) for t in beat_times_ms])
+    smoothing_window = max(1, round(smoothing_beats))  # already one sample per beat
     smoothed = smooth_slot_energy(raw_energy, smoothing_window)
 
     kept_times: list[float] = []
-    for i, t_ms in enumerate(slot_times_ms):
+    for i, t_ms in enumerate(beat_times_ms):
         tier = classify_intensity(smoothed[i], q_silent, q_quiet, q_intense, q_climax)
         if tier == "silent":
             continue
         subdivision = TIER_SUBDIVISION[tier]
-        step = 8 // subdivision  # how many eighth-slots apart this tier's own grid is
-        if i % step == 0:
-            kept_times.append(t_ms)
+        step_ms = (beat_seconds * 1000.0) / subdivision
+        kept_times.extend(t_ms + k * step_ms for k in range(subdivision))
     return kept_times
 
 
@@ -148,16 +162,18 @@ def main() -> None:
                               "position within one beat, so e.g. -118 and 334 at 137 BPM name the "
                               "same beat and are interchangeable.")
     parser.add_argument("--silent-quantile", type=float, default=0.10,
-                         help="Energy quantile below which a slot gets no circle at all (default 0.10).")
+                         help="Energy quantile below which a beat gets no circle at all (default 0.10).")
     parser.add_argument("--quiet-quantile", type=float, default=0.35,
-                         help="Energy quantile below which a slot only keeps whole-beat circles "
+                         help="Energy quantile below which a beat only gets one whole-beat circle "
                               "(default 0.35, matching add_variety.py's own quiet threshold).")
-    parser.add_argument("--intense-quantile", type=float, default=0.75,
-                         help="Energy quantile above which a slot gets quarter-beat circles "
-                              "(default 0.75, matching add_variety.py's own intense threshold).")
-    parser.add_argument("--climax-quantile", type=float, default=0.92,
-                         help="Energy quantile above which a slot gets eighth-beat circles "
-                              "(default 0.92, matching add_variety.py's own climax threshold).")
+    parser.add_argument("--intense-quantile", type=float, default=0.90,
+                         help="Energy quantile above which a beat gets quarter-beat circles (default "
+                              "0.90 -- deliberately high, so half-beat spacing stays the clearly most "
+                              "common rate rather than quarter-beat crowding it out; only a song's "
+                              "genuinely loudest beats should ever step up to it).")
+    parser.add_argument("--climax-quantile", type=float, default=0.98,
+                         help="Energy quantile above which a beat gets eighth-beat circles (default "
+                              "0.98 -- rarer still than --intense-quantile, for the song's true peaks).")
     parser.add_argument("--smoothing-beats", type=float, default=2.0,
                          help="Smooth energy over this many beats before classifying intensity, so "
                               "tiers track the song's actual sections instead of flickering slot to "
@@ -189,17 +205,17 @@ def main() -> None:
     times_ms, energy = compute_energy_curve(args.audio)
     energy_at = make_energy_lookup(times_ms, energy)
 
-    # Quantiles are computed from the same eighth-beat-grid samples that get
-    # classified, not the raw high-resolution energy curve -- otherwise a
-    # short, extreme transient (a single hard hit) could skew a quantile in
-    # a way that doesn't reflect how the *beat-grid* energy is actually
-    # distributed, since most of the raw curve's samples fall between grid
-    # points and are never even evaluated for classification.
-    eighth_beat_seconds = (60.0 / bpm) / 8.0
-    n_slots = int((duration_seconds - offset_seconds) / eighth_beat_seconds) + 1
-    slot_energy = np.array([energy_at((offset_seconds + i * eighth_beat_seconds) * 1000.0)
-                             for i in range(n_slots)])
-    smoothing_window = max(1, round(args.smoothing_beats * 8))
+    # Quantiles are computed from the same one-sample-per-beat grid that
+    # actually gets classified (build_intensity_grid), not the raw high-
+    # resolution energy curve -- otherwise a short, extreme transient (a
+    # single hard hit) could skew a quantile in a way that doesn't reflect
+    # how the *beat-grid* energy is actually distributed, since most of the
+    # raw curve's samples fall between beats and are never even evaluated.
+    beat_seconds = 60.0 / bpm
+    n_beats = int((duration_seconds - offset_seconds) / beat_seconds) + 1
+    slot_energy = np.array([energy_at((offset_seconds + i * beat_seconds) * 1000.0)
+                             for i in range(n_beats)])
+    smoothing_window = max(1, round(args.smoothing_beats))
     smoothed = smooth_slot_energy(slot_energy, smoothing_window)
     q_silent = float(np.quantile(smoothed, args.silent_quantile))
     q_quiet = float(np.quantile(smoothed, args.quiet_quantile))

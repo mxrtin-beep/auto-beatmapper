@@ -78,11 +78,16 @@ def main() -> None:
                          help="Also keep the Base and Variety pipeline-stage .osu files (stages 1 and "
                               "2 — the plain beat skeleton, and that skeleton with sliders/density "
                               "variation added, both before apply_style.py's positioning) instead of "
-                              "deleting them once the difficulty spread is derived. Useful for "
-                              "inspecting or debugging what an earlier stage produced on its own. "
-                              "The Styled file is still always deleted — it's redundant with the "
-                              "Insane difficulty, which is identical to it bar Difficulty-setting "
-                              "clamping. Ignored with --restyle-only (stages 1-2 aren't run then).")
+                              "deleting them once the difficulty spread is derived. If --osz is also "
+                              "passed, both are bundled into the same .osz as the four difficulties "
+                              "(each keeps its own Version name, so they show up as two extra "
+                              "selectable difficulties in-game) rather than just left as loose, "
+                              "unimportable files; --keep-osu-files then governs whether they also "
+                              "survive on disk as loose files afterward, the same as it already does "
+                              "for the four difficulties. The Styled file is still always deleted — "
+                              "it's redundant with the Insane difficulty, identical to it bar "
+                              "Difficulty-setting clamping. Ignored with --restyle-only (stages 1-2 "
+                              "aren't run then).")
     parser.add_argument("--spacing", type=float, default=None,
                          help="Forwarded to apply_style.py's --spacing (jump/spacing distance "
                               "multiplier). Omit to use apply_style.py's own default.")
@@ -219,20 +224,30 @@ def main() -> None:
 
     tier_output_paths = derive_tiers()
 
-    # Base/Variety/Styled are internal working files, not one of the four
-    # finished difficulties. Styled is always cleaned up regardless — it's
-    # redundant with Insane, which is identical to it bar Difficulty-setting
-    # clamping. Base/Variety are kept only if --keep-intermediate-files was
-    # passed; this is a separate knob from --osz/--keep-osu-files, which
-    # only ever govern the four difficulty files themselves.
+    # Styled is always cleaned up — it's redundant with Insane, identical to
+    # it bar Difficulty-setting clamping, so there's nothing it adds even as
+    # an extra in-game difficulty. Base/Variety are a different story: with
+    # --keep-intermediate-files, they're genuinely worth having playable —
+    # each carries its own Version name ("Auto Base"/"Auto Variety"), so
+    # bundled into the same .osz as the four difficulties, they show up as
+    # two additional selectable difficulties in-game rather than being
+    # loose files nothing can import. Cleanup happens *after* packaging
+    # (unlike Styled, which never needs to be in the package) so there's
+    # still something on disk to package when --keep-intermediate-files
+    # was passed; --keep-osu-files (a separate knob, same as it is for the
+    # four difficulties) decides whether they also survive as loose files
+    # once packaging is done.
     _cleanup_osu_files([styled_path], keep=False)
-    _cleanup_osu_files([base_path, variety_path], keep=args.keep_intermediate_files)
+    extra_osz_files = [base_path, variety_path] if args.keep_intermediate_files else []
 
     if args.osz:
         osz_path = os.path.join(outdir, f"{title}.osz")
-        build_osz(tier_output_paths, args.audio, osz_path, audio_filename)
+        build_osz(tier_output_paths + extra_osz_files, args.audio, osz_path, audio_filename)
         print(f"=== Packaged {osz_path} ===")
         _cleanup_osu_files(tier_output_paths, args.keep_osu_files)
+        _cleanup_osu_files(extra_osz_files, args.keep_osu_files)
+    else:
+        _cleanup_osu_files(extra_osz_files, keep=True)  # nothing to package into -- always leave them as loose files
 
     print("Done.")
 

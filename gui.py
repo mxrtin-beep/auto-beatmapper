@@ -32,7 +32,6 @@ import beatmap_report
 import beatmap_stats
 import generate_base_beatmap_v2
 import main as pipeline_main
-from build_osz import build_osz
 
 # --- Color palette (a dark theme instead of Tk's stock gray) ---
 BG = "#1c1e26"
@@ -574,18 +573,21 @@ class App:
                     finally:
                         sys.argv = old_v2_argv
 
-                    # Packaged into its own .osz (never merged into the
-                    # main pipeline's .osz — it's a different, independent
-                    # beatmap, not one of the four difficulties) so it
-                    # actually shows up as an importable map in osu!,
-                    # matching whatever the "Package as .osz" checkbox
-                    # already does for the main output. A loose .osu on
-                    # its own doesn't import by double-click/drag the way
-                    # a .osz does.
-                    if self.osz_var.get():
-                        v2_osz_path = os.path.join(outdir, f"{title} (Base v2).osz")
-                        build_osz([v2_osu_path], argv[0], v2_osz_path)
-                        self.log_queue.put(f"Packaged {v2_osz_path}\n")
+                    # Bundled into the *same* .osz the main pipeline just
+                    # built, as one more entry — not merged into any of the
+                    # four difficulties (it's still a completely separate,
+                    # independent beatmap), but a loose .osu on its own
+                    # doesn't import into osu! by double-click/drag the way
+                    # a .osz does, and a second, standalone .osz per song is
+                    # more clutter than it's worth when the main one is
+                    # right there. It keeps its own Version name ("Auto
+                    # Base v2"), so it shows up as one more selectable
+                    # difficulty in-game, clearly distinct from Easy/
+                    # Normal/Hard/Insane.
+                    osz_path = os.path.join(outdir, f"{title}.osz")
+                    if self.osz_var.get() and os.path.isfile(osz_path):
+                        _add_files_to_osz(osz_path, [v2_osu_path])
+                        self.log_queue.put(f"Added Base Map v2 to {osz_path}\n")
                         if not self.keep_osu_var.get():
                             os.remove(v2_osu_path)
                 except Exception as e:  # noqa: BLE001 - Base Map v2 is a bonus, never fail generation over it
@@ -667,6 +669,25 @@ class App:
             return
         if self.auto_open_var.get() and self.result_paths:
             _open_path(self.result_paths[0])
+
+
+def _add_files_to_osz(osz_path: str, file_paths: list[str]) -> None:
+    """Rewrite the .osz with `file_paths` added as new entries (named by
+    their own basename), alongside whatever it already holds — the same
+    filter-and-recompress approach _remove_difficulties_from_osz uses, just
+    adding instead of removing. An entry that already exists under that
+    name is overwritten with the new file's contents rather than
+    duplicated."""
+    to_add = {os.path.basename(p): p for p in file_paths}
+    tmp_path = osz_path + ".tmp"
+    with zipfile.ZipFile(osz_path, "r") as zin, zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            if item.filename in to_add:
+                continue  # superseded by the new version written below
+            zout.writestr(item, zin.read(item.filename))
+        for arcname, path in to_add.items():
+            zout.write(path, arcname=arcname)
+    os.replace(tmp_path, osz_path)
 
 
 def _remove_difficulties_from_osz(osz_path: str, title: str, excluded_tiers: list[str]) -> None:
