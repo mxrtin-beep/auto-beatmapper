@@ -61,7 +61,7 @@ import random
 import librosa
 import numpy as np
 
-from beatmap_utils import HitObject, read_osu, write_osu
+from beatmap_utils import HitObject, read_osu, slider_length_for_gap, write_osu
 
 # Hitsound bit flags (osu! HitObject hitSound field / slider edgeHitsounds).
 HS_NORMAL = 0
@@ -171,27 +171,36 @@ def cap_stream_length(objects: list[HitObject], beat_length_ms: float, slider_mu
 
     A stream is a run of consecutive circles a quarter beat or less apart —
     a wider gap resets the count, since that's an ordinary paced circle,
-    not a rapid subdivision. The (max_len + 1)'th circle in a row is
-    replaced by a short slider instead, so a stream always resolves into a
-    slider rather than continuing indefinitely.
+    not a rapid subdivision. Once a run reaches max_len, the (max_len+1)'th
+    and (max_len+2)'th circles are *combined* into one two-node slider —
+    the same "merge circles into a slider" operation make_slider_chain
+    does — rather than turning only the first of the pair into a slider
+    that merely reaches the second one's timestamp while leaving that
+    second circle in place as its own object: that used to leave a circle
+    and a slider's tail both demanding input at the exact same instant,
+    which is illegal regardless of how precisely the timing lines up.
+    Combining both into one slider removes that second circle from the
+    output entirely, so there is nothing left at that timestamp to
+    conflict with the slider's end.
 
     This is a backstop, not the primary mechanism (that's the chunk-type
-    alternation in main()) — it should rarely fire, but when it does, the
-    replacement slider spans the *exact* gap to the next object (which is
-    itself already a clean subdivision, since both objects sit on the same
-    grid) rather than some fraction of it. Shrinking it by an arbitrary
-    fraction is exactly what previously caused two problems at once: an
-    unsnapped slider end (it no longer landed on a clean beat fraction) and
-    objects sometimes under 10ms apart (a small subdivision gap shrunk by
-    even 10% can leave less than 10ms of clearance).
+    alternation in main()) — it should rarely fire. If there's no next
+    object to combine with (the run runs off the end of the track), or the
+    next object is already a slider (which can't be folded into a simple
+    two-node chain without discarding its own shape), the run is left
+    over-length rather than forcing an unsafe merge — both are rare edge
+    cases and neither risks an overlap.
     """
     result: list[HitObject] = []
     consecutive = 0
+    i = 0
     n = len(objects)
-    for i, obj in enumerate(objects):
+    while i < n:
+        obj = objects[i]
         if obj.is_slider:
             result.append(obj)
             consecutive = 0
+            i += 1
             continue
 
         prev = result[-1] if result else None
@@ -199,27 +208,60 @@ def cap_stream_length(objects: list[HitObject], beat_length_ms: float, slider_mu
                            and (obj.time - prev.time) <= quarter_beat_ms + 1.0)
         consecutive = consecutive + 1 if is_stream_note else 1
 
-        if consecutive > max_len:
-            has_next = i + 1 < n
-            one_way_ms = (objects[i + 1].time - obj.time) if has_next else quarter_beat_ms
-            # Both this slider's start time and the next object's time get
-            # independently rounded to the nearest millisecond when written
-            # out, while `length` (and so the reconstructed duration) is
-            # derived from the exact, unrounded gap — after that independent
-            # rounding on both ends, the reconstructed end can land a
-            # fraction of a millisecond past the next object's now-rounded
-            # start. A 1ms margin easily absorbs that without being a
-            # perceptible or "unsnapped" amount.
-            one_way_ms = max(1.0, one_way_ms - 2.0)
-            px_per_beat = slider_multiplier * 100.0
-            length = px_per_beat * (one_way_ms / beat_length_ms)
-            result.append(HitObject(
-                x=obj.x, y=obj.y, time=obj.time, is_new_combo=obj.is_new_combo,
-                is_slider=True, curve_type="L", points=[(obj.x + 1, obj.y)], slides=1, length=length,
-            ))
+        has_next = i + 1 < n
+        can_merge = has_next and not objects[i + 1].is_slider
+        if consecutive > max_len and can_merge:
+            nxt = objects[i + 1]
+            result.append(make_slider_chain([obj, nxt], beat_length_ms, slider_multiplier))
             consecutive = 0
+            i += 2  # nxt is now the slider's endpoint, not a separate object
+            continue
+
+        result.append(obj)
+        i += 1
+    return result
+
+
+def carve_mid_breaks(objects: list[HitObject], energy_at, q_low: float, beat_length_ms: float,
+                      min_run_ms: float = 16000.0, lead_ms: float | None = None) -> list[HitObject]:
+    """Cut an actual break into the middle of any long, uninterrupted quiet
+    stretch, instead of clicking through minutes of near-nothing.
+
+    "Quiet" sections are already thinned to one object per beat, but that
+    still leaves the player clicking through an extended low-energy stretch
+    (a long intro, an ambient breakdown) with nothing much happening — it's
+    a better rest for the player, and more true to how the song actually
+    ebbs and flows, to drop the middle of a stretch like that entirely and
+    let the surrounding lead-in/lead-out (kept, `lead_ms` each) frame a real
+    break. build_break_periods() then declares the resulting gap official
+    automatically, since it's just an ordinary long silence to that pass.
+
+    Never touches anything shorter than `min_run_ms` — a normal-length
+    quiet passage (a verse's held notes, a brief comedown) is left exactly
+    as thinned; this only fires for stretches long enough that a real break
+    reads as more musical than more of the same thinned-out clicking.
+    """
+    if lead_ms is None:
+        lead_ms = beat_length_ms * 4.0  # one measure's lead-in/out
+    result: list[HitObject] = []
+    i = 0
+    n = len(objects)
+    while i < n:
+        if energy_at(objects[i].time) >= q_low:
+            result.append(objects[i])
+            i += 1
+            continue
+        j = i
+        while j < n and energy_at(objects[j].time) < q_low:
+            j += 1
+        run = objects[i:j]
+        run_duration = run[-1].time - run[0].time
+        if run_duration >= min_run_ms:
+            run_start, run_end = run[0].time, run[-1].time
+            result.extend(o for o in run if (o.time - run_start) <= lead_ms or (run_end - o.time) <= lead_ms)
         else:
-            result.append(obj)
+            result.extend(run)
+        i = j
     return result
 
 
@@ -255,9 +297,7 @@ def make_slider_chain(nodes: list[HitObject], beat_length_ms: float, slider_mult
     for exactly the time span from the first to the last node.
     """
     start, rest = nodes[0], nodes[1:]
-    duration_ms = nodes[-1].time - start.time
-    px_per_beat = slider_multiplier * 100.0
-    length = px_per_beat * (duration_ms / beat_length_ms)
+    length = slider_length_for_gap(start.time, nodes[-1].time, beat_length_ms, slider_multiplier)
     return HitObject(
         x=start.x, y=start.y, time=start.time, is_new_combo=start.is_new_combo,
         is_slider=True, curve_type="L", points=[(n.x, n.y) for n in rest], slides=1, length=length,
@@ -276,15 +316,17 @@ def make_bounce_slider(start: HitObject, end: HitObject, beat_length_ms: float, 
 
     `one_way_ms` must be an exact rhythmic subdivision (e.g. a quarter or
     eighth beat) — every repeat lands at start.time + k*one_way_ms, so
-    each one is exactly on the beat grid. Computing the leg length from an
-    arbitrary total duration instead (e.g. shortened by some fixed buffer
-    to avoid touching the next object) would throw every repeat off-grid
-    by that same fraction, which is exactly what triggers an editor's
-    "unsnapped repeat" warning — the fix is to keep the leg length clean
-    and drop a whole leg to make room for a gap instead (see call site).
+    each one is exactly on the beat grid. Rather than multiplying
+    `one_way_ms` straight into a pixel length (which would drift off-grid
+    by the same fraction-of-a-millisecond rounding described in
+    `slider_length_for_gap`), the total span is measured with that helper
+    against the *rounded* start/end times, so the slider's declared
+    duration reconstructs to exactly the intended whole-millisecond span —
+    matching whatever gap the caller already arranged to leave before the
+    next real object (see call site) with no risk of eating into it.
     """
-    px_per_beat = slider_multiplier * 100.0
-    length = px_per_beat * (one_way_ms / beat_length_ms)
+    length = slider_length_for_gap(start.time, start.time + num_bounces * one_way_ms,
+                                    beat_length_ms, slider_multiplier, slides=num_bounces)
     return HitObject(
         x=start.x, y=start.y, time=start.time, is_new_combo=start.is_new_combo,
         is_slider=True, curve_type="L", points=[(end.x, end.y)], slides=num_bounces, length=length,
@@ -314,6 +356,15 @@ def main() -> None:
                               "back-and-forth slider instead of a run of circles (0-1).")
     parser.add_argument("--rest-probability", type=float, default=0.03,
                          help="Chance any non-quiet beat is dropped entirely as a short rest (0-1).")
+    parser.add_argument("--stream-frequency", type=float, default=0.5,
+                         help="How often an intense chunk becomes an actual stream (individually-"
+                              "clicked circles on quarter/eighth-note subdivisions) versus a bounce "
+                              "slider or a rest (0-1, default 0.5). Also scales the hard cap on how "
+                              "many quarter/eighth-spaced circles may ever appear consecutively: 3 "
+                              "at 0 (a stream, by definition, needs 4+ — so 0 means a run of "
+                              "quarter/eighth-note circles is never long enough to read as a stream "
+                              "at all) up to 8 at 1. That cap is enforced globally, at the very end, "
+                              "regardless of the choices made per chunk here.")
     parser.add_argument("--category-smoothing-beats", type=float, default=2.0,
                          help="Smooth energy over this many beats before classifying quiet/normal/"
                               "intense, so categories track the song's actual sections instead of "
@@ -322,6 +373,10 @@ def main() -> None:
                          help="Random seed. Omit for a different map every run; pass a fixed "
                               "value (printed on every run) to reproduce the exact same map later.")
     args = parser.parse_args()
+    args.stream_frequency = max(0.0, min(1.0, args.stream_frequency))
+    # 3 at frequency 0 (never long enough to be a stream, per the 4-note
+    # definition), 8 at frequency 1 (matches the pre-existing hard cap).
+    stream_max_len = round(3 + args.stream_frequency * 5)
 
     if args.seed is None:
         args.seed = random.SystemRandom().randrange(2**32)
@@ -445,17 +500,24 @@ def main() -> None:
             lookahead_end = min(pos + chunk_slots - 1, run_end)
             lookahead_len = lookahead_end - pos + 1
 
-            # A short (1-2 slot) burst is always the "triplet" feel,
-            # regardless of what came before — it's too short to read as a
-            # repetitive wall on its own. Only chunks long enough to
-            # meaningfully become a stream or a bounce slider (3+ slots)
-            # are subject to the no-repeat-treatment rule.
+            # How often a chunk becomes a genuine stream at all is
+            # --stream-frequency's job; whatever's left over keeps the
+            # original 0.45:0.10 bounce:rest ratio. A short (1-2 slot)
+            # burst used to always force the "stream" treatment regardless
+            # of this setting — that's exactly the "frequency does
+            # nothing" bug: at frequency 0 it kept producing quarter/
+            # eighth-note runs anyway. It's now subject to the same
+            # frequency-weighted choice as everything else; only the
+            # no-repeat-treatment rule is skipped for it (too short to
+            # read as a repetitive wall either way).
+            p_stream = 0.9 * args.stream_frequency
+            p_rest_of = 1.0 - p_stream
+            weights = {"stream": p_stream, "bounce": p_rest_of * 0.818, "rest": p_rest_of * 0.182}
             if lookahead_len < 3:
-                treatment = "stream"
+                options = ["stream", "bounce", "rest"]
             else:
                 options = [t for t in ("stream", "bounce", "rest") if t != last_treatment]
-                weights = {"stream": 0.45, "bounce": 0.45, "rest": 0.10}
-                treatment = rng.choices(options, weights=[weights[t] for t in options])[0]
+            treatment = rng.choices(options, weights=[weights[t] for t in options])[0]
             last_treatment = treatment
 
             chunk_end = lookahead_end
@@ -471,7 +533,7 @@ def main() -> None:
                 # doesn't really break anything up.
                 chunk_avg_energy = float(np.mean(slot_energy[pos:lookahead_end + 1]))
                 steps_per_slot = 4 if chunk_avg_energy > q_climax else 2
-                max_slots_for_cap = max(1, 8 // steps_per_slot)
+                max_slots_for_cap = max(1, stream_max_len // steps_per_slot)
                 chunk_end = min(lookahead_end, pos + max_slots_for_cap - 1)
 
             chunk_len = chunk_end - pos + 1
@@ -557,14 +619,27 @@ def main() -> None:
         print(f"Trimmed {trimmed} object(s) in the trailing fade-out (after {track_end_ms:.0f}ms)")
 
     # Guarantee no run of quarter/eighth-beat circles ("stream") is longer
-    # than 8 — the chunk-level bounce/circle decisions above already aim
-    # for this, but this is the hard backstop regardless of how those rolls
-    # landed: the (max_len+1)'th circle in a row always becomes a slider.
+    # than stream_max_len (3-8, from --stream-frequency) — the chunk-level
+    # bounce/circle decisions above already aim for this, but this is the
+    # hard backstop regardless of how those rolls landed, and regardless of
+    # a run built from several adjacent chunks: the (max_len+1)'th circle
+    # in a row always becomes a slider.
     before_cap = sum(1 for o in new_objects if not o.is_slider)
-    new_objects = cap_stream_length(new_objects, beat_length_ms, slider_multiplier, quarter_beat_ms)
+    new_objects = cap_stream_length(new_objects, beat_length_ms, slider_multiplier, quarter_beat_ms,
+                                     max_len=stream_max_len)
     after_cap = sum(1 for o in new_objects if not o.is_slider)
     if before_cap != after_cap:
         print(f"Capped long streams: converted {before_cap - after_cap} circle(s) into sliders")
+
+    # Cut a real break into any long, uninterrupted quiet stretch (a long
+    # intro, an ambient breakdown) instead of clicking through minutes of
+    # near-nothing — build_break_periods() below declares the resulting gap
+    # official automatically.
+    before_breaks = len(new_objects)
+    new_objects = carve_mid_breaks(new_objects, energy_at, q_low, beat_length_ms)
+    if len(new_objects) != before_breaks:
+        print(f"Carved a mid-track break out of {before_breaks - len(new_objects)} object(s) "
+              f"in long quiet stretch(es)")
 
     # New combos land on the song's actual downbeats (every 4 beats from the
     # detected offset), not a fixed object count — object count drifts as
@@ -620,10 +695,15 @@ def main() -> None:
             else:
                 obj.edge_hitsounds = [hs] * (obj.slides + 1)
 
-    # Sanity check: nothing should overlap in time.
+    # Sanity check: nothing should overlap in time, judged the same way the
+    # .osu file itself will be read back (every object's time rounded to a
+    # whole millisecond) — not raw floats, where a slider whose length was
+    # deliberately built from a *rounded* gap (see slider_length_for_gap)
+    # can land a fraction of a millisecond past an unrounded next-object
+    # time while still reconstructing to the exact same on-disk instant.
     for a, b in zip(new_objects, new_objects[1:]):
-        a_end = a.end_time(beat_length_ms, slider_multiplier)
-        if b.time < a_end - 1e-6:
+        a_end = round(a.time) + a.duration_ms(beat_length_ms, slider_multiplier)
+        if round(b.time) < a_end - 1e-6:
             raise AssertionError(f"Overlap detected: object at {a.time:.1f}ms ends at {a_end:.1f}ms, "
                                   f"but next object starts at {b.time:.1f}ms")
 

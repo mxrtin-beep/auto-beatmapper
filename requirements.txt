@@ -1,3 +1,5 @@
 numpy
 librosa
 soundfile
+scipy
+matplotlib
