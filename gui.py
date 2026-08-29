@@ -28,6 +28,7 @@ import zipfile
 from dataclasses import dataclass
 from tkinter import filedialog, messagebox, ttk
 
+import beatmap_stats
 import main as pipeline_main
 
 # --- Color palette (a dark theme instead of Tk's stock gray) ---
@@ -72,10 +73,13 @@ SLIDER_PARAMS = [
                 "How curved slider paths look, from mostly straight lines to pronounced "
                 "arcs. Min 0 (straight), max 1 (very curved). Default 0.5.",
                 0.0, 1.0, 0.5),
-    SliderParam("--stack-probability", "Stack vs. line mix",
-                "For a fast run of notes: how often they pile into one stacked spot "
-                "instead of spreading along a short straight line. Min 0 (always a line), "
-                "max 1 (always a stack). Default 0.5.",
+    SliderParam("--stream-frequency", "Stream frequency",
+                "How often a fast run of notes (on quarter or eighth beats) becomes a "
+                "deliberate stream — either piled into one stacked spot or spread along a "
+                "straight line — instead of just following the normal flow like any other "
+                "note. Min 0 (never a stream; a run is still capped at 3 notes in a row, but "
+                "they're never piled up or locked onto one line), max 1 (always a stream). "
+                "Default 0.5.",
                 0.0, 1.0, 0.5),
     SliderParam("--temperature", "Creativity",
                 "How much variation the whole map has — turn angles, slider curviness, how "
@@ -468,7 +472,13 @@ class App:
         # supports doing any other way.
         if self.osz_var.get():
             argv.append("--osz")
-        if self.keep_osu_var.get():
+            # Always keep the loose files at the main.py level, regardless
+            # of the user's own choice — _run_pipeline needs the loose
+            # Insane .osu to still exist afterward to compute stats on,
+            # and honors the user's real preference itself once that's
+            # done (see the keep_osu_var check there).
+            argv.append("--keep-osu-files")
+        elif self.keep_osu_var.get():
             argv.append("--keep-osu-files")
         return argv
 
@@ -510,12 +520,32 @@ class App:
 
             pipeline_main.main()
 
+            insane_path = os.path.join(outdir, f"{title} [Insane].osu")
+            if os.path.isfile(insane_path):
+                try:
+                    stats = beatmap_stats.compute_stats(insane_path)
+                    self.log_queue.put("\n" + stats.format() + "\n")
+                except Exception as e:  # noqa: BLE001 - stats are a bonus, never fail generation over them
+                    self.log_queue.put(f"\n(couldn't compute stats: {e})\n")
+
             excluded = [t for t, v in self.difficulty_vars.items() if not v.get()]
             osz_path = os.path.join(outdir, f"{title}.osz")
             if excluded:
                 if os.path.isfile(osz_path):
                     _remove_difficulties_from_osz(osz_path, title, excluded)
                 for tier in excluded:
+                    loose_path = os.path.join(outdir, f"{title} [{tier}].osu")
+                    if os.path.isfile(loose_path):
+                        os.remove(loose_path)
+
+            # main.py was always told --keep-osu-files when packaging (see
+            # _build_argv) so the Insane .osu above was guaranteed to still
+            # exist to compute stats from — now that that's done, honor the
+            # user's actual preference the way main.py itself would have.
+            if self.osz_var.get() and not self.keep_osu_var.get() and os.path.isfile(osz_path):
+                for tier in DIFFICULTIES:
+                    if tier in excluded:
+                        continue
                     loose_path = os.path.join(outdir, f"{title} [{tier}].osu")
                     if os.path.isfile(loose_path):
                         os.remove(loose_path)

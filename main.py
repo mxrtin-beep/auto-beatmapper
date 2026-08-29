@@ -79,8 +79,8 @@ def main() -> None:
     parser.add_argument("--curviness", type=float, default=None,
                          help="Forwarded to apply_style.py's --curviness (0-1, how curvy sliders "
                               "feel). Omit to use apply_style.py's own default.")
-    parser.add_argument("--stack-probability", type=float, default=None,
-                         help="Forwarded to apply_style.py's --stack-probability. Omit to use "
+    parser.add_argument("--stream-frequency", type=float, default=None,
+                         help="Forwarded to apply_style.py's --stream-frequency. Omit to use "
                               "apply_style.py's own default.")
     parser.add_argument("--angle-jitter", type=float, default=None,
                          help="Forwarded to apply_style.py's --angle-jitter. Omit to use "
@@ -113,7 +113,7 @@ def main() -> None:
 
     style_extra_args: list[str] = []
     for flag, value in (("--spacing", args.spacing), ("--curviness", args.curviness),
-                         ("--stack-probability", args.stack_probability),
+                         ("--stream-frequency", args.stream_frequency),
                          ("--angle-jitter", args.angle_jitter),
                          ("--temperature", args.temperature)):
         if value is not None:

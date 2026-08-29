@@ -95,10 +95,17 @@ python3 gui.py
 
 It runs the same pipeline `main.py` does (there's no separate logic to
 keep in sync), streams the pipeline's own console output into a log box
-so you can watch each stage run, and — if "Open the finished map when
-done" is checked — opens the resulting `.osz` (or, without `--osz`, the
-Insane `.osu`) with whatever your OS has registered for that file type
-once generation finishes.
+so you can watch each stage run, prints a statistics report on the
+finished Insane difficulty once generation completes (see
+`beatmap_stats.py` below), and — if "Open the finished map when done" is
+checked — opens the resulting `.osz` (or, without `--osz`, the Insane
+`.osu`) with whatever your OS has registered for that file type.
+
+The Difficulties section lets you uncheck any of Easy/Normal/Hard/Insane
+— every tier is still generated internally (an easier tier is always
+derived from the one above it, so there's no way to skip one mid-spread),
+an unchecked one is just deleted from the result afterward, including
+being stripped back out of an already-built `.osz`.
 
 Built with Tkinter, which ships with the Python standard library on
 Windows and macOS installers; on Linux it's usually a separate distro
@@ -142,7 +149,7 @@ default — pass `--no-spread` to skip that and produce only Insane:
 python3 main.py song.mp3 --no-spread --osz
 ```
 
-`main.py` also forwards `--spacing`, `--curviness`, `--stack-probability`,
+`main.py` also forwards `--spacing`, `--curviness`, `--stream-frequency`,
 `--angle-jitter`, and `--temperature` straight through to `apply_style.py`
 (see below), and `--bpm`/`--offset` straight through to
 `generate_base_beatmap.py`, if you pass them.
@@ -190,23 +197,30 @@ recurs — the same seed always reproduces the same wobble.
   Turning this up gives more varied flow/angles without changing when
   anything is hit; turning it down makes the motif patterns read more
   rigidly.
-- `--stack-probability P` (default `0.5`) — the overall mix between stream
-  runs that stack in one spot and runs that trace a straight line (`0` =
-  always line, `1` = always stack). A run picks exactly one of the two for
-  its whole length (never a mix, and a "line" run's direction is locked in
-  once and never bends), and whichever one a given repeating section picks
-  stays consistent every time that section recurs. Any run of quarter-beat
-  -or-closer notes longer than 3 is split into consecutive bursts of at
-  most 3 — each an independent run with its own mode and its own
-  entry/exit gap — rather than one long stack or one long line; `0` still
-  means "always line," but never one long line either. A run spanning more
-  than half a beat is never a stack (only ever a line), matching the
-  ranking criteria's Hard-difficulty rule against fully overlapping
-  objects more than half a beat apart. The single gap entering a run, and
-  the single gap leaving one (including between two consecutive bursts of
-  the same long stream), is also widened a bit past ordinary distance
-  snap, so a run reads as a clearly set-apart unit instead of bleeding
-  into the normal flow — or the next burst — on either side.
+- `--stream-frequency F` (default `0.5`) — how often a fast (quarter-beat
+  -or-closer) run of notes becomes a deliberate *stream* — stacked in one
+  spot, or spread along a locked-in straight line — rather than just
+  following the ordinary motif-driven flow any other note would, one at a
+  time with no forced overlap or fixed direction (`0` = never a stream,
+  `1` = always one). Any run longer than 3 is split into consecutive
+  bursts of at most 3 regardless of this setting — each its own
+  independent unit with its own mode and its own entry/exit gap — so a
+  chain of, say, 8 eighth-notes never reads as one long pile, one long
+  line, or (at `0`) one undifferentiated wall of 8 individually-flowing
+  notes either. Whichever bursts do become a stream still split roughly
+  50/50 between stack and line (weighted by whether the burst is short
+  enough to stack at all — see below); that mix isn't separately
+  exposed, since "how often do I get a stream at all" was the genuinely
+  useful knob here. A burst is only eligible for "stack" if its whole
+  span (first member to last) is half a beat or less — piling more than
+  that much elapsed time onto one spot is a real overlap the ranking
+  criteria's Hard-difficulty rule forbids ("objects 1/2 of a beat apart or
+  less must not fully overlap"); a burst failing that check is "line"
+  instead whenever it streams. The single gap entering a burst, and the
+  single gap leaving one (including between two consecutive bursts of the
+  same long run, streaming or not), is also widened a bit past ordinary
+  distance snap, so a burst reads as a clearly set-apart unit instead of
+  bleeding into the normal flow — or the next burst — on either side.
 - `--curviness C` (default `0.5`) — how curvy the map feels, `0`-`1`. `0`
   makes almost every slider a straight line; `1` makes almost every
   slider a pronounced curve, and makes the bow of every curved slider
@@ -242,6 +256,24 @@ and just want a playable package without regenerating anything:
 python3 build_osz.py song.mp3 "out/Song (Base).osu" "out/Song (Variety).osu" \
     "out/Song (Styled).osu" --output "out/Song.osz"
 ```
+
+### Beatmap statistics
+
+`beatmap_stats.py` computes distribution statistics (not just single
+numbers — full min/p25/median/p75/max/mean/stdev plus an ASCII histogram)
+for any `.osu` file: delay between consecutive objects, on-screen jump
+spacing, slider length and duration, turn-angle at each object, the
+straight/curved/chain slider mix, and what fraction of consecutive pairs
+are stacked:
+
+```bash
+python3 beatmap_stats.py "out/Song [Insane].osu"
+```
+
+Pass several paths to compare difficulties (or a real hand-mapped
+beatmap) side by side. The GUI runs this automatically against the
+Insane difficulty after every generation and prints the result in its
+log box.
 
 ### Running the stages individually
 
