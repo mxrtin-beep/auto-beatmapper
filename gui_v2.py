@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import os
 import queue
+import random
 import sys
 import threading
 import tkinter as tk
@@ -49,6 +50,7 @@ from tkinter import filedialog, messagebox, ttk
 import add_sliders_v2
 import beatmap_report
 import generate_base_beatmap_v2
+import make_easy
 from beatmap_stats import compute_stats
 from build_osz import build_osz
 from gui import BG, BG_ENTRY, FONT_MONO, PAD_INNER, PAD_OUTER, TextRedirector, _configure_style, _open_path
@@ -62,37 +64,51 @@ STYLED_VERSION = "Auto Base v2 (Styled)"
 
 @dataclass
 class SliderParam:
+    """A style knob shown as a plain 0-1 dial, thumb defaulting to the
+    middle — but the middle doesn't have to *mean* the middle of the
+    underlying range. `actual_lo`/`actual_mid`/`actual_hi` are the real
+    values forwarded to the pipeline at display 0 / 0.5 / 1, piecewise-
+    linear between them (see to_actual) — every knob's tuned default
+    (e.g. Intensity's own 0.65) shows up as a plain, unremarkable 0.5 on
+    the dial instead of an oddly-specific number, while the dial's two
+    ends can still open the underlying range all the way out."""
     flag: str
     label: str
     description: str
-    lo: float
-    hi: float
-    default: float
+    actual_lo: float
+    actual_mid: float
+    actual_hi: float
+
+    def to_actual(self, display: float) -> float:
+        display = max(0.0, min(1.0, display))
+        if display <= 0.5:
+            return self.actual_lo + (self.actual_mid - self.actual_lo) * (display / 0.5)
+        return self.actual_mid + (self.actual_hi - self.actual_mid) * ((display - 0.5) / 0.5)
 
 
 SLIDER_PARAMS = [
     SliderParam("--intensity", "Intensity",
-                "How much of the song ends up on faster subdivisions. Min 0 (whole-beat "
-                "dominant throughout), max 1 (much more of it on half/quarter-beat spacing, "
-                "including denser measure-anchored bursts). Default 0.5.",
-                0.0, 1.0, 0.5),
+                "How much of the song ends up on faster subdivisions. Min (whole-beat "
+                "dominant throughout) to max (much more of it on half/quarter-beat spacing, "
+                "including denser measure-anchored bursts). Default 0.65.",
+                0.0, 0.65, 1.0),
     SliderParam("--chain-probability", "Slider vs. circle mix",
                 "How often an eligible run of adjacent circles actually becomes a slider, "
-                "versus staying plain circles. Min 0 (always circles), max 1 (every eligible "
-                "run becomes a slider). Default 0.8.",
-                0.0, 1.0, 0.8),
+                "versus staying plain circles. Min (always circles) to max (every eligible "
+                "run becomes a slider). Default 0.3.",
+                0.0, 0.3, 1.0),
     SliderParam("--slider-length-bias", "Slider length",
-                "Of whichever runs do become sliders: how long they tend to run. Min 0 "
-                "(more, shorter/choppier sliders), max 1 (fewer, longer sliders). Default 0.5.",
-                0.0, 1.0, 0.5),
+                "Of whichever runs do become sliders: how long they tend to run. Min (more, "
+                "shorter/choppier sliders) to max (fewer, longer sliders). Default 0.4.",
+                0.0, 0.4, 1.0),
     SliderParam("--curviness", "Slider curviness",
                 "How curved slider paths look, from mostly straight lines to pronounced "
-                "arcs. Min 0 (straight), max 1 (very curved). Default 0.5.",
-                0.0, 1.0, 0.5),
+                "arcs. Min (straight) to max (very curved). Default 0.5.",
+                0.0, 0.5, 1.0),
     SliderParam("--spacing", "Jump distance",
                 "How far apart notes are placed for a given time gap between them. "
-                "Min 0.5 (tight, close together), max 2.5 (wide, dramatic jumps). Default 1.8.",
-                0.5, 2.5, 1.8),
+                "Min (tight, close together) to max (wide, dramatic jumps). Default 1.9.",
+                0.5, 1.9, 2.5),
 ]
 
 
@@ -127,6 +143,7 @@ class App:
         self.result_path: str | None = None
         self.slider_vars: dict[str, tk.DoubleVar] = {}
         self.entry_vars: dict[str, tk.StringVar] = {}
+        self._slider_params_by_flag = {p.flag: p for p in SLIDER_PARAMS}
 
         outer = ttk.Frame(root)
         outer.pack(fill="both", expand=True)
@@ -191,6 +208,23 @@ class App:
                                  first=(i == 0), last=(i == len(TIMING_PARAMS) - 1))
         timing_panel.columnconfigure(1, weight=1)
 
+        # --- Difficulties section ---
+        diff_panel = self._panel(form, "Difficulties")
+        ttk.Label(diff_panel,
+                  text="Styled is always generated. Checking any of Hard/Normal/Easy derives it "
+                       "from Styled the same way main.py's own pipeline derives its spread "
+                       "(make_easy.py) -- thinning density and easing Difficulty settings (bigger "
+                       "circles, lower HP drain, lower approach rate) without ever risking a "
+                       "timing error.", style="Hint.TLabel").grid(
+            row=0, column=0, columnspan=4, sticky="w", padx=PAD_INNER, pady=(PAD_INNER, 6))
+        self.difficulty_vars: dict[str, tk.BooleanVar] = {}
+        for i, tier in enumerate(("Hard", "Normal", "Easy")):
+            var = tk.BooleanVar(value=False)
+            self.difficulty_vars[tier] = var
+            ttk.Checkbutton(diff_panel, text=tier, variable=var).grid(
+                row=1, column=i, sticky="w", padx=(PAD_INNER if i == 0 else 8, 8), pady=(0, PAD_INNER))
+        diff_panel.columnconfigure(3, weight=1)
+
         # --- Options ---
         opt_panel = self._panel(form, "Options")
         self.osz_var = tk.BooleanVar(value=True)
@@ -253,7 +287,10 @@ class App:
             padx=PAD_INNER, pady=(4, PAD_INNER if last else 0))
 
     def _slider_row(self, parent: tk.Widget, row: int, p: SliderParam, first: bool = False) -> None:
-        var = tk.DoubleVar(value=p.default)
+        # Every dial here is a plain 0-1 scale, thumb defaulting to the
+        # middle -- see SliderParam's own docstring for why that middle
+        # doesn't have to be the middle of the real underlying range.
+        var = tk.DoubleVar(value=0.5)
         self.slider_vars[p.flag] = var
         base_row = row * 4
         ttk.Label(parent, text=p.label, style="Heading.TLabel").grid(
@@ -267,7 +304,7 @@ class App:
         on_change()
         ttk.Label(parent, text=p.description, style="Hint.TLabel").grid(
             row=base_row + 1, column=0, columnspan=2, sticky="w", padx=PAD_INNER)
-        scale = ttk.Scale(parent, from_=p.lo, to=p.hi, orient="horizontal", variable=var, command=on_change)
+        scale = ttk.Scale(parent, from_=0.0, to=1.0, orient="horizontal", variable=var, command=on_change)
         scale.grid(row=base_row + 2, column=0, columnspan=2, sticky="ew", padx=PAD_INNER, pady=(6, 4))
 
     # --- File pickers ---
@@ -321,6 +358,11 @@ class App:
         self.worker.start()
         self.root.after(200, self._poll_worker)
 
+    def _actual(self, flag: str) -> float:
+        """The real value forwarded to the pipeline for `flag`'s dial,
+        mapped from its current 0-1 display position — see SliderParam.to_actual."""
+        return self._slider_params_by_flag[flag].to_actual(self.slider_vars[flag].get())
+
     def _run(self, audio: str) -> None:
         old_stdout, old_stderr, old_argv = sys.stdout, sys.stderr, sys.argv
         redirector = TextRedirector(self.log_queue)
@@ -333,6 +375,7 @@ class App:
             outdir = self.outdir_var.get().strip() or "output"
             os.makedirs(outdir, exist_ok=True)
             keep_intermediate = self.keep_intermediate_var.get()
+            seed = random.SystemRandom().randrange(2**32)
 
             circles_path = os.path.join(outdir, f"{title} [{CIRCLES_VERSION}].osu")
             sliders_path = os.path.join(outdir, f"{title} [{SLIDERS_VERSION}].osu")
@@ -342,7 +385,7 @@ class App:
                          "--artist", self.artist_var.get().strip() or "Unknown Artist",
                          "--creator", self.creator_var.get().strip() or "auto-beatmapper",
                          "--version", CIRCLES_VERSION,
-                         "--intensity", f"{self.slider_vars['--intensity'].get():.3f}"]
+                         "--intensity", f"{self._actual('--intensity'):.3f}"]
             for p in TIMING_PARAMS:
                 value = self.entry_vars[p.flag].get().strip()
                 if value:
@@ -351,10 +394,11 @@ class App:
             generate_base_beatmap_v2.main()
 
             sliders_argv = [circles_path, audio, "--output", styled_path, "--version", STYLED_VERSION,
-                             "--chain-probability", f"{self.slider_vars['--chain-probability'].get():.3f}",
-                             "--slider-length-bias", f"{self.slider_vars['--slider-length-bias'].get():.3f}",
-                             "--curviness", f"{self.slider_vars['--curviness'].get():.3f}",
-                             "--spacing", f"{self.slider_vars['--spacing'].get():.3f}"]
+                             "--chain-probability", f"{self._actual('--chain-probability'):.3f}",
+                             "--slider-length-bias", f"{self._actual('--slider-length-bias'):.3f}",
+                             "--curviness", f"{self._actual('--curviness'):.3f}",
+                             "--spacing", f"{self._actual('--spacing'):.3f}",
+                             "--seed", str(seed)]
             # The merged-but-unstyled "Sliders" stage is only ever worth
             # writing out when the user actually wants to inspect it --
             # otherwise it's exactly what add_sliders_v2.py already treats
@@ -364,6 +408,25 @@ class App:
                 sliders_argv += ["--merged-output", sliders_path, "--merged-version", SLIDERS_VERSION]
             sys.argv = ["add_sliders_v2.py"] + sliders_argv
             add_sliders_v2.main()
+
+            # Difficulty spread: Hard/Normal/Easy, each derived straight
+            # from Styled via make_easy.py -- the exact same module and
+            # logic main.py's own pipeline already uses to thin density
+            # and ease Difficulty settings (bigger circles, lower HP,
+            # lower approach rate) without ever risking a timing error.
+            # Styled itself keeps its own CS/AR (see add_sliders_v2.py),
+            # not make_easy.py's own "insane" target -- this pathway's top
+            # tier has its own explicit defaults, independent of the main
+            # pipeline's.
+            tier_paths: dict[str, str] = {}
+            for i, tier in enumerate(("Hard", "Normal", "Easy")):
+                if not self.difficulty_vars[tier].get():
+                    continue
+                tier_path = os.path.join(outdir, f"{title} [{tier}].osu")
+                sys.argv = ["make_easy.py", styled_path, "--audio", audio, "--tier", tier.lower(),
+                            "--output", tier_path, "--seed", str(seed + 1 + i)]
+                make_easy.main()
+                tier_paths[tier] = tier_path
 
             if self.report_var.get():
                 # Compared against Backstabber's Insane -- the closest
@@ -385,8 +448,10 @@ class App:
             # user actually checked the box -- otherwise they're the same
             # kind of internal working file main.py's own Base/Variety are
             # without --keep-intermediate-files, cleaned up once the thing
-            # that's actually meant to be played (Styled) exists.
+            # that's actually meant to be played (Styled) exists. The
+            # derived difficulties (if any were checked) are always kept.
             all_paths = [circles_path, sliders_path, styled_path] if keep_intermediate else [styled_path]
+            all_paths += list(tier_paths.values())
             if not keep_intermediate:
                 os.remove(circles_path)
 

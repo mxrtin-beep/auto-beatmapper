@@ -668,6 +668,18 @@ def main() -> None:
     STREAM_TRANSITION_BOOST = 1.4
     was_in_stream = False
 
+    # Slider shape consistency within a combo: once the *first* slider in a
+    # combo lands on straight or curved, every later slider in that same
+    # combo (until the next new-combo) is held to the same choice — a
+    # combo mixing a straight slider, a gentle Bezier, and a pronounced
+    # arc back to back reads as random rather than a deliberate pattern.
+    # Only the straight-vs-curved split is locked; a "curved" combo can
+    # still vary between a gentle Bezier and a pronounced arc slider to
+    # slider (and a chain's own polyline-vs-smooth-curve choice), so there
+    # is still real shape variety from one combo to the next and within a
+    # curved one, just not a jarring flip mid-phrase.
+    combo_curved: bool | None = None
+
     def wander_nudge(angle: float, x: float, y: float) -> float:
         bias = math.atan2(wander_target[1] - y, wander_target[0] - x)
         diff = (bias - angle + math.pi) % (2 * math.pi) - math.pi
@@ -682,6 +694,7 @@ def main() -> None:
         if obj.is_new_combo:
             wander_target = (wander_rng.uniform(MARGIN, PLAYFIELD_W - MARGIN),
                               wander_rng.uniform(MARGIN, PLAYFIELD_H - MARGIN))
+            combo_curved = None
 
         tier = classify_tier(energy_at(obj.time), q_low, q_high)
         entry = stream_mode.get(idx)
@@ -786,19 +799,31 @@ def main() -> None:
                 end_x, end_y = clamp_to_playfield(end_x, end_y, margin=MARGIN)
 
                 _, straight_prob, bezier_prob, bow_scale = shape_mix_for(obj.time)
-                shape_roll = rng.random()
+                # Straight-vs-curved is decided once per combo (see
+                # combo_curved's own comment) — only the *first* slider of
+                # a combo actually rolls for it; every later slider in the
+                # same combo just inherits that choice. Bezier-vs-perfect-
+                # circle still gets its own fresh roll per slider (rescaled
+                # into the same [straight_prob, 1) range the original single
+                # roll used, so the relative odds between them are
+                # unchanged), so a curved combo still has real shape
+                # variety slider to slider, just never flips to straight
+                # mid-combo.
+                if combo_curved is None:
+                    combo_curved = rng.random() >= straight_prob
                 # A tiny seeded wobble on the bow itself, same reasoning as
                 # styled_spacing: keeps curves from looking mechanically
                 # identical whenever curviness happens to land the same
                 # shape twice, while staying reproducible for a given seed.
                 bow_jitter = 1.0 + rng.uniform(-0.1, 0.1)
-                if shape_roll < straight_prob:
+                if not combo_curved:
                     obj.curve_type = "L"
                     obj.points = [(end_x, end_y)]
                 else:
                     mid_x, mid_y = (cur_x + end_x) / 2.0, (cur_y + end_y) / 2.0
                     perp_angle = end_angle + math.pi / 2
-                    if shape_roll < bezier_prob:
+                    subtype_roll = rng.uniform(straight_prob, 1.0)
+                    if subtype_roll < bezier_prob:
                         # A quadratic Bezier through (start, bow, end) — a
                         # gentle arc. Unlike a "P" (perfect-circle) curve
                         # with a *small* bow, whose rendered path can swing
@@ -846,7 +871,14 @@ def main() -> None:
                 # guaranteed to stay within their convex hull, so this is
                 # safe even for a long, sweeping chain).
                 chain_curviness, _, _, _ = shape_mix_for(obj.time)
-                obj.curve_type = "L" if rng.random() >= chain_curviness else "B"
+                # Same combo-locked straight-vs-curved rule as the single-
+                # anchor case above (see combo_curved's own comment) — a
+                # chain only ever chooses between "L" and "B" to begin
+                # with, so the combo's lock applies directly with no
+                # subtype re-roll needed.
+                if combo_curved is None:
+                    combo_curved = rng.random() < chain_curviness
+                obj.curve_type = "B" if combo_curved else "L"
                 new_points = []
                 for _ in range(num_segments):
                     cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,

@@ -138,6 +138,10 @@ def main() -> None:
                               "input.")
     parser.add_argument("--merged-version", default="Auto Base v2 (Sliders)",
                          help="Difficulty/version name written into --merged-output, if given.")
+    parser.add_argument("--circle-size", type=float, default=4.5,
+                         help="CircleSize written into the final output (default 4.5).")
+    parser.add_argument("--approach-rate", type=float, default=8.4,
+                         help="ApproachRate written into the final output (default 8.4).")
     parser.add_argument("--seed", type=int, default=None,
                          help="Random seed. Omit for a different result every run; pass a fixed value "
                               "(printed on every run) to reproduce it later.")
@@ -217,6 +221,17 @@ def main() -> None:
         sys.argv = old_argv
         if not keep_merged:
             os.remove(merged_path)
+
+    # apply_style.py never touches Difficulty settings -- generate_base_
+    # beatmap_v2.py's own defaults (CS 4, AR 8, via beatmap_utils.py's
+    # default_metadata) carry straight through otherwise. Patched here
+    # rather than there since these are specific to this pathway's own
+    # top ("Insane"-equivalent) tier, not generate_base_beatmap_v2.py's
+    # concern.
+    styled_bm = read_osu(args.output)
+    styled_bm.difficulty["CircleSize"] = f"{args.circle_size:.1f}"
+    styled_bm.difficulty["ApproachRate"] = f"{args.approach_rate:.1f}"
+    write_osu(styled_bm, args.output)
     print(f"Wrote {args.output}")
 
 
