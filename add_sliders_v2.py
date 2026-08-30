@@ -95,6 +95,27 @@ TIER_SPACING_SCALE: dict[str, float] = {"insane": 1.0, "hard": 0.85, "normal": 0
 BOUNCE_PROBABILITY = 0.3
 
 
+def _burst_ranges(circles: list[HitObject], beat_length_ms: float, min_len: int = 4) -> dict[int, tuple[int, int]]:
+    """Maps every circle index that's part of a "burst" — a maximal run of
+    4+ consecutive circles no more than a quarter beat apart, the same
+    quarter-beat-or-closer/4+ definition apply_style.py's own stream
+    detection uses — to that burst's own (start_index, end_index). A
+    circle not part of any such run isn't a key in the returned dict.
+    """
+    quarter_beat_ms = beat_length_ms / 4.0 + 1.0
+    burst_of: dict[int, tuple[int, int]] = {}
+    i, n = 0, len(circles)
+    while i < n:
+        j = i
+        while j + 1 < n and circles[j + 1].time - circles[j].time <= quarter_beat_ms:
+            j += 1
+        if j - i + 1 >= min_len:
+            for idx in range(i, j + 1):
+                burst_of[idx] = (i, j)
+        i = j + 1 if j > i else i + 1
+    return burst_of
+
+
 def merge_into_sliders(circles: list[HitObject], beat_length_ms: float, slider_multiplier: float,
                         rng: random.Random, slider_length_bias: float, chain_probability: float = 0.8,
                         max_gap_beats: float = 1.0, offset_ms: float | None = None,
@@ -108,6 +129,14 @@ def merge_into_sliders(circles: list[HitObject], beat_length_ms: float, slider_m
     within `max_gap_beats` of each other — extending a chain across
     whatever real silent gap Base Map v2 already left between two circles
     would turn a deliberate silence into a slider dragging through it.
+
+    Inside a "burst" (see _burst_ranges — a climax run or embellishment
+    chain reads as exactly this), a merge is only ever allowed right at
+    the burst's own start or right at its own end — never carved out of
+    the middle, which would read as burst -> slider -> burst -> slider
+    rather than one continuous run with (at most) a slider bookending
+    each side. A circle in a burst's interior that doesn't happen to
+    reach the burst's own last member exactly always stays a plain circle.
 
     A run of 3+ circles that are *evenly* spaced (equal consecutive gaps —
     exactly what generate_base_beatmap_v2.py's own quarter/eighth-beat
@@ -127,14 +156,16 @@ def merge_into_sliders(circles: list[HitObject], beat_length_ms: float, slider_m
     a repeated measure's accent pattern, rather than every occurrence
     rolling independently. Replay only ever reuses a *decision*, never
     forces one that doesn't fit this occurrence's own actual data (not
-    enough eligible circles here to reach the same chain length, or this
-    occurrence isn't evenly spaced the way the original was for a bounce)
-    — a decision that doesn't fit is decided fresh instead, same as if no
-    repeat map were given at all. Pass `measure_repeat_map=None` (the
-    default) for the original, fully independent-per-run behavior.
+    enough eligible circles here to reach the same chain length, this
+    occurrence isn't evenly spaced the way the original was for a bounce,
+    or the burst-boundary rule above forbids it here) — a decision that
+    doesn't fit is decided fresh instead, same as if no repeat map were
+    given at all. Pass `measure_repeat_map=None` (the default) for the
+    original, fully independent-per-run behavior.
     """
     weights = chain_len_weights(slider_length_bias)
     max_gap_ms = beat_length_ms * max_gap_beats + 1.0
+    burst_of = _burst_ranges(circles, beat_length_ms)
     result: list[HitObject] = []
     replayed_decisions: dict[tuple[int, int], tuple] = {}
     i, n = 0, len(circles)
@@ -144,6 +175,21 @@ def merge_into_sliders(circles: list[HitObject], beat_length_ms: float, slider_m
         while (i + max_chain < n and max_chain < 4
                and circles[i + max_chain].time - circles[i + max_chain - 1].time <= max_gap_ms):
             max_chain += 1
+
+        # Inside a burst, off its own start: the *only* merge allowed here
+        # is one that reaches exactly the burst's last member (a suffix
+        # slider) -- anything else (a merge stopping short, mid-burst) is
+        # forced to a plain circle instead, per the burst-boundary rule.
+        burst = burst_of.get(i)
+        forced_chain_len = None
+        if burst is not None and i != burst[0]:
+            remaining = burst[1] - i + 1
+            if 2 <= remaining <= max_chain:
+                forced_chain_len = remaining
+            else:
+                result.append(cur)
+                i += 1
+                continue
 
         replay_key = None
         replay = None
@@ -162,7 +208,20 @@ def merge_into_sliders(circles: list[HitObject], beat_length_ms: float, slider_m
                 replay = replayed_decisions.get((canonical_measure, slot_in_measure))
             replay_key = (measure_idx, slot_in_measure)
 
-        if replay is not None and replay[0] == "chain" and replay[1] <= max_chain:
+        if forced_chain_len is not None:
+            # The burst-boundary rule overrides replay here (a partial-
+            # length suffix would leave burst circles stranded in the
+            # middle again) -- but --chain-probability still gets a say
+            # in *whether* this suffix becomes a slider at all, same as
+            # everywhere else; declining just leaves these circles plain
+            # (a shorter remaining stretch gets another, later chance to
+            # reach the burst's own end exactly).
+            if rng.random() < chain_probability:
+                chain_len, can_chain = forced_chain_len, True
+                want_bounce = rng.random() < BOUNCE_PROBABILITY
+            else:
+                chain_len, can_chain, want_bounce = None, False, False
+        elif replay is not None and replay[0] == "chain" and replay[1] <= max_chain:
             chain_len, want_bounce = replay[1], replay[2]
             can_chain = True
         elif replay is not None and replay[0] == "circle":

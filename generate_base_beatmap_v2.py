@@ -186,7 +186,7 @@ def _emit_climax_run(kept_times: list[float], climax_times: set[float], start_be
     climax_times.update(new_times)
 
 
-def _climax_covered_ranges(tiers: list[str], max_span_beats: float = MEASURE_BEATS) -> list[tuple[int, int]]:
+def _climax_covered_ranges(tiers: list[str], max_span_beats: float = 2.0) -> list[tuple[int, int]]:
     """Beat-index ranges [start, end] (inclusive) that climax bursts end up
     covering — `start` is always a measure downbeat (a multiple of
     MEASURE_BEATS from the very first beat), regardless of which beat
@@ -228,7 +228,7 @@ def _climax_covered_ranges(tiers: list[str], max_span_beats: float = MEASURE_BEA
             j += 1
 
         start = (i // MEASURE_BEATS) * MEASURE_BEATS
-        capped_run_end = min(j, start + int(max_span_beats) - 1)
+        capped_run_end = min(j, start + round(max_span_beats))
         end = _climax_covered_end(start, capped_run_end)
         covered.append((start, end))
 
@@ -280,10 +280,13 @@ def build_intensity_grid(offset_seconds: float, bpm: float, duration_seconds: fl
     smoothed = smooth_slot_energy(raw_energy, smoothing_window)
     tiers = [classify_intensity(e, q_silent, q_quiet, q_intense, q_climax) for e in smoothed]
 
-    # One measure at intensity<=0.5, gradually up to two measures by
-    # intensity=1.0 -- how far a single climax burst is allowed to span
-    # before a cooldown measure is forced (see _climax_covered_ranges).
-    max_span_beats = MEASURE_BEATS * (1.0 + max(0.0, (intensity - 0.5) / 0.5))
+    # One beat (9 circles at eighth-beat spacing) at intensity<=0.5,
+    # gradually up to two beats (17 circles) by intensity=1.0 -- how far a
+    # single climax burst is allowed to span before a cooldown measure is
+    # forced (see _climax_covered_ranges). Was a full 1-2 *measures*
+    # (33/65 circles) -- even the capped version still read as far too
+    # long a wall of notes in practice.
+    max_span_beats = 1.0 + max(0.0, (intensity - 0.5) / 0.5)
     covered_ranges = _climax_covered_ranges(tiers, max_span_beats=max_span_beats)
     covered_starts = dict(covered_ranges)
     covered_set = {b for start, end in covered_ranges for b in range(start, end + 1)}
