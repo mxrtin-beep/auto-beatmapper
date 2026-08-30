@@ -71,6 +71,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import random
 
 import librosa
 import numpy as np
@@ -316,6 +317,42 @@ def cap_fast_run_span(times_ms: list[float], beat_length_ms: float,
     return result
 
 
+def add_embellishment_chains(times_ms: list[float], beat_length_ms: float, intensity: float,
+                              rng: random.Random) -> list[float]:
+    """Sparingly, turn one ordinary gap between consecutive circles into a
+    short chain of 16th notes (quarter-beat spacing) -- 5 or 7 of them,
+    always an odd count -- rather than leaving every gap at the plain rate
+    its own beat's tier already gave it. Only ever inserted strictly
+    *inside* an existing gap that's already roomy enough for the whole
+    chain (never touching either endpoint circle, so it can't collide with
+    or crowd whatever comes right before/after), which naturally keeps a
+    7-note chain (1.5 beats of quarter-beat spacing) rare -- most ordinary
+    gaps are only about a beat wide, room enough for a 5-note chain (which
+    spans exactly one beat) but not a 7-note one.
+
+    Only fires in the higher-intensity half of the --intensity range, and
+    even then on a small, intensity-scaled fraction of eligible gaps --
+    "added sparingly", not a wholesale rhythm change.
+    """
+    if intensity <= 0.5 or len(times_ms) < 2:
+        return times_ms
+    probability = (intensity - 0.5) * 0.3  # up to ~15% of eligible gaps at intensity=1.0
+    quarter_beat_ms = beat_length_ms / 4.0
+    result = [times_ms[0]]
+    for prev, t in zip(times_ms, times_ms[1:]):
+        gap_ms = t - prev
+        # Only an ordinary (not already fast) gap is eligible -- embellishing
+        # a gap that's already a quarter/eighth-beat run piles a chain onto
+        # something already busy, rather than livening up a plain stretch.
+        if gap_ms >= beat_length_ms - 1.0 and rng.random() < probability:
+            length = rng.choice([5, 7])
+            span_ms = (length - 1) * quarter_beat_ms
+            if span_ms <= gap_ms - 1.0:
+                result.extend(prev + k * quarter_beat_ms for k in range(1, length))
+        result.append(t)
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate an intensity-adaptive base osu! beatmap from an MP3.")
     parser.add_argument("audio", help="Path to the input MP3 file.")
@@ -343,7 +380,16 @@ def main() -> None:
                          help="Smooth energy over this many beats before classifying intensity, so "
                               "tiers track the song's actual sections instead of flickering slot to "
                               "slot (default 2.0; 0 disables smoothing).")
+    parser.add_argument("--seed", type=int, default=None,
+                         help="Random seed, for embellishment chains (see add_embellishment_chains). "
+                              "Omit for a different result every run; pass a fixed value (printed on "
+                              "every run) to reproduce it later.")
     args = parser.parse_args()
+
+    if args.seed is None:
+        args.seed = random.SystemRandom().randrange(2**32)
+    rng = random.Random(args.seed)
+    print(f"Using seed: {args.seed}")
 
     title = args.title or os.path.splitext(os.path.basename(args.audio))[0]
     audio_filename = args.audio_filename or os.path.basename(args.audio)
@@ -401,6 +447,11 @@ def main() -> None:
     if before_cap != len(times):
         print(f"Capped fast runs: dropped {before_cap - len(times)} circle(s) to keep every "
               f"quarter/eighth-beat run under a full beat")
+
+    before_embellish = len(times)
+    times = add_embellishment_chains(times, beat_length_ms, args.intensity, rng)
+    if len(times) != before_embellish:
+        print(f"Added {len(times) - before_embellish} embellishment note(s) across short 16th-note chains")
     print(f"Placing {len(times)} circles (intensity-adaptive: whole/half/quarter/eighth beat)...")
 
     positions = placeholder_positions(len(times))

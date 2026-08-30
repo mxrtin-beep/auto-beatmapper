@@ -68,9 +68,31 @@ import sys
 import numpy as np
 
 import apply_style
-from add_variety import assign_hitsounds, chain_len_weights, compute_energy_curve, make_energy_lookup, make_slider_chain
+import make_easy
+from add_variety import (assign_hitsounds, chain_len_weights, compute_energy_curve, is_on_downbeat,
+                          make_bounce_slider, make_energy_lookup, make_slider_chain)
 from beatmap_utils import HitObject, read_osu, write_osu
 from make_easy import recompute_combos
+
+# How much --spacing is scaled down per tier below Insane -- osu!'s own
+# distance-snap formula is CircleSize-agnostic, but a lower tier's much
+# bigger circles (see make_easy.TIER_TARGET) need to travel *less* far to
+# still read as a comfortable, correctly-spaced jump; reusing Insane's own
+# jump distance on Easy's big circles is what was reading as "too spacey"
+# and, combined with the bigger circles eating into the playfield margin
+# a curve's bow bulges into, made an occasional off-screen slider likelier
+# too. Insane keeps the user's own --spacing exactly; each tier down
+# scales it further, matching how much smaller a jump reads as comfortable
+# once the circles themselves are bigger.
+TIER_SPACING_SCALE: dict[str, float] = {"insane": 1.0, "hard": 0.85, "normal": 0.7, "easy": 0.55}
+
+# Of an otherwise-eligible, evenly-spaced 3-4 circle run that's becoming a
+# slider, how often it becomes a repeating/"bounce" slider (one path back
+# and forth) instead of a waypoint chain visiting each point in turn — see
+# merge_into_sliders. Not exposed on the CLI: it's a stylistic mix within
+# "becomes a slider at all" (--chain-probability's own job), not a
+# separate knob worth surfacing.
+BOUNCE_PROBABILITY = 0.3
 
 
 def merge_into_sliders(circles: list[HitObject], beat_length_ms: float, slider_multiplier: float,
@@ -85,6 +107,17 @@ def merge_into_sliders(circles: list[HitObject], beat_length_ms: float, slider_m
     within `max_gap_beats` of each other — extending a chain across
     whatever real silent gap Base Map v2 already left between two circles
     would turn a deliberate silence into a slider dragging through it.
+
+    A run of 3+ circles that are *evenly* spaced (equal consecutive gaps —
+    exactly what generate_base_beatmap_v2.py's own quarter/eighth-beat
+    subdivisions and its embellishment chains both produce) sometimes
+    becomes a repeating/"bounce" slider instead (add_variety.py's own
+    make_bounce_slider): one back-and-forth path between the run's first
+    two points, repeated enough times to cover the same span, rather than
+    a waypoint chain visiting every point in turn. A merely-adjacent but
+    unevenly-spaced run never qualifies — a bounce slider's repeats are
+    all the same duration by construction, so it can only stand in for a
+    run that's genuinely on one rhythmic grid already.
     """
     weights = chain_len_weights(slider_length_bias)
     max_gap_ms = beat_length_ms * max_gap_beats + 1.0
@@ -100,12 +133,140 @@ def merge_into_sliders(circles: list[HitObject], beat_length_ms: float, slider_m
         if can_chain:
             chain_len = rng.choices([2, 3, 4][:max_chain - 1], weights=weights[:max_chain - 1])[0]
             nodes = circles[i:i + chain_len]
-            result.append(make_slider_chain(nodes, beat_length_ms, slider_multiplier))
+            gaps = [nodes[k + 1].time - nodes[k].time for k in range(len(nodes) - 1)]
+            evenly_spaced = chain_len >= 3 and (max(gaps) - min(gaps)) < 1.0
+            if evenly_spaced and rng.random() < BOUNCE_PROBABILITY:
+                result.append(make_bounce_slider(nodes[0], nodes[1], beat_length_ms, slider_multiplier,
+                                                   num_bounces=chain_len - 1, one_way_ms=gaps[0]))
+            else:
+                result.append(make_slider_chain(nodes, beat_length_ms, slider_multiplier))
             i += chain_len
         else:
             result.append(cur)
             i += 1
     return result
+
+
+def thin_for_tier(objects: list[HitObject], tier: str, beat_length_ms: float, offset_ms: float,
+                   measure_length_ms: float, energy_at, rng: random.Random) -> list[HitObject]:
+    """Delete objects for an easier tier, using the exact same category-
+    based rule make_easy.py's own thin_by_deletion applies to the main
+    pipeline's spread (TIER_DELETE_PROBABILITY: quarter/eighth-beat
+    circles thinned hardest, half-beat less, whole-beat rarely, sliders
+    their own rate) plus its deterministic enforce_min_gap pass -- just
+    without either one's cascading re-snap machinery, since here every
+    tier gets its own fresh apply_style.py pass afterward (see main()),
+    which repositions every survivor from scratch anyway. "insane" always
+    returns `objects` untouched (TIER_DELETE_PROBABILITY["insane"] is
+    None), the same as make_easy.py's own convention.
+    """
+    thinning = make_easy.TIER_DELETE_PROBABILITY[tier]
+    if thinning is None:
+        return list(objects)
+
+    measure_buckets = apply_style.compute_measure_energy_buckets(energy_at, offset_ms, measure_length_ms,
+                                                                   objects[-1].time)
+    eligible = (make_easy.find_repetitive_measures(measure_buckets)
+                if thinning["scope"] == "repetitive" else None)
+
+    def measure_of(t: float) -> int:
+        return int((t - offset_ms) // measure_length_ms)
+
+    def category_of(o: HitObject) -> str:
+        return "slider" if o.is_slider else make_easy.classify_beat_position(o.time, offset_ms, beat_length_ms)
+
+    n = len(objects)
+    kept: list[HitObject] = []
+    for i, obj in enumerate(objects):
+        can_delete = (0 < i < n - 1 and (eligible is None or measure_of(obj.time) in eligible)
+                      and not is_on_downbeat(obj.time, offset_ms, measure_length_ms))
+        if can_delete and rng.random() < thinning[category_of(obj)]:
+            continue
+        kept.append(obj)
+
+    # Deterministic minimum-gap pass, same idea as make_easy.py's own
+    # enforce_min_gap -- the probabilities above can, by chance, still
+    # leave two survivors closer than this tier should ever allow.
+    min_gap_ms = beat_length_ms * thinning["min_gap_beats"] - 1.0
+    m = len(kept)
+    final: list[HitObject] = []
+    for i, obj in enumerate(kept):
+        if (final and 0 < i < m - 1 and (obj.time - final[-1].time) < min_gap_ms
+                and not is_on_downbeat(obj.time, offset_ms, measure_length_ms)):
+            continue
+        final.append(obj)
+    return final
+
+
+def build_tier(tier: str, objects: list[HitObject], bm, args, rng: random.Random, energy_at,
+               output_path: str, version: str, circle_size: float, approach_rate: float,
+               hp_drain: float | None, overall_difficulty: float | None, spacing: float) -> None:
+    """Thin `objects` for `tier` (a no-op for "insane"), then position the
+    survivors with their own fresh apply_style.py pass -- rather than
+    deriving from an already-styled Insane map the way make_easy.py's own
+    thin-and-re-snap approach does -- so every tier's jump distances and
+    curve shapes are apply_style.py's own real output for that tier's own
+    (scaled-down, see TIER_SPACING_SCALE) --spacing, not a rescaled copy
+    of Insane's. That also means a lower tier's much bigger circles never
+    inherit Insane's tighter spacing, which was reading as "too spacey" on
+    Easy, and gives every tier the exact same off-screen-safe positioning
+    apply_style.py already guarantees for Insane, instead of only Insane
+    actually running it.
+    """
+    beat_length_ms = bm.beat_length
+    slider_multiplier = bm.slider_multiplier
+    offset_ms = bm.offset
+    measure_length_ms = beat_length_ms * 4.0
+
+    thinned = thin_for_tier(objects, tier, beat_length_ms, offset_ms, measure_length_ms, energy_at, rng)
+    if len(thinned) < 2:
+        raise RuntimeError(f"Tier '{tier}' thinned down to fewer than two objects -- lower its deletion odds.")
+    recompute_combos(thinned, offset_ms, measure_length_ms)
+
+    obj_energy = np.array([energy_at(o.time) for o in thinned])
+    q_high = float(np.quantile(obj_energy, 0.75))
+    q_climax = float(np.quantile(obj_energy, 0.92))
+    assign_hitsounds(thinned, energy_at, offset_ms, measure_length_ms, q_high, q_climax)
+
+    tier_bm = read_osu(args.beatmap)
+    tier_bm.hit_objects = thinned
+    tier_bm.metadata["Version"] = version
+    tier_merged_path = output_path + ".merged.osu"
+    os.makedirs(os.path.dirname(os.path.abspath(tier_merged_path)) or ".", exist_ok=True)
+    write_osu(tier_bm, tier_merged_path)
+
+    old_argv = sys.argv
+    try:
+        sys.argv = ["apply_style.py", tier_merged_path, "--output", output_path, "--audio", args.audio,
+                    "--version", version, "--seed", str(rng.randrange(2**32)),
+                    "--curviness", str(args.curviness), "--spacing", str(spacing),
+                    # apply_style.py's own default (0.1) treats most fast
+                    # runs as ordinary flow, only occasionally reading as a
+                    # deliberate stream -- appropriate for the main
+                    # pipeline, where a fast run can show up incidentally.
+                    # Here a fast (quarter-beat-or-closer) run of 4+ circles
+                    # is never incidental: generate_base_beatmap_v2.py only
+                    # ever produces one via its own climax/intense tiers or
+                    # a deliberately sparse embellishment chain (see
+                    # add_embellishment_chains) -- always deliberate, so it
+                    # should always read as one gesture (and, combined with
+                    # --stack-probability's own 1.0 default, always stack
+                    # on the exact same spot).
+                    "--stream-frequency", "1.0"]
+        apply_style.main()
+    finally:
+        sys.argv = old_argv
+        os.remove(tier_merged_path)
+
+    styled_bm = read_osu(output_path)
+    styled_bm.difficulty["CircleSize"] = f"{circle_size:.1f}"
+    styled_bm.difficulty["ApproachRate"] = f"{approach_rate:.1f}"
+    if hp_drain is not None:
+        styled_bm.difficulty["HPDrainRate"] = f"{hp_drain:.1f}"
+    if overall_difficulty is not None:
+        styled_bm.difficulty["OverallDifficulty"] = f"{overall_difficulty:.1f}"
+    write_osu(styled_bm, output_path)
+    print(f"Wrote {output_path}")
 
 
 def main() -> None:
@@ -142,6 +303,13 @@ def main() -> None:
                          help="CircleSize written into the final output (default 4.5).")
     parser.add_argument("--approach-rate", type=float, default=8.4,
                          help="ApproachRate written into the final output (default 8.4).")
+    parser.add_argument("--hard-output", default=None,
+                         help="Also generate a Hard tier here -- thinned from the same merge and given "
+                              "its own apply_style.py pass (its own scaled-down --spacing and Difficulty "
+                              "settings; see TIER_SPACING_SCALE/make_easy.TIER_TARGET), not derived from "
+                              "--output the way make_easy.py's own spread works. Omit to skip it.")
+    parser.add_argument("--normal-output", default=None, help="Same as --hard-output, for Normal.")
+    parser.add_argument("--easy-output", default=None, help="Same as --hard-output, for Easy.")
     parser.add_argument("--seed", type=int, default=None,
                          help="Random seed. Omit for a different result every run; pass a fixed value "
                               "(printed on every run) to reproduce it later.")
@@ -205,34 +373,31 @@ def main() -> None:
     if keep_merged:
         print(f"Wrote {merged_path}")
 
-    # apply_style.py does the actual positioning -- distance-snap spacing
-    # between every pair of objects, playfield-bounds clamping, and (for
-    # any leftover fast circle runs the merge above didn't happen to
-    # absorb into a slider) its own stream/stack handling. All of that is
-    # already solved there; re-running it against the merged result is
-    # simpler and more robust than reimplementing any part of it here.
-    old_argv = sys.argv
-    try:
-        sys.argv = ["apply_style.py", merged_path, "--output", args.output, "--audio", args.audio,
-                    "--version", args.version, "--seed", str(args.seed),
-                    "--curviness", str(args.curviness), "--spacing", str(args.spacing)]
-        apply_style.main()
-    finally:
-        sys.argv = old_argv
-        if not keep_merged:
-            os.remove(merged_path)
+    if not keep_merged:
+        os.remove(merged_path)
 
-    # apply_style.py never touches Difficulty settings -- generate_base_
-    # beatmap_v2.py's own defaults (CS 4, AR 8, via beatmap_utils.py's
-    # default_metadata) carry straight through otherwise. Patched here
-    # rather than there since these are specific to this pathway's own
-    # top ("Insane"-equivalent) tier, not generate_base_beatmap_v2.py's
-    # concern.
-    styled_bm = read_osu(args.output)
-    styled_bm.difficulty["CircleSize"] = f"{args.circle_size:.1f}"
-    styled_bm.difficulty["ApproachRate"] = f"{args.approach_rate:.1f}"
-    write_osu(styled_bm, args.output)
-    print(f"Wrote {args.output}")
+    # Each tier -- Insane (--output, always) plus whichever of Hard/Normal/
+    # Easy were asked for -- gets its own thin-then-apply_style.py pass
+    # (see build_tier): every tier's positions, jump distances and curve
+    # shapes are apply_style.py's own real output for that tier's own
+    # (scaled-down below Insane) --spacing, rather than Insane's own
+    # already-styled positions rescaled/resnapped the way make_easy.py's
+    # spread works for the main pipeline. That gives every tier the exact
+    # same off-screen-safe positioning apply_style.py already guarantees,
+    # and never leaves a bigger-circled lower tier stuck with Insane's own
+    # (comparatively tight) jump distance.
+    tier_outputs = [("insane", args.output, args.version, args.circle_size, args.approach_rate, None, None)]
+    for tier, tier_output in (("hard", args.hard_output), ("normal", args.normal_output), ("easy", args.easy_output)):
+        if tier_output is None:
+            continue
+        target = make_easy.TIER_TARGET[tier]
+        tier_outputs.append((tier, tier_output, tier.capitalize(), target["CircleSize"], target["ApproachRate"],
+                              target["HPDrainRate"], target["OverallDifficulty"]))
+
+    for tier, tier_output, version, circle_size, approach_rate, hp_drain, overall_difficulty in tier_outputs:
+        spacing = args.spacing * TIER_SPACING_SCALE[tier]
+        build_tier(tier, merged, bm, args, rng, energy_at, tier_output, version, circle_size, approach_rate,
+                   hp_drain, overall_difficulty, spacing)
 
 
 if __name__ == "__main__":

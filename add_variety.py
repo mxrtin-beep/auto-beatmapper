@@ -173,6 +173,16 @@ def assign_hitsounds(objects: list[HitObject], energy_at, offset_ms: float, meas
     Base Map v2 pathway) — a map with every object left on the default
     "normal" sample reads as broken/unfinished to any checker.
 
+    Decided once per whole beat, not once per object: checking the
+    reference set (example/keha_backstabber/) found every hitsound change
+    lines up with a whole- or half-beat position, never switching between
+    two objects that share the same whole beat, and a real accent (clap/
+    finish) tends to land on one consistent beat of the bar (e.g. the
+    backbeat) rather than flickering note to note the way sampling energy
+    per-object could when it hovers right at a quantile threshold. All
+    objects within the same beat share one hitsound, decided from that
+    beat's own energy (sampled at its start) and whether it's a downbeat.
+
     A bouncing slider only accents its head — repeating the same clap/
     finish on every one of a dozen rapid reversals is jarring rather than
     emphatic, so its repeats and tail stay a plain normal sample instead.
@@ -181,18 +191,25 @@ def assign_hitsounds(objects: list[HitObject], energy_at, offset_ms: float, meas
     to a checker — at least a soft whistle is forced often enough that
     never happens, even where the energy alone wouldn't have earned one.
     """
+    beat_length_ms = measure_length_ms / 4.0
     MAX_MS_WITHOUT_ACCENT = measure_length_ms
     last_accent_time = None
+    beat_hitsound: dict[int, int] = {}
     for obj in objects:
-        e = energy_at(obj.time)
-        on_downbeat = is_on_downbeat(obj.time, offset_ms, measure_length_ms)
-        hs = hitsound_for(e, on_downbeat, q_high, q_climax)
-        if hs == HS_NORMAL and (last_accent_time is None
-                                 or obj.time - last_accent_time > MAX_MS_WITHOUT_ACCENT):
-            hs = HS_WHISTLE
+        beat_idx = int(round((obj.time - offset_ms) / beat_length_ms))
+        if beat_idx not in beat_hitsound:
+            beat_time = offset_ms + beat_idx * beat_length_ms
+            e = energy_at(beat_time)
+            on_downbeat = is_on_downbeat(beat_time, offset_ms, measure_length_ms)
+            hs = hitsound_for(e, on_downbeat, q_high, q_climax)
+            if hs == HS_NORMAL and (last_accent_time is None
+                                     or beat_time - last_accent_time > MAX_MS_WITHOUT_ACCENT):
+                hs = HS_WHISTLE
+            beat_hitsound[beat_idx] = hs
+            if hs != HS_NORMAL:
+                last_accent_time = beat_time
+        hs = beat_hitsound[beat_idx]
         obj.hitsound = hs
-        if hs != HS_NORMAL:
-            last_accent_time = obj.time
         if obj.is_slider:
             if obj.slides > 1:
                 obj.edge_hitsounds = [hs] + [HS_NORMAL] * obj.slides

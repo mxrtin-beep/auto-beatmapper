@@ -50,7 +50,6 @@ from tkinter import filedialog, messagebox, ttk
 import add_sliders_v2
 import beatmap_report
 import generate_base_beatmap_v2
-import make_easy
 from beatmap_stats import compute_stats
 from build_osz import build_osz
 from gui import BG, BG_ENTRY, FONT_MONO, PAD_INNER, PAD_OUTER, TextRedirector, _configure_style, _open_path
@@ -211,11 +210,10 @@ class App:
         # --- Difficulties section ---
         diff_panel = self._panel(form, "Difficulties")
         ttk.Label(diff_panel,
-                  text="Styled is always generated. Checking any of Hard/Normal/Easy derives it "
-                       "from Styled the same way main.py's own pipeline derives its spread "
-                       "(make_easy.py) -- thinning density and easing Difficulty settings (bigger "
-                       "circles, lower HP drain, lower approach rate) without ever risking a "
-                       "timing error.", style="Hint.TLabel").grid(
+                  text="Insane is always generated. Checking any of Hard/Normal/Easy thins it down "
+                       "and gives that tier its own real positioning pass (its own jump distance and "
+                       "Difficulty settings -- bigger circles, lower HP drain, lower approach rate), "
+                       "not just a rescaled copy of Insane's.", style="Hint.TLabel").grid(
             row=0, column=0, columnspan=4, sticky="w", padx=PAD_INNER, pady=(PAD_INNER, 6))
         self.difficulty_vars: dict[str, tk.BooleanVar] = {}
         for i, tier in enumerate(("Hard", "Normal", "Easy")):
@@ -385,7 +383,8 @@ class App:
                          "--artist", self.artist_var.get().strip() or "Unknown Artist",
                          "--creator", self.creator_var.get().strip() or "auto-beatmapper",
                          "--version", CIRCLES_VERSION,
-                         "--intensity", f"{self._actual('--intensity'):.3f}"]
+                         "--intensity", f"{self._actual('--intensity'):.3f}",
+                         "--seed", str(seed)]
             for p in TIMING_PARAMS:
                 value = self.entry_vars[p.flag].get().strip()
                 if value:
@@ -393,6 +392,16 @@ class App:
             sys.argv = ["generate_base_beatmap_v2.py"] + base_argv
             generate_base_beatmap_v2.main()
 
+            # Difficulty spread: Insane (--output, always) plus whichever of
+            # Hard/Normal/Easy are checked, each with its own
+            # thin-then-apply_style.py pass (add_sliders_v2.py's build_tier)
+            # rather than derived from Insane's own already-styled positions
+            # the way make_easy.py's spread works for the main pipeline --
+            # every tier gets its own real apply_style.py output (and its
+            # own, scaled-down --spacing for the easier tiers), instead of
+            # a lower tier inheriting Insane's tighter jump distance on top
+            # of its own much bigger circles.
+            tier_paths: dict[str, str] = {}
             sliders_argv = [circles_path, audio, "--output", styled_path, "--version", STYLED_VERSION,
                              "--chain-probability", f"{self._actual('--chain-probability'):.3f}",
                              "--slider-length-bias", f"{self._actual('--slider-length-bias'):.3f}",
@@ -406,27 +415,14 @@ class App:
             # apply_style.py is done reading it.
             if keep_intermediate:
                 sliders_argv += ["--merged-output", sliders_path, "--merged-version", SLIDERS_VERSION]
-            sys.argv = ["add_sliders_v2.py"] + sliders_argv
-            add_sliders_v2.main()
-
-            # Difficulty spread: Hard/Normal/Easy, each derived straight
-            # from Styled via make_easy.py -- the exact same module and
-            # logic main.py's own pipeline already uses to thin density
-            # and ease Difficulty settings (bigger circles, lower HP,
-            # lower approach rate) without ever risking a timing error.
-            # Styled itself keeps its own CS/AR (see add_sliders_v2.py),
-            # not make_easy.py's own "insane" target -- this pathway's top
-            # tier has its own explicit defaults, independent of the main
-            # pipeline's.
-            tier_paths: dict[str, str] = {}
-            for i, tier in enumerate(("Hard", "Normal", "Easy")):
+            for tier in ("Hard", "Normal", "Easy"):
                 if not self.difficulty_vars[tier].get():
                     continue
                 tier_path = os.path.join(outdir, f"{title} [{tier}].osu")
-                sys.argv = ["make_easy.py", styled_path, "--audio", audio, "--tier", tier.lower(),
-                            "--output", tier_path, "--seed", str(seed + 1 + i)]
-                make_easy.main()
+                sliders_argv += [f"--{tier.lower()}-output", tier_path]
                 tier_paths[tier] = tier_path
+            sys.argv = ["add_sliders_v2.py"] + sliders_argv
+            add_sliders_v2.main()
 
             if self.report_var.get():
                 # Compared against Backstabber's Insane -- the closest

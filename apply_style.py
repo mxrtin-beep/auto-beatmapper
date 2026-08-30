@@ -667,6 +667,8 @@ def main() -> None:
     # a run at all, so the boost applies leaving one too, not just entering.
     STREAM_TRANSITION_BOOST = 1.4
     was_in_stream = False
+    last_stream_mode = None  # the mode ("stack"/"line"/"flow") the just-finished run used, if any
+    last_stack_anchor = None  # that run's stack spot, if it was a "stack" run — see leaving_stream below
 
     # Slider shape consistency within a combo: once the *first* slider in a
     # combo lands on straight or curved, every later slider in that same
@@ -714,6 +716,15 @@ def main() -> None:
         leaving_stream = mode is None and was_in_stream
         boost = STREAM_TRANSITION_BOOST if (entering_stream or leaving_stream) else 1.0
 
+        if mode is not None:
+            # Tracks which mode (and, for "stack", which spot) the run this
+            # object belongs to uses — read once, right as the run ends
+            # (see leaving_stream below), then cleared, so a stale value
+            # from several runs back can never wrongly re-fire once a
+            # "line"/"flow" run has come and gone since.
+            last_stream_mode = mode
+            last_stack_anchor = stack_anchor if mode == "stack" else None
+
         if mode == "stack":
             if stack_anchor is None:
                 # First member of this stack run: it still moves normally
@@ -734,6 +745,7 @@ def main() -> None:
             else:
                 # Every other circle in this run: hold the exact same spot.
                 cur_x, cur_y = stack_anchor
+            last_stack_anchor = stack_anchor  # this run's just-established anchor, for leaving_stream below
         elif mode == "line":
             # The whole run moves along one fixed direction, decided once
             # when the run is first entered, so consecutive circles
@@ -769,6 +781,16 @@ def main() -> None:
             new_x, new_y, _ = place_at_distance(cur_x, cur_y, spacing, line_run_angle)
             cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
             cur_angle = line_run_angle
+        elif leaving_stream and last_stream_mode == "stack" and last_stack_anchor is not None:
+            # The very first object right after a "stack" run holds the
+            # exact same spot as the stack itself, one time only — a
+            # stack (all zero px apart) reads as one held-in-place gesture,
+            # and having whatever immediately follows it jump away right
+            # on its heels undercuts that read; the object *after* this
+            # one goes back to normal flow. One-shot: cleared below so a
+            # second stream ending later doesn't keep re-triggering it.
+            cur_x, cur_y = last_stack_anchor
+            last_stack_anchor = None
         else:
             # Outside a stream: normal distance-snap + motif-driven flow
             # (plus the transition boost on the one gap right after a
