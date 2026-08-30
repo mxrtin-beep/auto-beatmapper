@@ -186,16 +186,22 @@ def _emit_climax_run(kept_times: list[float], climax_times: set[float], start_be
     climax_times.update(new_times)
 
 
-def _climax_covered_ranges(tiers: list[str]) -> list[tuple[int, int]]:
+def _climax_covered_ranges(tiers: list[str], max_span_beats: float = MEASURE_BEATS) -> list[tuple[int, int]]:
     """Beat-index ranges [start, end] (inclusive) that climax bursts end up
     covering — `start` is always a measure downbeat (a multiple of
     MEASURE_BEATS from the very first beat), regardless of which beat
-    within that measure first classified as climax. Two runs are merged
-    into a single covered range if the second's own start already falls
-    inside the first's (forced, measure-rounded) span — e.g. one climax
-    beat near a measure's end forces coverage into the *next* measure,
-    which might itself contain another, separately-detected climax run;
-    without merging, that would try to cover the same ground twice.
+    within that measure first classified as climax.
+
+    `max_span_beats` caps how far any *one* burst's own coverage can
+    reach from its own start — without this, a song staying loud for many
+    consecutive measures produced one continuous, ever-growing burst with
+    no upper bound at all (the "nonstop" symptom at high --intensity,
+    where eighth-beat spacing makes an uncapped burst read as genuinely
+    relentless rather than just a longer run). Once a burst hits the cap,
+    whatever climax-tier beats follow don't get folded into it or start a
+    new burst immediately — scanning resumes a full measure past this
+    burst's own end, giving at least one measure of cooldown (ordinary
+    per-beat placement, not silence) before a fresh burst can start.
 
     This has to be computed as a first pass over the *raw* per-beat tiers,
     entirely separate from actually placing anything: a burst's start is
@@ -220,19 +226,25 @@ def _climax_covered_ranges(tiers: list[str]) -> list[tuple[int, int]]:
         j = i
         while j + 1 < n and tiers[j + 1] == "climax":
             j += 1
-        if covered and i <= covered[-1][1]:
-            start, prev_end = covered[-1]
-            covered[-1] = (start, _climax_covered_end(start, max(prev_end, j)))
+
+        start = (i // MEASURE_BEATS) * MEASURE_BEATS
+        capped_run_end = min(j, start + int(max_span_beats) - 1)
+        end = _climax_covered_end(start, capped_run_end)
+        covered.append((start, end))
+
+        if j > capped_run_end:
+            # The underlying climax-tier run kept going past the cap --
+            # resume one full measure past this burst's own end, so a
+            # fresh burst can't pick right back up on the very next beat.
+            i = end + MEASURE_BEATS
         else:
-            start = (i // MEASURE_BEATS) * MEASURE_BEATS
-            covered.append((start, _climax_covered_end(start, j)))
-        i = j + 1
+            i = j + 1
     return covered
 
 
 def build_intensity_grid(offset_seconds: float, bpm: float, duration_seconds: float,
                           energy_at, q_silent: float, q_quiet: float, q_intense: float, q_climax: float,
-                          smoothing_beats: float = 2.0) -> tuple[list[float], set[float]]:
+                          smoothing_beats: float = 2.0, intensity: float = 0.5) -> tuple[list[float], set[float]]:
     """Return hit-object times (ms), one whole beat classified at a time —
     every beat gets exactly one intensity tier, and every circle in that
     beat follows that same tier's subdivision rate for the beat's entire
@@ -268,7 +280,11 @@ def build_intensity_grid(offset_seconds: float, bpm: float, duration_seconds: fl
     smoothed = smooth_slot_energy(raw_energy, smoothing_window)
     tiers = [classify_intensity(e, q_silent, q_quiet, q_intense, q_climax) for e in smoothed]
 
-    covered_ranges = _climax_covered_ranges(tiers)
+    # One measure at intensity<=0.5, gradually up to two measures by
+    # intensity=1.0 -- how far a single climax burst is allowed to span
+    # before a cooldown measure is forced (see _climax_covered_ranges).
+    max_span_beats = MEASURE_BEATS * (1.0 + max(0.0, (intensity - 0.5) / 0.5))
+    covered_ranges = _climax_covered_ranges(tiers, max_span_beats=max_span_beats)
     covered_starts = dict(covered_ranges)
     covered_set = {b for start, end in covered_ranges for b in range(start, end + 1)}
 
@@ -285,9 +301,18 @@ def build_intensity_grid(offset_seconds: float, bpm: float, duration_seconds: fl
             i += 1  # consumed by an earlier burst's forced (measure-rounded) span; already emitted
             continue
 
-        if tiers[i] != "silent":
+        # A beat can be raw-classified "climax" and still land here,
+        # uncovered by any burst -- the deliberate cooldown gap
+        # _climax_covered_ranges leaves after a burst hits its own
+        # max_span_beats cap, so a fresh burst can't start on literally
+        # the very next beat. TIER_SUBDIVISION has no "climax" entry (it's
+        # normally handled entirely by a burst, see above), so treat a
+        # cooldown-gap climax beat as "intense" instead -- still busy, just
+        # not another full burst right on the last one's heels.
+        tier = "intense" if tiers[i] == "climax" else tiers[i]
+        if tier != "silent":
             t_ms = beat_times_ms[i]
-            subdivision = TIER_SUBDIVISION[tiers[i]]
+            subdivision = TIER_SUBDIVISION[tier]
             step_ms = (beat_seconds * 1000.0) / subdivision
             kept_times.extend(t_ms + k * step_ms for k in range(subdivision))
         i += 1
@@ -495,7 +520,7 @@ def main() -> None:
 
     times, climax_times = build_intensity_grid(offset_seconds, bpm, duration_seconds, energy_at,
                                                  q_silent, q_quiet, q_intense, q_climax,
-                                                 smoothing_beats=args.smoothing_beats)
+                                                 smoothing_beats=args.smoothing_beats, intensity=args.intensity)
     before_cap = len(times)
     times = cap_fast_run_span(times, beat_length_ms, quarter_beat_ms, protected_ms=climax_times)
     if before_cap != len(times):

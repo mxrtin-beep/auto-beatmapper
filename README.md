@@ -1,114 +1,58 @@
 # auto-beatmapper
 
-Automatically generates a full 4-difficulty [osu!](https://osu.ppy.sh/)
-beatmap set (`.osu`) from an MP3, through a pipeline of stages that each
-produce their own `.osu` file so you can inspect (or play) the map at
-every step.
+Automatically generates a full [osu!](https://osu.ppy.sh/) beatmap set
+(`.osu`) from an MP3, adapting *how dense* the map gets directly to the
+song's own local loudness — quiet sections stay sparse, loud sections get
+faster and busier — rather than a fixed rate reshaped after the fact.
+Three stages, each producing its own `.osu` file so you can inspect (or
+play) the map at every step.
 
 ## Pipeline
 
-1. **`generate_base_beatmap.py`** — analyzes the song to estimate its BPM and
-   offset (the time of the first beat) — every integer BPM near a rough
-   broadband guess is scored, at every possible phase, against how well a
-   beat grid lines up with a low-frequency ("kick drum") onset envelope,
-   giving a reliable BPM and a *close* offset; that offset is then refined
-   the way a mapper sets it by eye in the editor's waveform view — a
-   kick's amplitude rises fast and decays slowly, so the marker goes right
-   at the peak — by finding the actual local amplitude peak of the raw
-   (low-passed, same kick band) waveform near each grid beat and nudging
-   the offset by the median correction — then places a hit-circle on
-   every half beat for the whole track. Pure rhythm skeleton, no styling.
-   Pass `--bpm`/`--offset` (ms) to set either manually instead of
-   auto-detecting it — any value works for `--offset`, since it's wrapped
-   to the equivalent position within one beat (e.g. `-118` and `334` at
-   137 BPM name the same beat).
+1. **`generate_base_beatmap_v2.py`** — analyzes the song to estimate its
+   BPM and offset (the time of the first beat) — every integer BPM near a
+   rough broadband guess is scored, at every possible phase, against how
+   well a beat grid lines up with a low-frequency ("kick drum") onset
+   envelope, giving a reliable BPM and a *close* offset; that offset is
+   then refined the way a mapper sets it by eye in the editor's waveform
+   view — a kick's amplitude rises fast and decays slowly, so the marker
+   goes right at the peak — by finding the actual local amplitude peak of
+   the raw (low-passed, same kick band) waveform near each grid beat and
+   nudging the offset by the median correction. Pass `--bpm`/`--offset`
+   (ms) to set either manually instead of auto-detecting it — any value
+   works for `--offset`, since it's wrapped to the equivalent position
+   within one beat (e.g. `-118` and `334` at 137 BPM name the same beat).
 
-2. **`add_variety.py`** — takes a base beatmap and reshapes it using the
-   song's loudness (RMS energy) over time:
-   - quiet sections are thinned out to one object per full beat, and a
-     long (16s+) uninterrupted quiet stretch has its middle carved out
-     into a real break instead — a rest for the player, and truer to how
-     the song actually ebbs and flows, than clicking through minutes of
-     near-nothing,
-   - normal sections get some adjacent circle pairs combined into sliders,
-   - intense sections get extra circles inserted on quarter/eighth-beat
-     subdivisions.
+   Circles are then placed at a rate that tracks the song's own loudness,
+   classified once per whole beat (never flickering between rates
+   mid-beat, so a busy beat is busy *all the way through*):
 
-   Objects are never allowed to overlap in time (a slider "occupies" the
-   timeline for its whole duration).
+   - Silent/very quiet -> no circles at all (nothing to click to).
+   - Quiet             -> one circle per whole beat.
+   - Normal            -> one circle per half beat.
+   - Intense           -> one circle per quarter beat (a 16th note).
+   - Climax            -> one circle per eighth beat (a 32nd note) — the
+     densest tier there is, one subdivision finer than "intense".
 
-3. **`apply_style.py`** — repositions every object (without changing its
-   timing, type, or count) following common mapping rules of thumb:
-   distance snap (on-screen distance for a half-beat-or-larger gap exactly
-   matches what a slider spanning that time would travel), a fast
-   quarter-beat-or-less run of circles reading as a deliberate stack or an
-   overlapping line rather than a zigzag blob (never a mix of the two
-   within one run), a small set of repeating turn-angle patterns keyed to
-   each measure's own energy level — so a verse or chorus repeating the
-   song's structure also repeats the same visual pattern — and a slow
-   "wander" target that keeps the whole path migrating around the
-   playfield instead of orbiting one local spot. This is the pipeline's
-   hardest difficulty output, Insane.
-
-4. **`make_easy.py`** *(runs 4 times by default, once per tier; skip with
-   `--no-spread` to get just Insane)* — derives Hard, Normal, and Easy from
-   Insane by deleting objects, nothing else: no merging, no reshaping. An
-   object either survives exactly as apply_style.py placed it, or it's
-   gone entirely — never partially edited into something new, which used
-   to be exactly what produced "bad spacing" complaints from checkers (a
-   merged slider's geometry doesn't automatically read as correctly
-   spaced the way two untouched, already-validated objects do). Circles on
-   a quarter/eighth-beat subdivision are deleted first and most often —
-   the fast subdivisions a lower tier has the least business keeping —
-   then half-beat circles, then (rarely) whole-beat circles or whole
-   sliders, at a tier-scaled probability per category. A downbeat is never
-   deleted, so `regularize_hitsounds` can always find something to accent
-   every measure (only ever *adding* an accent there, never silencing an
-   existing one elsewhere) — no gap without a hitsound. A deterministic
-   final pass also clears any pair still closer than the tier's own
-   minimum gap (a coin flip can, by chance, still leave one too many close
-   together, and that reads as a real visual overlap at a lower tier's
-   larger circle size). Hard only thins the song's *repetitive* sections
-   (a verse/chorus that recurs), lightly; Normal and Easy thin everywhere,
-   progressively more. Also derives Insane itself (no thinning, just
-   Difficulty-setting clamping) from the Styled output, so all four tiers
-   go through the same clamping logic. SliderMultiplier is never touched
-   at any tier — a real hand-mapped Easy's long, slow-*reading* sliders
-   (see `example/keha_backstabber/`) actually use a *higher* slider
-   velocity (more on-screen distance per beat) than Insane's, not a lower
-   one.
-
-`beatmap_utils.py` holds the shared `.osu` parsing/writing code and data
-structures used by every stage.
-
-## Intensity-adaptive generator
-
-A second, independent way to generate a map, through its own pipeline and
-its own GUI (`gui_v2.py`) — not a mode of `main.py`/`gui.py` above, and
-not fed by or into that pipeline at any stage. Where the pipeline above
-always places one circle per half beat and leaves density entirely to
-`add_variety.py`'s later reshaping, this one adapts *how often* a circle
-lands directly to the song's own local loudness from the very first
-stage:
-
-1. **`generate_base_beatmap_v2.py`** — one circle every whole beat in a
-   quiet stretch, up to one every eighth beat (a 32nd note) in the
-   loudest. Classification happens once per whole beat (not per finer
-   subdivision), so a beat is busy *all the way through*, never flickering
-   between rates mid-beat. A single `--intensity` knob (0-1) shifts how
-   much of the song reaches each rate; every rate stays reachable at any
-   setting. The densest tier, "climax", isn't just a louder version of the
-   next tier down — a whole run of consecutive loud beats becomes one
-   burst anchored to its own measure's downbeat, not an isolated beat that
-   can start on a musically weak position mid-measure. Sparingly, in the
-   louder half of that range, an ordinary gap between two circles can also
+   A single `--intensity` knob (0-1) shifts how much of the song reaches
+   each rate; every rate stays reachable at any setting, just how *much*
+   of the song lands in each one shifts. Climax isn't just a louder
+   version of the next tier down — a whole run of consecutive loud beats
+   becomes one burst anchored to its own measure's downbeat (not an
+   isolated beat that can start on a musically weak position mid-measure),
+   capped to one measure's span by default and gradually up to two
+   measures at the highest `--intensity` settings, with at least one
+   measure of cooldown (ordinary placement, not silence) forced before a
+   fresh burst can start — so a long loud stretch reads as several
+   distinct bursts, never one unbroken wall. Sparingly, in the louder half
+   of the intensity range, an ordinary gap between two circles can also
    get a short embellishment — a 5- or 7-note chain at quarter-beat (16th
    note) spacing — fit strictly inside room that's already there, never
    crowding what's on either side. A fast (quarter-beat-or-closer) run
-   never sprawls past a full beat, and leaves a full two-quarter-beat gap
-   before the next one picks back up, so back-to-back busy beats read as
-   two distinct bursts rather than one continuous run shifted by a single
-   slot.
+   also never sprawls past a full beat, and leaves a full two-quarter-beat
+   gap before the next one picks back up, so back-to-back busy beats read
+   as two distinct bursts rather than one continuous run shifted by a
+   single slot.
 
 2. **`add_sliders_v2.py`** — merges some adjacent circles into sliders
    (`--chain-probability` how often at all, `--slider-length-bias` how
@@ -118,60 +62,105 @@ stage:
    deliberate climax burst or embellishment chain — so it's always treated
    as one gesture: piled onto the exact same spot (0px apart), and the
    object immediately following it lands on that same spot too, once,
-   before normal flow resumes. Hitsounds are assigned once per whole beat
-   from local loudness and downbeat position (see below), and every
-   difficulty tier — Insane plus whichever of Hard/Normal/Easy you ask
-   for — gets its own real positioning pass: each tier is independently
-   thinned (the same category-based thinning `make_easy.py` uses for the
-   pipeline above) and then given its own `apply_style.py` run, with its
-   own scaled-down jump distance (a lower tier's bigger circles need to
-   travel less far to still feel comfortable), rather than a rescaled copy
-   of Insane's own already-styled positions.
+   before normal flow resumes.
+
+   Positioning — distance snap (on-screen distance for a gap exactly
+   matches what a slider spanning that time would travel), playfield
+   bounds, a fast run reading as a deliberate stack or overlapping line
+   rather than a zigzag blob, a small set of repeating turn-angle patterns
+   keyed to each measure's own energy level, and a slow "wander" target
+   that keeps the whole path migrating around the playfield instead of
+   orbiting one local spot — is handled by re-running `apply_style.py`
+   against the merged result.
+
+   Hitsounds are assigned once per whole beat from local loudness and
+   downbeat position (see below), and every difficulty tier — Insane plus
+   whichever of Hard/Normal/Easy you ask for — gets its own real
+   positioning pass: each tier is independently thinned (deleting objects
+   only, never merging or reshaping — a lower tier has less business
+   keeping a fast subdivision, thinned first and most often, then the
+   slower ones progressively less) and then given its own `apply_style.py`
+   run, with its own scaled-down jump distance (a lower tier's bigger
+   circles need to travel less far to still feel comfortable), rather than
+   a rescaled copy of Insane's own already-styled positions. Difficulty
+   settings (HP/CS/OD/AR) are set per tier from the same
+   `example/keha_backstabber/` reference set used throughout, so Insane
+   genuinely reads as the hardest difficulty and each tier down is a
+   deliberate step easier.
+
+`beatmap_utils.py` holds the shared `.osu` parsing/writing code and data
+structures used by every stage.
 
 ### Hitsounds
 
-Both pathways assign hitsounds the same way (`add_variety.py`'s
-`assign_hitsounds`, shared code): one decision per whole beat, not per
-object — checking a real community beatmap set
-(`example/keha_backstabber/`) found a hitsound change always lines up
-with a beat boundary, essentially never switching between two objects
-that share one. A bigger accent (clap/finish) lines up with a loud and/or
-downbeat moment; a long quiet stretch still gets an occasional forced
-whistle often enough that it never reads as "no hitsounds" to a checker.
+`assign_hitsounds` (in `add_variety.py`, shared code) decides one
+hitsound per whole beat, not per object — checking a real community
+beatmap set (`example/keha_backstabber/`) found a hitsound change always
+lines up with a beat boundary, essentially never switching between two
+objects that share one. A bigger accent (clap/finish) lines up with a
+loud and/or downbeat moment; a long quiet stretch still gets an
+occasional forced whistle often enough that it never reads as "no
+hitsounds" to a checker.
 
-The same reference set also showed a section's second or third pass —
-a verse or chorus repeating — mostly reusing its *first* pass's exact
+The same reference set also showed a section's second or third pass — a
+verse or chorus repeating — mostly reusing its *first* pass's exact
 accent pattern, not just landing in the same coarse loudness bracket
 independently each time (and often the same circle/slider layout too).
 `find_repeating_measure_map` detects that kind of repeat (the same
 windowed sequence of measure-loudness "buckets" recurring elsewhere in
-the song, the same way `make_easy.py` already detects a repetitive
-section for thinning) and, when a beat's measure repeats an earlier one,
-copies that earlier measure's own corresponding beat's hitsound instead
-of re-deriving it independently from that pass's own, merely similar
-energy.
+the song) and, when a beat's measure repeats an earlier one, copies that
+earlier measure's own corresponding beat's hitsound instead of
+re-deriving it independently from that pass's own, merely similar energy.
+
+`add_sliders_v2.py`'s own circle-vs-slider layout decisions reuse the
+same repeat map, best-effort: a repeated measure's chain lengths and
+plain/bounce choices copy an earlier occurrence's, falling back to a
+fresh independent decision wherever this occurrence's own actual data
+doesn't fit the replayed one (a chain crossing a measure boundary can
+leave a repeat's own circles slightly out of alignment with the
+original, for instance — the fallback just means that one decision rolls
+fresh instead of forcing a bad fit). Pass `--no-reuse-layout` (or uncheck
+"Reuse a repeated section's own circle/slider layout" in the GUI) to
+revert to the original, fully independent-per-run behavior.
+
+## Usage
 
 ### GUI
 
-`gui_v2.py` is a separate desktop window from `gui.py`, with its own
-smaller set of knobs — Intensity, Slider vs. circle mix, Slider length,
-Slider curviness, Jump distance — each shown as a plain 0-1 dial that
-defaults to the middle, but the middle doesn't have to mean the literal
-middle of the underlying range: every dial is tuned so 0.5 already gives
-a good-sounding result, then scales further toward either end from there.
+`gui_v2.py` is a desktop window — a file picker for the song, a field or
+dial for every knob below, and a Generate button:
+
+```bash
+pip install -r requirements.txt
+python3 gui_v2.py
+```
+
+It streams the pipeline's own console output into a log box so you can
+watch each stage run, and — if "Open the finished map when done" is
+checked — opens the resulting `.osz` (or, without `--osz`, the Insane
+`.osu`) with whatever your OS has registered for that file type.
+
+Every knob — Intensity, Slider vs. circle mix, Slider length, Slider
+curviness, Jump distance — is shown as a plain 0-1 dial that defaults to
+the middle, but the middle doesn't have to mean the literal middle of the
+underlying range: every dial is tuned so 0.5 already gives a
+good-sounding result, then scales further toward either end from there.
 A Difficulties section lets you check any of Hard/Normal/Easy alongside
 the always-generated Insane.
 
-```bash
-python3 gui_v2.py
-```
+Built with Tkinter, which ships with the Python standard library on
+Windows and macOS installers; on Linux it's usually a separate distro
+package (`sudo apt install python3-tk` on Debian/Ubuntu, `sudo dnf
+install python3-tkinter` on Fedora).
 
 ### Command line
 
 ```bash
+pip install -r requirements.txt
+
 python3 generate_base_beatmap_v2.py song.mp3 \
     --output "out/Song (Circles).osu" --intensity 0.65 \
-    --title "Song Title" --artist "Artist Name"
+    --title "Song Title" --artist "Artist Name" --creator "Your Name"
 
 python3 add_sliders_v2.py "out/Song (Circles).osu" song.mp3 \
     --output "out/Song [Insane].osu" \
@@ -181,78 +170,19 @@ python3 add_sliders_v2.py "out/Song (Circles).osu" song.mp3 \
     --chain-probability 0.3 --slider-length-bias 0.4 --curviness 0.5 --spacing 1.9
 ```
 
-## Usage
+`add_sliders_v2.py` also forwards `--curviness`, `--spacing`, and `--seed`
+straight through to `apply_style.py` (see below) for each tier it
+generates, at that tier's own scaled-down spacing.
 
-### GUI
-
-`gui.py` wraps `main.py` in a desktop window — a file picker for the song,
-a field or checkbox for every argument below, and a Generate button:
-
-```bash
-pip install -r requirements.txt
-python3 gui.py
-```
-
-It runs the same pipeline `main.py` does (there's no separate logic to
-keep in sync), streams the pipeline's own console output into a log box
-so you can watch each stage run, prints a statistics report on the
-finished Insane difficulty once generation completes (see
-`beatmap_stats.py` below), and — if "Open the finished map when done" is
-checked — opens the resulting `.osz` (or, without `--osz`, the Insane
-`.osu`) with whatever your OS has registered for that file type.
-
-The Difficulties section lets you uncheck any of Easy/Normal/Hard/Insane
-— every tier is still generated internally (an easier tier is always
-derived from the one above it, so there's no way to skip one mid-spread),
-an unchecked one is just deleted from the result afterward, including
-being stripped back out of an already-built `.osz`.
-
-Built with Tkinter, which ships with the Python standard library on
-Windows and macOS installers; on Linux it's usually a separate distro
-package (`sudo apt install python3-tk` on Debian/Ubuntu, `sudo dnf
-install python3-tkinter` on Fedora).
-
-### Command line
-
-The easiest way to run the whole pipeline from a shell is `main.py`:
+To turn the resulting `.osu` file(s) into a `.osz` yourself: put them and
+the source MP3 (renamed to match `AudioFilename` in the map) in the same
+folder, zip it, and rename the zip's extension to `.osz` — or use
+`build_osz.py`:
 
 ```bash
-pip install -r requirements.txt
-
-python3 main.py song.mp3 --title "Song Title" --artist "Artist Name" --osz
+python3 build_osz.py song.mp3 "out/Song [Insane].osu" "out/Song [Hard].osu" \
+    "out/Song [Normal].osu" "out/Song [Easy].osu" --output "out/Song.osz"
 ```
-
-This writes, in `--outdir` (default `output/` — every song lands in the
-same flat directory, not a per-song subfolder; files are already
-distinguished by their title-prefixed names):
-
-- `<Song Title> [Easy].osu`, `[Normal].osu`, `[Hard].osu`, `[Insane].osu` —
-  the four finished difficulties, named the way a real, finished osu!
-  beatmap set names them (just the difficulty, in square brackets — no
-  pipeline-stage labels).
-
-The Base/Variety/Styled intermediate pipeline stages the four difficulties
-are derived from are internal working files, not difficulties themselves
-— always deleted once the four difficulties are derived from them,
-whether or not you pass `--osz`.
-
-With `--osz`, the four difficulties plus the MP3 are also bundled into
-`<Song Title>.osz` — drag that straight into osu! to import the full
-4-difficulty spread at once — and the four loose `.osu` files are deleted
-too, since everything they hold is already in the `.osz`; pass
-`--keep-osu-files` to keep them around alongside it.
-
-The full spread (Hard/Normal/Easy derived from Insane) is generated by
-default — pass `--no-spread` to skip that and produce only Insane:
-
-```bash
-python3 main.py song.mp3 --no-spread --osz
-```
-
-`main.py` also forwards `--spacing`, `--curviness`, `--stream-frequency`,
-`--stack-probability`, `--angle-jitter`, and `--temperature` straight
-through to `apply_style.py` (see below), and `--bpm`/`--offset` straight
-through to `generate_base_beatmap.py`, if you pass them.
 
 ### Re-styling without changing the rhythm
 
@@ -263,11 +193,8 @@ without regenerating the beatmap's rhythm at all, re-run just that stage
 with a new seed:
 
 ```bash
-python3 apply_style.py "out/Song (Variety).osu" \
-    --output "out/Song (Styled2).osu" --audio song.mp3 --seed 123
-
-# or, via main.py:
-python3 main.py song.mp3 --restyle-only "out/Song (Variety).osu" --seed 123
+python3 apply_style.py "out/Song (Circles).osu" \
+    --output "out/Song (Restyled).osu" --audio song.mp3 --seed 123
 ```
 
 A few `apply_style.py` flags tune *how* it restyles, independent of
@@ -297,19 +224,16 @@ recurs — the same seed always reproduces the same wobble.
   Turning this up gives more varied flow/angles without changing when
   anything is hit; turning it down makes the motif patterns read more
   rigidly.
-- `--stream-frequency F` (default `0.5`) — how often a fast (quarter-beat
-  -or-closer) run of notes becomes a deliberate *stream* at all — stacked
-  in one spot, or spread along a locked-in straight line — rather than
-  just following the ordinary motif-driven flow any other note would, one
-  at a time with no forced overlap or fixed direction (`0` = never a
-  stream, `1` = always one). This only controls *whether* a run streams,
-  not what it looks like when it does — see `--stack-probability` for
-  that. Any run longer than 3 is split into consecutive bursts of at most
-  3 regardless of this setting — each its own independent unit with its
-  own mode and its own entry/exit gap — so a chain of, say, 8 eighth-notes
-  never reads as one long pile, one long line, or (at `0`) one
-  undifferentiated wall of 8 individually-flowing notes either.
-- `--stack-probability P` (default `0.5`) — of whichever bursts
+- `--stream-frequency F` (default `0.5`, but `add_sliders_v2.py` always
+  forwards `1.0` — a fast run in this pathway is never incidental) — how
+  often a fast (quarter-beat-or-closer) run of notes becomes a deliberate
+  *stream* at all — stacked in one spot, or spread along a locked-in
+  straight line — rather than just following the ordinary motif-driven
+  flow any other note would, one at a time with no forced overlap or
+  fixed direction (`0` = never a stream, `1` = always one). This only
+  controls *whether* a run streams, not what it looks like when it does —
+  see `--stack-probability` for that.
+- `--stack-probability P` (default `1.0`) — of whichever bursts
   `--stream-frequency` already decided *are* a stream, the mix between
   piling into one stacked spot and spreading along a line (`0` = always
   line, `1` = always stack, whenever the burst is short enough to stack at
@@ -320,11 +244,11 @@ recurs — the same seed always reproduces the same wobble.
   overlap the ranking criteria's Hard-difficulty rule forbids ("objects
   1/2 of a beat apart or less must not fully overlap"); a burst failing
   that check is "line" instead whenever it streams. The single gap
-  entering a burst, and the single gap leaving one (including between two
-  consecutive bursts of the same long run, streaming or not), is also
-  widened a bit past ordinary distance snap, so a burst reads as a clearly
-  set-apart unit instead of bleeding into the normal flow — or the next
-  burst — on either side.
+  entering a burst, and the single gap leaving one, is also widened a bit
+  past ordinary distance snap, so a burst reads as a clearly set-apart
+  unit instead of bleeding into the normal flow — or the next burst — on
+  either side; the object immediately following a stack also lands on
+  that stack's own exact spot, once, before normal flow resumes.
 - `--curviness C` (default `0.5`) — how curvy the map feels, `0`-`1`. `0`
   makes almost every slider a straight line; `1` makes almost every
   slider a pronounced curve, and makes the bow of every curved slider
@@ -333,33 +257,18 @@ recurs — the same seed always reproduces the same wobble.
   from `--curviness` (seeded, so it's consistent across a run but varies
   section to section) — a section keeps reading as consistently curvy or
   consistently straight-and-bendy, the same way a repeating chorus reuses
-  the same motif.
+  the same motif. Straight-vs-curved is also locked once per combo — the
+  first slider in a combo rolls it, every later slider in that same combo
+  just inherits the choice, so a combo never mixes a straight slider with
+  a curved one back to back.
 
 ### Randomness / seeds
 
-`add_variety.py` and `apply_style.py` make a lot of small randomized
-choices (which eligible circle pairs become sliders, how the flow angle
-jitters) so running the pipeline twice on the same song gives you a
-different-feeling map each time. Every run prints the seed it used
-(`Using seed: 123456789`); pass `--seed 123456789` back in to reproduce
-that exact map again:
-
-```bash
-python3 main.py song.mp3 --seed 123456789 --osz
-```
-
-`main.py` picks one random seed per run and forwards it to both stages, so
-a single `--seed` value reproduces the whole pipeline's output.
-
-### Building a .osz from existing .osu files
-
-If you already have `.osu` file(s) — from a previous run, or hand-edited —
-and just want a playable package without regenerating anything:
-
-```bash
-python3 build_osz.py song.mp3 "out/Song (Base).osu" "out/Song (Variety).osu" \
-    "out/Song (Styled).osu" --output "out/Song.osz"
-```
+Both stages make a lot of small randomized choices (which eligible runs
+become sliders, how the flow angle jitters) so running the pipeline twice
+on the same song gives you a different-feeling map each time. Every run
+prints the seed it used (`Using seed: 123456789`); pass `--seed
+123456789` back in to reproduce that exact map again.
 
 ### Beatmap statistics
 
@@ -375,30 +284,8 @@ python3 beatmap_stats.py "out/Song [Insane].osu"
 ```
 
 Pass several paths to compare difficulties (or a real hand-mapped
-beatmap) side by side. The GUI runs this automatically against the
-Insane difficulty after every generation and prints the result in its
-log box.
-
-### Running the stages individually
-
-Each stage is also its own script, useful if you want to inspect or tweak
-the output of one stage before feeding it to the next:
-
-```bash
-python3 generate_base_beatmap.py song.mp3 \
-    --output "out/Song (Base).osu" \
-    --title "Song Title" --artist "Artist Name" --creator "Your Name"
-
-python3 add_variety.py "out/Song (Base).osu" song.mp3 \
-    --output "out/Song (Variety).osu"
-
-python3 apply_style.py "out/Song (Variety).osu" \
-    --output "out/Song (Styled).osu" --audio song.mp3
-```
-
-To turn any of those into a `.osz` yourself: put the `.osu` file(s) and the
-source MP3 (renamed to match `AudioFilename` in the map) in the same
-folder, zip it, and rename the zip's extension to `.osz`.
+beatmap) side by side. The GUI's statistics-report checkbox runs
+`beatmap_report.py` for a nicer PDF version of the same comparison.
 
 ## Ranking criteria compliance
 
@@ -417,52 +304,24 @@ that document:
   AR/OD/HP/CS to explicit per-tier values (taken from the same
   `example/keha_backstabber/` reference set, so Insane genuinely reads as
   the hardest difficulty — fast approach rate, tight timing window — and
-  each tier down is a deliberate step easier rather than every tier
-  clamping the same flat defaults into the middle of its own range),
-  clamped into each tier's own document range (`TIER_SETTINGS`) as a
-  safety net, not a relative shift from Insane's own settings.
-  SliderMultiplier is deliberately *not*
-  clamped, even though the document's Easy/Normal guideline says to avoid
-  slider velocity above 1.3 — a real reference Easy difficulty
-  (`example/keha_backstabber/`) uses a SliderMultiplier of 3.54, leaning
-  on long, slow-*reading* sliders rather than a cramped multiplier; that
-  concrete example took priority over the document's guideline here.
-- **Drain time spread** — deletion never touches the first or last object,
-  so `make_easy.py`'s assertion that each tier's first/last object time
-  exactly matches Insane's should always hold trivially.
+  each tier down is a deliberate step easier), clamped into each tier's
+  own document range (`TIER_SETTINGS`) as a safety net.
 - **Objects never off-screen, snapping, timing overlaps** — enforced
   throughout (playfield margin, `slider_length_for_gap`'s rounded-gap
-  derivation, `rounded_gap_ms`); see the pipeline stage docstrings. A
-  deterministic final pass in `make_easy.py` (`enforce_min_gap`) also
-  clears any remaining pair closer than a tier's own minimum gap, which
-  otherwise reads as a real visual overlap at that tier's larger circle
-  size even though the two objects' declared positions don't literally
-  coincide.
+  derivation, a slider curve's actual rendered arc — not just its control
+  points — checked against the playfield before it's ever used); see the
+  pipeline stage docstrings.
 - **Combo colours / hitsounds** — `beatmap_utils.default_metadata` sets
   three custom combo colours and every hittable edge gets an audible
-  hitsound (never silent); `make_easy.py`'s `regularize_hitsounds` only
-  ever *adds* a downbeat accent in a thinned measure, never removes an
-  existing one, so a tier that thins broadly (Normal/Easy) can't end up
-  with long silent-feeling stretches. Downbeats are also never deleted,
-  which is what guarantees regularize_hitsounds always has something to
-  accent every measure in the first place.
-- **Known gap**: the document's Easy/Normal-tier note-density guideline
-  ("mostly 1/1, 2/1, or slower") is closer than before but not fully met
-  — `make_easy.py` deletes whole objects only, and a downbeat is never
-  deleted, so a genuine downbeat-to-downbeat gap shorter than a full beat
-  at a fast tempo can survive even in Easy (verified rare: 3 of ~260
-  objects on the reference song). Spinner rules, skinning rules, and
-  BPM-scaling nuances aren't addressed — this tool doesn't generate
-  spinners or skin elements at all.
+  hitsound (never silent) via `assign_hitsounds` (see above), with a
+  forced occasional whistle so a long quiet stretch never reads as "no
+  hitsounds" to a checker.
+- Spinner rules, skinning rules, and BPM-scaling nuances aren't
+  addressed — this tool doesn't generate spinners or skin elements at all.
 
 ## Example output
 
-`output/Scar Tissue/` contains all three stages generated from Red Hot
-Chili Peppers' "Scar Tissue" (`songs/Scar Tissue.mp3`, not committed):
-
-- `Scar Tissue (Base).osu`
-- `Scar Tissue (Variety).osu`
-- `Scar Tissue (Styled).osu`
-
 `example/keha_backstabber/` holds a real community beatmap set (audio and
-images stripped out) used as the format reference while building this tool.
+images stripped out) used as the format reference while building this
+tool, and as the source of the analysis behind the hitsound/layout
+repetition behavior described above.

@@ -97,7 +97,8 @@ BOUNCE_PROBABILITY = 0.3
 
 def merge_into_sliders(circles: list[HitObject], beat_length_ms: float, slider_multiplier: float,
                         rng: random.Random, slider_length_bias: float, chain_probability: float = 0.8,
-                        max_gap_beats: float = 1.0) -> list[HitObject]:
+                        max_gap_beats: float = 1.0, offset_ms: float | None = None,
+                        measure_repeat_map: dict[int, int] | None = None) -> list[HitObject]:
     """Walk `circles` (sorted by time) and replace some adjacent runs of
     2-4 with a single chain slider spanning them, via add_variety.py's own
     make_slider_chain — identical mechanics to add_variety.py's normal-
@@ -118,10 +119,24 @@ def merge_into_sliders(circles: list[HitObject], beat_length_ms: float, slider_m
     unevenly-spaced run never qualifies — a bounce slider's repeats are
     all the same duration by construction, so it can only stand in for a
     run that's genuinely on one rhythmic grid already.
+
+    `measure_repeat_map` (see add_variety.py's find_repeating_measure_map;
+    pass `offset_ms` alongside it) makes a repeated measure's layout copy
+    an earlier occurrence's own choices — circle vs. chain, chain length,
+    plain chain vs. bounce — the same way assign_hitsounds already copies
+    a repeated measure's accent pattern, rather than every occurrence
+    rolling independently. Replay only ever reuses a *decision*, never
+    forces one that doesn't fit this occurrence's own actual data (not
+    enough eligible circles here to reach the same chain length, or this
+    occurrence isn't evenly spaced the way the original was for a bounce)
+    — a decision that doesn't fit is decided fresh instead, same as if no
+    repeat map were given at all. Pass `measure_repeat_map=None` (the
+    default) for the original, fully independent-per-run behavior.
     """
     weights = chain_len_weights(slider_length_bias)
     max_gap_ms = beat_length_ms * max_gap_beats + 1.0
     result: list[HitObject] = []
+    replayed_decisions: dict[tuple[int, int], tuple] = {}
     i, n = 0, len(circles)
     while i < n:
         cur = circles[i]
@@ -129,20 +144,52 @@ def merge_into_sliders(circles: list[HitObject], beat_length_ms: float, slider_m
         while (i + max_chain < n and max_chain < 4
                and circles[i + max_chain].time - circles[i + max_chain - 1].time <= max_gap_ms):
             max_chain += 1
-        can_chain = max_chain >= 2 and rng.random() < chain_probability
+
+        replay_key = None
+        replay = None
+        if measure_repeat_map is not None and offset_ms is not None:
+            # Eighth-beat (32nd-note) resolution -- the finest grid a
+            # circle can actually start on (see generate_base_beatmap_v2
+            # .py's own climax tier) -- not whole-beat: a chain can start
+            # on any quarter/eighth-beat offset within its measure, and
+            # rounding to the nearest whole beat would collide several
+            # different starting circles from the same busy beat onto one
+            # key, corrupting replay for all of them.
+            eighth_idx = round((cur.time - offset_ms) / beat_length_ms * 8.0)
+            measure_idx, slot_in_measure = divmod(eighth_idx, 32)
+            canonical_measure = measure_repeat_map.get(measure_idx, measure_idx)
+            if canonical_measure != measure_idx:
+                replay = replayed_decisions.get((canonical_measure, slot_in_measure))
+            replay_key = (measure_idx, slot_in_measure)
+
+        if replay is not None and replay[0] == "chain" and replay[1] <= max_chain:
+            chain_len, want_bounce = replay[1], replay[2]
+            can_chain = True
+        elif replay is not None and replay[0] == "circle":
+            chain_len, want_bounce = None, False
+            can_chain = False
+        else:
+            can_chain = max_chain >= 2 and rng.random() < chain_probability
+            chain_len = (rng.choices([2, 3, 4][:max_chain - 1], weights=weights[:max_chain - 1])[0]
+                         if can_chain else None)
+            want_bounce = can_chain and rng.random() < BOUNCE_PROBABILITY
+
         if can_chain:
-            chain_len = rng.choices([2, 3, 4][:max_chain - 1], weights=weights[:max_chain - 1])[0]
             nodes = circles[i:i + chain_len]
             gaps = [nodes[k + 1].time - nodes[k].time for k in range(len(nodes) - 1)]
             evenly_spaced = chain_len >= 3 and (max(gaps) - min(gaps)) < 1.0
-            if evenly_spaced and rng.random() < BOUNCE_PROBABILITY:
+            if want_bounce and evenly_spaced:
                 result.append(make_bounce_slider(nodes[0], nodes[1], beat_length_ms, slider_multiplier,
                                                    num_bounces=chain_len - 1, one_way_ms=gaps[0]))
             else:
                 result.append(make_slider_chain(nodes, beat_length_ms, slider_multiplier))
+            if replay_key is not None:
+                replayed_decisions[replay_key] = ("chain", chain_len, want_bounce and evenly_spaced)
             i += chain_len
         else:
             result.append(cur)
+            if replay_key is not None:
+                replayed_decisions[replay_key] = ("circle",)
             i += 1
     return result
 
@@ -319,6 +366,17 @@ def main() -> None:
                               "--output the way make_easy.py's own spread works. Omit to skip it.")
     parser.add_argument("--normal-output", default=None, help="Same as --hard-output, for Normal.")
     parser.add_argument("--easy-output", default=None, help="Same as --hard-output, for Easy.")
+    parser.add_argument("--reuse-layout", dest="reuse_layout", action="store_true", default=True,
+                         help="When a measure repeats an earlier one (the same windowed measure-loudness "
+                              "pattern recurring, see add_variety.py's find_repeating_measure_map), copy "
+                              "that earlier measure's own circle/chain/bounce layout decisions instead of "
+                              "rolling independently -- on by default. A decision that doesn't fit this "
+                              "occurrence's own actual data (not enough eligible circles here, not evenly "
+                              "spaced enough for a bounce) is still decided fresh either way.")
+    parser.add_argument("--no-reuse-layout", dest="reuse_layout", action="store_false",
+                         help="Revert to the original behavior: every run's circle/chain/bounce choice is "
+                              "rolled independently, with no attempt to reuse an earlier repeated "
+                              "measure's own layout.")
     parser.add_argument("--seed", type=int, default=None,
                          help="Random seed. Omit for a different result every run; pass a fixed value "
                               "(printed on every run) to reproduce it later.")
@@ -337,8 +395,22 @@ def main() -> None:
     if len(circles) < 2:
         raise RuntimeError("Base Map v2 beatmap needs at least two circles to merge into sliders.")
 
+    # Energy analysis moved up here (rather than only just before hitsounds,
+    # its original use) so merge_into_sliders can also key its own
+    # --reuse-layout decisions off the same measure_repeat_map assign_
+    # hitsounds uses below -- both want "does this measure repeat an
+    # earlier one", computed the same way, so it's derived once and shared.
+    print("Analyzing song energy...")
+    times_ms, energy = compute_energy_curve(args.audio)
+    energy_at = make_energy_lookup(times_ms, energy)
+    measure_length_ms = beat_length_ms * 4.0
+    measure_buckets = apply_style.compute_measure_energy_buckets(energy_at, bm.offset, measure_length_ms,
+                                                                   circles[-1].time)
+    measure_repeat_map = find_repeating_measure_map(measure_buckets) if args.reuse_layout else None
+
     merged = merge_into_sliders(circles, beat_length_ms, slider_multiplier, rng, args.slider_length_bias,
-                                 chain_probability=args.chain_probability, max_gap_beats=args.max_gap_beats)
+                                 chain_probability=args.chain_probability, max_gap_beats=args.max_gap_beats,
+                                 offset_ms=bm.offset, measure_repeat_map=measure_repeat_map)
     merged.sort(key=lambda h: h.time)
     n_sliders = sum(1 for o in merged if o.is_slider)
     print(f"{len(circles)} circles -> {len(merged)} objects ({n_sliders} sliders)")
@@ -357,10 +429,12 @@ def main() -> None:
     # accents on louder/downbeat moments, a forced minimum so no long
     # stretch reads as "no hitsounds" to a checker) rather than leaving
     # every object on the default plain sample generate_base_beatmap_v2.py
-    # itself never assigns anything past.
-    print("Analyzing song energy...")
-    times_ms, energy = compute_energy_curve(args.audio)
-    energy_at = make_energy_lookup(times_ms, energy)
+    # itself never assigns anything past. Hitsound repeat-copying is
+    # always on regardless of --reuse-layout (that flag is about the
+    # circle/chain/bounce layout choice specifically) -- recomputed against
+    # `merged`'s own true end time rather than reusing the layout pass's
+    # measure_buckets (based on the pre-merge circles), since merging can
+    # shift exactly where a slider's own span ends.
     obj_energy = np.array([energy_at(o.time) for o in merged])
     q_high = float(np.quantile(obj_energy, 0.75))
     q_climax = float(np.quantile(obj_energy, 0.92))

@@ -229,12 +229,15 @@ class App:
         self.auto_open_var = tk.BooleanVar(value=True)
         self.keep_intermediate_var = tk.BooleanVar(value=False)
         self.report_var = tk.BooleanVar(value=False)
+        self.reuse_layout_var = tk.BooleanVar(value=True)
         options = (
             (self.osz_var, "Package as .osz (ready to import into osu!)"),
             (self.auto_open_var, "Open the finished map when done"),
             (self.keep_intermediate_var, "Keep intermediate stages too (Circles and Sliders, "
                                           "alongside the final Styled map)"),
             (self.report_var, "Generate a statistics report (PDF, plotted against Backstabber)"),
+            (self.reuse_layout_var, "Reuse a repeated section's own circle/slider layout (uncheck to "
+                                     "roll every section independently instead, the original behavior)"),
         )
         for i, (var, label) in enumerate(options):
             ttk.Checkbutton(opt_panel, text=label, variable=var).grid(
@@ -407,7 +410,8 @@ class App:
                              "--slider-length-bias", f"{self._actual('--slider-length-bias'):.3f}",
                              "--curviness", f"{self._actual('--curviness'):.3f}",
                              "--spacing", f"{self._actual('--spacing'):.3f}",
-                             "--seed", str(seed)]
+                             "--seed", str(seed),
+                             "--reuse-layout" if self.reuse_layout_var.get() else "--no-reuse-layout"]
             # The merged-but-unstyled "Sliders" stage is only ever worth
             # writing out when the user actually wants to inspect it --
             # otherwise it's exactly what add_sliders_v2.py already treats
