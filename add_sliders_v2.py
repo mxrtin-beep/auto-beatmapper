@@ -69,8 +69,8 @@ import numpy as np
 
 import apply_style
 import make_easy
-from add_variety import (assign_hitsounds, chain_len_weights, compute_energy_curve, is_on_downbeat,
-                          make_bounce_slider, make_energy_lookup, make_slider_chain)
+from add_variety import (assign_hitsounds, chain_len_weights, compute_energy_curve, find_repeating_measure_map,
+                          is_on_downbeat, make_bounce_slider, make_energy_lookup, make_slider_chain)
 from beatmap_utils import HitObject, read_osu, write_osu
 from make_easy import recompute_combos
 
@@ -226,7 +226,16 @@ def build_tier(tier: str, objects: list[HitObject], bm, args, rng: random.Random
     obj_energy = np.array([energy_at(o.time) for o in thinned])
     q_high = float(np.quantile(obj_energy, 0.75))
     q_climax = float(np.quantile(obj_energy, 0.92))
-    assign_hitsounds(thinned, energy_at, offset_ms, measure_length_ms, q_high, q_climax)
+    # measure_repeat_map lets a verse/chorus's second pass copy its first
+    # pass's own accent pattern (see add_variety.py's find_repeating_
+    # measure_map/assign_hitsounds) rather than re-deriving independently
+    # -- computed fresh per tier since thinning changes which objects (and
+    # so which beats) actually exist to copy from.
+    measure_buckets = apply_style.compute_measure_energy_buckets(energy_at, offset_ms, measure_length_ms,
+                                                                   thinned[-1].time)
+    measure_repeat_map = find_repeating_measure_map(measure_buckets)
+    assign_hitsounds(thinned, energy_at, offset_ms, measure_length_ms, q_high, q_climax,
+                      measure_repeat_map=measure_repeat_map)
 
     tier_bm = read_osu(args.beatmap)
     tier_bm.hit_objects = thinned
@@ -355,7 +364,11 @@ def main() -> None:
     obj_energy = np.array([energy_at(o.time) for o in merged])
     q_high = float(np.quantile(obj_energy, 0.75))
     q_climax = float(np.quantile(obj_energy, 0.92))
-    assign_hitsounds(merged, energy_at, bm.offset, measure_length_ms, q_high, q_climax)
+    measure_buckets = apply_style.compute_measure_energy_buckets(energy_at, bm.offset, measure_length_ms,
+                                                                   merged[-1].time)
+    measure_repeat_map = find_repeating_measure_map(measure_buckets)
+    assign_hitsounds(merged, energy_at, bm.offset, measure_length_ms, q_high, q_climax,
+                      measure_repeat_map=measure_repeat_map)
 
     bm.hit_objects = merged
     # Written under --merged-output's own name (and kept) if given -- an

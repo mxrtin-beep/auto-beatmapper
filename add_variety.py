@@ -61,6 +61,7 @@ import random
 import librosa
 import numpy as np
 
+from apply_style import compute_measure_energy_buckets
 from beatmap_utils import HitObject, read_osu, slider_length_for_gap, write_osu
 
 # Hitsound bit flags (osu! HitObject hitSound field / slider edgeHitsounds).
@@ -165,8 +166,46 @@ def hitsound_for(energy_value: float, is_downbeat: bool, q_high: float, q_climax
     return HS_NORMAL
 
 
+def find_repeating_measure_map(measure_buckets: dict[int, int], window: int = 4) -> dict[int, int]:
+    """For every measure that's part of a >=2-times-repeating `window`-
+    measure shingle, map it to the *first* occurrence of that same shingle
+    — every other measure maps to itself. Mirrors make_easy.py's own
+    find_repetitive_measures (same windowed-shingle matching, so a single
+    coincidentally-matching measure isn't enough — a real multi-measure
+    section has to recur), but returns *which* earlier measure each repeat
+    matches, not just whether it's a repeat, so a later occurrence of a
+    verse/chorus can be pointed back at its first: checking the reference
+    set (example/keha_backstabber/) found a section's second and third
+    pass mostly reusing its *first* pass's exact hitsound sequence, and
+    frequently its exact circle/slider layout too (e.g. measures 11 and 19
+    both come out CCCSSSS; measures 25 and 29 both CCCCCCS) — not just
+    landing in the same coarse energy bucket independently each time.
+    """
+    n = max(measure_buckets) + 1 if measure_buckets else 0
+    result = {m: m for m in range(n)}
+    if n < window * 2:
+        return result
+
+    signature_starts: dict[tuple[int, ...], list[int]] = {}
+    for start in range(n - window + 1):
+        sig = tuple(measure_buckets.get(start + k, 0) for k in range(window))
+        signature_starts.setdefault(sig, []).append(start)
+
+    for starts in signature_starts.values():
+        distinct_starts = []
+        for s in starts:
+            if not distinct_starts or s - distinct_starts[-1] >= window:
+                distinct_starts.append(s)
+        if len(distinct_starts) >= 2:
+            first = distinct_starts[0]
+            for s in distinct_starts[1:]:
+                for k in range(window):
+                    result[s + k] = first + k
+    return result
+
+
 def assign_hitsounds(objects: list[HitObject], energy_at, offset_ms: float, measure_length_ms: float,
-                      q_high: float, q_climax: float) -> None:
+                      q_high: float, q_climax: float, measure_repeat_map: dict[int, int] | None = None) -> None:
     """Assign every object's hitsound (and, for sliders, edge_hitsounds) from
     local loudness and downbeat position, mutating `objects` in place.
     Shared between add_variety.py's own pipeline and add_sliders_v2.py (the
@@ -182,6 +221,15 @@ def assign_hitsounds(objects: list[HitObject], energy_at, offset_ms: float, meas
     per-object could when it hovers right at a quantile threshold. All
     objects within the same beat share one hitsound, decided from that
     beat's own energy (sampled at its start) and whether it's a downbeat.
+
+    `measure_repeat_map` (see find_repeating_measure_map) is optional but
+    strongly recommended — without it, a verse's second pass gets its own
+    hitsounds decided independently from its own (very similar, but not
+    identical) energy, which drifts from the first pass's choices exactly
+    where the reference set stays consistent. When given, a beat whose
+    measure repeats an earlier one just copies that earlier measure's own
+    corresponding beat, if it made one — a section's own accent pattern
+    replaying, not a coincidence.
 
     A bouncing slider only accents its head — repeating the same clap/
     finish on every one of a dozen rapid reversals is jarring rather than
@@ -199,12 +247,28 @@ def assign_hitsounds(objects: list[HitObject], energy_at, offset_ms: float, meas
         beat_idx = int(round((obj.time - offset_ms) / beat_length_ms))
         if beat_idx not in beat_hitsound:
             beat_time = offset_ms + beat_idx * beat_length_ms
-            e = energy_at(beat_time)
-            on_downbeat = is_on_downbeat(beat_time, offset_ms, measure_length_ms)
-            hs = hitsound_for(e, on_downbeat, q_high, q_climax)
-            if hs == HS_NORMAL and (last_accent_time is None
-                                     or beat_time - last_accent_time > MAX_MS_WITHOUT_ACCENT):
-                hs = HS_WHISTLE
+
+            canonical_beat_idx = None
+            if measure_repeat_map is not None:
+                measure_idx, beat_in_measure = divmod(beat_idx, 4)
+                canonical_measure = measure_repeat_map.get(measure_idx, measure_idx)
+                if canonical_measure != measure_idx:
+                    canonical_beat_idx = canonical_measure * 4 + beat_in_measure
+
+            if canonical_beat_idx is not None and canonical_beat_idx in beat_hitsound:
+                # This measure repeats an earlier one, and that earlier
+                # measure's own corresponding beat already had an object
+                # (and so a hitsound decided) -- reuse it verbatim, rather
+                # than re-deriving independently from this pass's own
+                # (similar but not identical) energy.
+                hs = beat_hitsound[canonical_beat_idx]
+            else:
+                e = energy_at(beat_time)
+                on_downbeat = is_on_downbeat(beat_time, offset_ms, measure_length_ms)
+                hs = hitsound_for(e, on_downbeat, q_high, q_climax)
+                if hs == HS_NORMAL and (last_accent_time is None
+                                         or beat_time - last_accent_time > MAX_MS_WITHOUT_ACCENT):
+                    hs = HS_WHISTLE
             beat_hitsound[beat_idx] = hs
             if hs != HS_NORMAL:
                 last_accent_time = beat_time
@@ -740,8 +804,15 @@ def main() -> None:
 
     # Hitsounds: bigger accents (finish/clap/whistle) line up with strong
     # downbeats and louder moments; quieter/off-beat hits stay a plain
-    # normal sample.
-    assign_hitsounds(new_objects, energy_at, offset_ms, measure_length_ms, q_high, q_climax)
+    # normal sample. measure_repeat_map lets a verse/chorus's second pass
+    # copy its first pass's own accent pattern (see find_repeating_measure_
+    # map and assign_hitsounds' own docstring) rather than re-deriving
+    # independently from that pass's own, merely similar energy.
+    measure_buckets = compute_measure_energy_buckets(energy_at, offset_ms, measure_length_ms,
+                                                       new_objects[-1].time if new_objects else 0.0)
+    measure_repeat_map = find_repeating_measure_map(measure_buckets)
+    assign_hitsounds(new_objects, energy_at, offset_ms, measure_length_ms, q_high, q_climax,
+                      measure_repeat_map=measure_repeat_map)
 
     # Sanity check: nothing should overlap in time, judged the same way the
     # .osu file itself will be read back (every object's time rounded to a

@@ -81,6 +81,106 @@ every step.
 `beatmap_utils.py` holds the shared `.osu` parsing/writing code and data
 structures used by every stage.
 
+## Intensity-adaptive generator
+
+A second, independent way to generate a map, through its own pipeline and
+its own GUI (`gui_v2.py`) — not a mode of `main.py`/`gui.py` above, and
+not fed by or into that pipeline at any stage. Where the pipeline above
+always places one circle per half beat and leaves density entirely to
+`add_variety.py`'s later reshaping, this one adapts *how often* a circle
+lands directly to the song's own local loudness from the very first
+stage:
+
+1. **`generate_base_beatmap_v2.py`** — one circle every whole beat in a
+   quiet stretch, up to one every eighth beat (a 32nd note) in the
+   loudest. Classification happens once per whole beat (not per finer
+   subdivision), so a beat is busy *all the way through*, never flickering
+   between rates mid-beat. A single `--intensity` knob (0-1) shifts how
+   much of the song reaches each rate; every rate stays reachable at any
+   setting. The densest tier, "climax", isn't just a louder version of the
+   next tier down — a whole run of consecutive loud beats becomes one
+   burst anchored to its own measure's downbeat, not an isolated beat that
+   can start on a musically weak position mid-measure. Sparingly, in the
+   louder half of that range, an ordinary gap between two circles can also
+   get a short embellishment — a 5- or 7-note chain at quarter-beat (16th
+   note) spacing — fit strictly inside room that's already there, never
+   crowding what's on either side. A fast (quarter-beat-or-closer) run
+   never sprawls past a full beat, and leaves a full two-quarter-beat gap
+   before the next one picks back up, so back-to-back busy beats read as
+   two distinct bursts rather than one continuous run shifted by a single
+   slot.
+
+2. **`add_sliders_v2.py`** — merges some adjacent circles into sliders
+   (`--chain-probability` how often at all, `--slider-length-bias` how
+   long when it does), including occasional repeating/"bounce" sliders
+   (one path traveled back and forth) for a run that's already evenly
+   spaced. A fast run in this pathway is never incidental — it's always a
+   deliberate climax burst or embellishment chain — so it's always treated
+   as one gesture: piled onto the exact same spot (0px apart), and the
+   object immediately following it lands on that same spot too, once,
+   before normal flow resumes. Hitsounds are assigned once per whole beat
+   from local loudness and downbeat position (see below), and every
+   difficulty tier — Insane plus whichever of Hard/Normal/Easy you ask
+   for — gets its own real positioning pass: each tier is independently
+   thinned (the same category-based thinning `make_easy.py` uses for the
+   pipeline above) and then given its own `apply_style.py` run, with its
+   own scaled-down jump distance (a lower tier's bigger circles need to
+   travel less far to still feel comfortable), rather than a rescaled copy
+   of Insane's own already-styled positions.
+
+### Hitsounds
+
+Both pathways assign hitsounds the same way (`add_variety.py`'s
+`assign_hitsounds`, shared code): one decision per whole beat, not per
+object — checking a real community beatmap set
+(`example/keha_backstabber/`) found a hitsound change always lines up
+with a beat boundary, essentially never switching between two objects
+that share one. A bigger accent (clap/finish) lines up with a loud and/or
+downbeat moment; a long quiet stretch still gets an occasional forced
+whistle often enough that it never reads as "no hitsounds" to a checker.
+
+The same reference set also showed a section's second or third pass —
+a verse or chorus repeating — mostly reusing its *first* pass's exact
+accent pattern, not just landing in the same coarse loudness bracket
+independently each time (and often the same circle/slider layout too).
+`find_repeating_measure_map` detects that kind of repeat (the same
+windowed sequence of measure-loudness "buckets" recurring elsewhere in
+the song, the same way `make_easy.py` already detects a repetitive
+section for thinning) and, when a beat's measure repeats an earlier one,
+copies that earlier measure's own corresponding beat's hitsound instead
+of re-deriving it independently from that pass's own, merely similar
+energy.
+
+### GUI
+
+`gui_v2.py` is a separate desktop window from `gui.py`, with its own
+smaller set of knobs — Intensity, Slider vs. circle mix, Slider length,
+Slider curviness, Jump distance — each shown as a plain 0-1 dial that
+defaults to the middle, but the middle doesn't have to mean the literal
+middle of the underlying range: every dial is tuned so 0.5 already gives
+a good-sounding result, then scales further toward either end from there.
+A Difficulties section lets you check any of Hard/Normal/Easy alongside
+the always-generated Insane.
+
+```bash
+python3 gui_v2.py
+```
+
+### Command line
+
+```bash
+python3 generate_base_beatmap_v2.py song.mp3 \
+    --output "out/Song (Circles).osu" --intensity 0.65 \
+    --title "Song Title" --artist "Artist Name"
+
+python3 add_sliders_v2.py "out/Song (Circles).osu" song.mp3 \
+    --output "out/Song [Insane].osu" \
+    --hard-output "out/Song [Hard].osu" \
+    --normal-output "out/Song [Normal].osu" \
+    --easy-output "out/Song [Easy].osu" \
+    --chain-probability 0.3 --slider-length-bias 0.4 --curviness 0.5 --spacing 1.9
+```
+
 ## Usage
 
 ### GUI
