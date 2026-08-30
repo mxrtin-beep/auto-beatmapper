@@ -31,17 +31,19 @@ eighth-beat territory. It's not a hard cutoff — every tier stays possible
 at any setting, just how *much* of the song reaches each one shifts.
 
 Climax (the densest tier) is a special case, handled by its own pass
-(_place_climax_run) instead of the simple "fill this one beat" rule the
-other tiers use: rather than an isolated beat's worth of eighth-note
+(_emit_climax_run) instead of the simple "fill this one beat" rule the
+other tiers use: rather than an isolated beat's worth of eighth-beat
 circles that can start anywhere in a measure depending on which beat
 happened to classify as climax, a run of consecutive climax beats becomes
-one *measure-anchored* burst — half-beat- (eighth-note-) spaced circles
-starting exactly on the nearest measure's downbeat and running for 1-4
-quarter beats (3/5/7/9 circles respectively; a run needing more than a
-full measure chains into another burst anchored to the next measure's
-downbeat). Anchoring to the downbeat regardless of which specific beat
-first tipped over into "climax" is what fixes bursts that otherwise
-started at an arbitrary, musically weak point mid-measure.
+one *measure-anchored* burst — eighth-beat- (32nd-note-) spaced circles,
+one subdivision finer than "intense"'s own quarter-beat rate so climax
+actually reads as the fastest thing in the map — starting exactly on the
+nearest measure's downbeat and running for 1-4 whole beats (9/17/25/33
+circles respectively; a run needing more than a full measure chains into
+another burst anchored to the next measure's downbeat). Anchoring to the
+downbeat regardless of which specific beat first tipped over into
+"climax" is what fixes bursts that otherwise started at an arbitrary,
+musically weak point mid-measure.
 
 BPM/offset detection, PreviewTime, and the placeholder Lissajous-curve
 positions are unchanged from v1 (reused directly) — this is purely about
@@ -83,8 +85,9 @@ from generate_base_beatmap import detect_bpm_and_offset, placeholder_positions
 # Density tiers, quietest to loudest, and the beat subdivision each one
 # gets: 1 = one circle per whole beat, 2 = per half beat, 4 = per quarter
 # beat. "silent" has no entry -- it places nothing. "climax" isn't listed
-# here at all -- it's handled entirely by _place_climax_run below instead
-# of this simple "fill one beat at a fixed rate" rule.
+# here at all -- it's handled entirely by _emit_climax_run below instead
+# of this simple "fill one beat at a fixed rate" rule (see its own and the
+# module docstring -- eighth-beat spacing, one subdivision finer still).
 TIER_SUBDIVISION = {"quiet": 1, "normal": 2, "intense": 4}
 
 MEASURE_BEATS = 4  # quarter beats per measure (4/4 time, matching the rest of the codebase)
@@ -155,20 +158,32 @@ def _climax_covered_end(run_start: int, run_end: int) -> int:
     return seg_start + span
 
 
-def _emit_half_beat_run(kept_times: list[float], start_beat: int, end_beat: int,
-                         offset_seconds: float, beat_seconds: float) -> None:
-    """Append one continuous half-beat- (eighth-note-) spaced run of
-    circles from beat index `start_beat` through `end_beat` (inclusive).
-    A climax burst's internal measure-to-measure chaining (see
-    _climax_segments) never actually changes rate at its own boundaries —
-    every segment is the same constant half-beat spacing, so the whole
-    covered span is just one flat run end to end, nothing measure-shaped
-    about *emitting* it, only about how far it was decided to reach.
+def _emit_climax_run(kept_times: list[float], climax_times: set[float], start_beat: int, end_beat: int,
+                      offset_seconds: float, beat_seconds: float) -> None:
+    """Append one continuous eighth-beat- (32nd-note-) spaced run of
+    circles from beat index `start_beat` through `end_beat` (inclusive) —
+    climax is the densest tier there is, one subdivision finer than
+    "intense"'s own quarter-beat (16th-note) rate, so it actually reads as
+    the fastest thing in the map rather than (as an earlier, half-beat-
+    spaced version of this did) slower than intense. A climax burst's
+    internal measure-to-measure chaining (see _climax_segments) never
+    actually changes rate at its own boundaries — every segment is the
+    same constant eighth-beat spacing, so the whole covered span is just
+    one flat run end to end, nothing measure-shaped about *emitting* it,
+    only about how far it was decided to reach.
+
+    Every emitted time is also recorded into `climax_times` — cap_fast_run_
+    span must never thin a climax run down (its own quarter-beat-or-closer
+    "fast run" cap exists for the incidental, unshaped intense-tier runs
+    build_intensity_grid's plain per-beat fill can produce, not for a
+    burst deliberately built to span several beats).
     """
     start_ms = (offset_seconds + start_beat * beat_seconds) * 1000.0
-    half_step_ms = beat_seconds * 1000.0 / 2.0
-    num_half_steps = (end_beat - start_beat) * 2
-    kept_times.extend(start_ms + k * half_step_ms for k in range(num_half_steps + 1))
+    step_ms = beat_seconds * 1000.0 / 8.0
+    num_steps = (end_beat - start_beat) * 8
+    new_times = [start_ms + k * step_ms for k in range(num_steps + 1)]
+    kept_times.extend(new_times)
+    climax_times.update(new_times)
 
 
 def _climax_covered_ranges(tiers: list[str]) -> list[tuple[int, int]]:
@@ -217,7 +232,7 @@ def _climax_covered_ranges(tiers: list[str]) -> list[tuple[int, int]]:
 
 def build_intensity_grid(offset_seconds: float, bpm: float, duration_seconds: float,
                           energy_at, q_silent: float, q_quiet: float, q_intense: float, q_climax: float,
-                          smoothing_beats: float = 2.0) -> list[float]:
+                          smoothing_beats: float = 2.0) -> tuple[list[float], set[float]]:
     """Return hit-object times (ms), one whole beat classified at a time —
     every beat gets exactly one intensity tier, and every circle in that
     beat follows that same tier's subdivision rate for the beat's entire
@@ -235,8 +250,14 @@ def build_intensity_grid(offset_seconds: float, bpm: float, duration_seconds: fl
     evenly spanning the whole beat (half/quarter-beat spacing). "climax"
     is handled separately, up front, by _climax_covered_ranges (see its
     own and the module docstring) — a whole *run* of consecutive climax
-    beats becomes one measure-anchored burst, not each beat independently
-    filling itself with eighth notes.
+    beats becomes one measure-anchored burst, at eighth-beat (32nd-note)
+    spacing — the densest tier there is, one subdivision finer than
+    "intense" — not each beat independently filling itself in.
+
+    Returns `(times, climax_times)`: every circle's time, and the subset
+    of them that belong to a climax burst specifically — the caller must
+    keep cap_fast_run_span from ever thinning those down (see
+    _emit_climax_run).
     """
     beat_seconds = 60.0 / bpm
     n = int((duration_seconds - offset_seconds) / beat_seconds) + 1
@@ -252,11 +273,12 @@ def build_intensity_grid(offset_seconds: float, bpm: float, duration_seconds: fl
     covered_set = {b for start, end in covered_ranges for b in range(start, end + 1)}
 
     kept_times: list[float] = []
+    climax_times: set[float] = set()
     i = 0
     while i < n:
         if i in covered_starts:
             end = covered_starts[i]
-            _emit_half_beat_run(kept_times, i, end, offset_seconds, beat_seconds)
+            _emit_climax_run(kept_times, climax_times, i, end, offset_seconds, beat_seconds)
             i = end + 1
             continue
         if i in covered_set:
@@ -269,17 +291,32 @@ def build_intensity_grid(offset_seconds: float, bpm: float, duration_seconds: fl
             step_ms = (beat_seconds * 1000.0) / subdivision
             kept_times.extend(t_ms + k * step_ms for k in range(subdivision))
         i += 1
-    return kept_times
+    return kept_times, climax_times
 
 
-def cap_fast_run_span(times_ms: list[float], beat_length_ms: float,
-                       quarter_beat_ms: float) -> list[float]:
+def cap_fast_run_span(times_ms: list[float], beat_length_ms: float, quarter_beat_ms: float,
+                       protected_ms: set[float] | None = None) -> list[float]:
     """Drop circles as needed so no run of consecutive quarter-beat-or-
     closer circles ever spans a full beat or more from its own first
-    surviving member. Only the "intense" tier can still produce a fast
-    (quarter-beat) run under this module's current rules — climax runs go
-    through _place_climax_run instead, at half-beat spacing, which never
-    counts as "fast" here and needs no capping.
+    surviving member, leaving a full two-quarter-beat gap (not one) before
+    the next run picks back up. Only the "intense" tier (or an
+    embellishment chain) can still produce a fast (quarter-beat) run under
+    this module's current rules; `protected_ms` (see _emit_climax_run) is
+    a climax burst's own times, which must never be thinned here no matter
+    how fast their own eighth-beat spacing reads by this function's
+    quarter-beat-or-closer definition of "fast" — they're a deliberately
+    shaped, measure-anchored run, not the kind of incidental fast stretch
+    this cap exists to break up.
+
+    Capping to a *two*-quarter-beat gap instead of one: dropping only the
+    single circle that would push the run past a full beat still leaves
+    consecutive intense beats reading as one continuous run shifted by a
+    single quarter-beat step (four kept, one dropped, four kept starting
+    one slot later) — an odd, lopsided shape rather than two clearly
+    separate bursts. `force_drop_next` makes the circle right after the
+    capped one drop too, unconditionally, so back-to-back intense beats
+    read as first/second/third/fourth, [gap], third/fourth/next-first/
+    next-second — two whole slots skipped, not one.
 
     `run_start` is reset to whichever circle was just kept (not left
     pointing at the original run's first member) every time one gets
@@ -291,11 +328,25 @@ def cap_fast_run_span(times_ms: list[float], beat_length_ms: float,
     circle in the run, well past what the one-beat cap was ever meant to
     enforce.
     """
+    protected_ms = protected_ms or set()
     if not times_ms:
         return times_ms
     result = [times_ms[0]]
     run_start = times_ms[0]
+    force_drop_next = False
     for t in times_ms[1:]:
+        if t in protected_ms:
+            result.append(t)
+            run_start = t
+            force_drop_next = False
+            continue
+        if force_drop_next:
+            # The second of the two circles being dropped at this run
+            # boundary, unconditionally -- see force_drop_next's own
+            # comment above. run_start is already correctly set to the
+            # last circle actually kept, from when the first one dropped.
+            force_drop_next = False
+            continue
         prev = result[-1]
         is_fast = (t - prev) <= quarter_beat_ms + 1.0
         if not is_fast:
@@ -312,8 +363,11 @@ def cap_fast_run_span(times_ms: list[float], beat_length_ms: float,
             # dropped) rather than the same already-exhausted run_start --
             # otherwise every remaining circle in the run keeps failing
             # the same stale check and the whole rest of it silently
-            # vanishes instead of just the excess.
+            # vanishes instead of just the excess. The circle right after
+            # this one drops too (force_drop_next), for the full
+            # two-quarter-beat gap described above.
             run_start = prev
+            force_drop_next = True
     return result
 
 
@@ -439,11 +493,11 @@ def main() -> None:
     print(f"  energy thresholds -> silent<{q_silent:.3f}  quiet<{q_quiet:.3f}  "
           f"intense>{q_intense:.3f}  climax>{q_climax:.3f}")
 
-    times = build_intensity_grid(offset_seconds, bpm, duration_seconds, energy_at,
-                                  q_silent, q_quiet, q_intense, q_climax,
-                                  smoothing_beats=args.smoothing_beats)
+    times, climax_times = build_intensity_grid(offset_seconds, bpm, duration_seconds, energy_at,
+                                                 q_silent, q_quiet, q_intense, q_climax,
+                                                 smoothing_beats=args.smoothing_beats)
     before_cap = len(times)
-    times = cap_fast_run_span(times, beat_length_ms, quarter_beat_ms)
+    times = cap_fast_run_span(times, beat_length_ms, quarter_beat_ms, protected_ms=climax_times)
     if before_cap != len(times):
         print(f"Capped fast runs: dropped {before_cap - len(times)} circle(s) to keep every "
               f"quarter/eighth-beat run under a full beat")
