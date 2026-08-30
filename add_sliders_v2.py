@@ -31,6 +31,18 @@ machinery the main pipeline relies on), so there's no reason to duplicate
 any of it here. This script's only job is deciding *which* circles become
 one slider; apply_style.py decides where everything actually goes.
 
+Two intermediate stages, mirroring the main pipeline's own Base/Variety/
+Styled naming:
+
+  * Circles  — generate_base_beatmap_v2.py's own output, untouched.
+  * Sliders  — the merge this module does, on its own: circles combined
+               into sliders, but still sitting at generate_base_beatmap_v2
+               .py's placeholder positions (--merged-output, if given —
+               it's an internal working file otherwise, deleted once
+               apply_style.py is done reading it).
+  * Styled   — this module's actual --output: the same objects, positioned
+               for real by apply_style.py.
+
 Usage:
     python3 add_sliders_v2.py base_v2.osu song.mp3 --output out/song_v2_styled.osu \
         --slider-length-bias 0.5 --curviness 0.5
@@ -91,7 +103,7 @@ def main() -> None:
     parser.add_argument("beatmap", help="Path to the Base Map v2 .osu file (from generate_base_beatmap_v2.py).")
     parser.add_argument("audio", help="Path to the same song's audio file (for apply_style.py's energy-aware patterns).")
     parser.add_argument("--output", required=True)
-    parser.add_argument("--version", default="Auto Base v2 (Sliders)", help="Difficulty/version name to write into the map.")
+    parser.add_argument("--version", default="Auto Base v2 (Styled)", help="Difficulty/version name to write into the final, styled map.")
     parser.add_argument("--slider-length-bias", type=float, default=0.5,
                          help="Which chain length a merge tends to pick, 0-1 (default 0.5). 0 skews "
                               "toward more/shorter sliders, 1 toward fewer/longer ones.")
@@ -102,6 +114,14 @@ def main() -> None:
     parser.add_argument("--max-gap-beats", type=float, default=1.0,
                          help="Circles more than this many beats apart are never merged into the same "
                               "chain (default 1.0) -- keeps a slider from dragging across a real silent gap.")
+    parser.add_argument("--merged-output", default=None,
+                         help="Also write the merged-but-unstyled intermediate .osu here (circles "
+                              "already combined into sliders, but still at generate_base_beatmap_v2.py's "
+                              "placeholder positions -- apply_style.py hasn't run yet). Omit to skip it; "
+                              "it's an internal working file either way, used as apply_style.py's own "
+                              "input.")
+    parser.add_argument("--merged-version", default="Auto Base v2 (Sliders)",
+                         help="Difficulty/version name written into --merged-output, if given.")
     parser.add_argument("--seed", type=int, default=None,
                          help="Random seed. Omit for a different result every run; pass a fixed value "
                               "(printed on every run) to reproduce it later.")
@@ -127,9 +147,20 @@ def main() -> None:
     print(f"{len(circles)} circles -> {len(merged)} objects ({n_sliders} sliders)")
 
     bm.hit_objects = merged
-    tmp_path = args.output + ".merged.osu"
-    os.makedirs(os.path.dirname(os.path.abspath(tmp_path)) or ".", exist_ok=True)
-    write_osu(bm, tmp_path)
+    # Written under --merged-output's own name (and kept) if given -- an
+    # intermediate someone might genuinely want to inspect, to see the
+    # structural merge on its own before apply_style.py's positioning is
+    # even in the picture (still at generate_base_beatmap_v2.py's own
+    # placeholder positions here, not real ones yet). Otherwise it's
+    # purely an internal working file, written under a hidden name next
+    # to --output and deleted once apply_style.py is done reading it.
+    keep_merged = args.merged_output is not None
+    merged_path = args.merged_output if keep_merged else args.output + ".merged.osu"
+    bm.metadata["Version"] = args.merged_version if keep_merged else bm.metadata.get("Version", "")
+    os.makedirs(os.path.dirname(os.path.abspath(merged_path)) or ".", exist_ok=True)
+    write_osu(bm, merged_path)
+    if keep_merged:
+        print(f"Wrote {merged_path}")
 
     # apply_style.py does the actual positioning -- distance-snap spacing
     # between every pair of objects, playfield-bounds clamping, and (for
@@ -139,13 +170,14 @@ def main() -> None:
     # simpler and more robust than reimplementing any part of it here.
     old_argv = sys.argv
     try:
-        sys.argv = ["apply_style.py", tmp_path, "--output", args.output, "--audio", args.audio,
+        sys.argv = ["apply_style.py", merged_path, "--output", args.output, "--audio", args.audio,
                     "--version", args.version, "--seed", str(args.seed),
                     "--curviness", str(args.curviness), "--spacing", str(args.spacing)]
         apply_style.main()
     finally:
         sys.argv = old_argv
-        os.remove(tmp_path)
+        if not keep_merged:
+            os.remove(merged_path)
     print(f"Wrote {args.output}")
 
 

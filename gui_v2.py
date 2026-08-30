@@ -45,7 +45,11 @@ import generate_base_beatmap_v2
 from build_osz import build_osz
 from gui import BG, BG_ENTRY, FONT_MONO, PAD_INNER, PAD_OUTER, TextRedirector, _configure_style, _open_path
 
-DIFFICULTY_NAME = "Auto Base v2 (Sliders)"
+# Version names for the three stages, mirroring the main pipeline's own
+# Base/Variety/Styled naming.
+CIRCLES_VERSION = "Auto Base v2 (Circles)"
+SLIDERS_VERSION = "Auto Base v2 (Sliders)"
+STYLED_VERSION = "Auto Base v2 (Styled)"
 
 
 @dataclass
@@ -147,9 +151,12 @@ class App:
         opt_panel = self._panel(form, "Options")
         self.osz_var = tk.BooleanVar(value=True)
         self.auto_open_var = tk.BooleanVar(value=True)
+        self.keep_intermediate_var = tk.BooleanVar(value=False)
         options = (
             (self.osz_var, "Package as .osz (ready to import into osu!)"),
             (self.auto_open_var, "Open the finished map when done"),
+            (self.keep_intermediate_var, "Keep intermediate stages too (Circles and Sliders, "
+                                          "alongside the final Styled map)"),
         )
         for i, (var, label) in enumerate(options):
             ttk.Checkbutton(opt_panel, text=label, variable=var).grid(
@@ -279,32 +286,51 @@ class App:
             title = self.title_var.get().strip() or os.path.splitext(os.path.basename(audio))[0]
             outdir = self.outdir_var.get().strip() or "output"
             os.makedirs(outdir, exist_ok=True)
-            base_path = os.path.join(outdir, f"{title} (Base v2 working).osu")
-            final_path = os.path.join(outdir, f"{title} [{DIFFICULTY_NAME}].osu")
+            keep_intermediate = self.keep_intermediate_var.get()
 
-            base_argv = [audio, "--output", base_path, "--title", title,
+            circles_path = os.path.join(outdir, f"{title} [{CIRCLES_VERSION}].osu")
+            sliders_path = os.path.join(outdir, f"{title} [{SLIDERS_VERSION}].osu")
+            styled_path = os.path.join(outdir, f"{title} [{STYLED_VERSION}].osu")
+
+            base_argv = [audio, "--output", circles_path, "--title", title,
                          "--artist", self.artist_var.get().strip() or "Unknown Artist",
                          "--creator", self.creator_var.get().strip() or "auto-beatmapper",
+                         "--version", CIRCLES_VERSION,
                          "--intensity", f"{self.slider_vars['--intensity'].get():.3f}"]
             sys.argv = ["generate_base_beatmap_v2.py"] + base_argv
             generate_base_beatmap_v2.main()
 
-            sliders_argv = [base_path, audio, "--output", final_path, "--version", DIFFICULTY_NAME,
+            sliders_argv = [circles_path, audio, "--output", styled_path, "--version", STYLED_VERSION,
                              "--slider-length-bias", f"{self.slider_vars['--slider-length-bias'].get():.3f}",
                              "--curviness", f"{self.slider_vars['--curviness'].get():.3f}"]
+            # The merged-but-unstyled "Sliders" stage is only ever worth
+            # writing out when the user actually wants to inspect it --
+            # otherwise it's exactly what add_sliders_v2.py already treats
+            # it as: a hidden working file, cleaned up on its own once
+            # apply_style.py is done reading it.
+            if keep_intermediate:
+                sliders_argv += ["--merged-output", sliders_path, "--merged-version", SLIDERS_VERSION]
             sys.argv = ["add_sliders_v2.py"] + sliders_argv
             add_sliders_v2.main()
 
-            os.remove(base_path)
+            # Circles/Sliders are worth keeping around at all only when the
+            # user actually checked the box -- otherwise they're the same
+            # kind of internal working file main.py's own Base/Variety are
+            # without --keep-intermediate-files, cleaned up once the thing
+            # that's actually meant to be played (Styled) exists.
+            all_paths = [circles_path, sliders_path, styled_path] if keep_intermediate else [styled_path]
+            if not keep_intermediate:
+                os.remove(circles_path)
 
             if self.osz_var.get():
                 osz_path = os.path.join(outdir, f"{title} (Base v2).osz")
-                build_osz([final_path], audio, osz_path)
+                build_osz(all_paths, audio, osz_path)
                 self.log_queue.put(f"Packaged {osz_path}\n")
-                os.remove(final_path)
+                for path in all_paths:
+                    os.remove(path)
                 self.result_path = osz_path
             else:
-                self.result_path = final_path
+                self.result_path = styled_path
         except SystemExit as e:
             if e.code not in (None, 0):
                 self.result_error = RuntimeError(f"Exited with code {e.code}")
