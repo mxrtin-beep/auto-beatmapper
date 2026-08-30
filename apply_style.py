@@ -165,8 +165,52 @@ def compute_measure_energy_buckets(energy_at, offset_ms: float, measure_length_m
     return buckets
 
 
+def find_repeating_measure_map(measure_buckets: dict[int, int], window: int = 4) -> dict[int, int]:
+    """For every measure that's part of a >=2-times-repeating `window`-
+    measure shingle, map it to the *first* occurrence of that same shingle
+    — every other measure maps to itself. Mirrors make_easy.py's own
+    find_repetitive_measures (same windowed-shingle matching, so a single
+    coincidentally-matching measure isn't enough — a real multi-measure
+    section has to recur), but returns *which* earlier measure each repeat
+    matches, not just whether it's a repeat, so a later occurrence of a
+    verse/chorus can be pointed back at its first: checking the reference
+    set (example/keha_backstabber/) found a section's second and third
+    pass mostly reusing its *first* pass's exact hitsound sequence, and
+    frequently its exact circle/slider layout too (e.g. measures 11 and 19
+    both come out CCCSSSS; measures 25 and 29 both CCCCCCS) — not just
+    landing in the same coarse energy bucket independently each time.
+
+    Lives here (not add_variety.py, which imports it back) since
+    apply_style.py's own motif_turn_degrees also uses it directly, to
+    remap which measure's motif an occurrence plays -- see its own
+    docstring.
+    """
+    n = max(measure_buckets) + 1 if measure_buckets else 0
+    result = {m: m for m in range(n)}
+    if n < window * 2:
+        return result
+
+    signature_starts: dict[tuple[int, ...], list[int]] = {}
+    for start in range(n - window + 1):
+        sig = tuple(measure_buckets.get(start + k, 0) for k in range(window))
+        signature_starts.setdefault(sig, []).append(start)
+
+    for starts in signature_starts.values():
+        distinct_starts = []
+        for s in starts:
+            if not distinct_starts or s - distinct_starts[-1] >= window:
+                distinct_starts.append(s)
+        if len(distinct_starts) >= 2:
+            first = distinct_starts[0]
+            for s in distinct_starts[1:]:
+                for k in range(window):
+                    result[s + k] = first + k
+    return result
+
+
 def motif_turn_degrees(tier: str, time_ms: float, offset_ms: float, beat_length_ms: float,
-                        measure_length_ms: float, measure_buckets: dict[int, int]) -> float:
+                        measure_length_ms: float, measure_buckets: dict[int, int],
+                        measure_repeat_map: dict[int, int] | None = None) -> float:
     """The signed turn angle (degrees) for an object, from its tier's repeating motif.
 
     Which of a tier's motifs plays is keyed to the measure's energy bucket,
@@ -174,10 +218,23 @@ def motif_turn_degrees(tier: str, time_ms: float, offset_ms: float, beat_length_
     section" (the same verse or chorus repeating) reuses the exact same
     motif, giving the player a real, learnable pattern instead of a motif
     that happens to cycle on its own unrelated schedule.
+
+    `measure_repeat_map` (see find_repeating_measure_map), when given,
+    tightens that up further: a measure whose own windowed sequence of
+    buckets genuinely recurs elsewhere (not just this one measure's bucket
+    value coincidentally matching) plays its motif from the *first*
+    occurrence's own measure index, rather than its own -- two energy
+    passes of the same section can land in adjacent buckets from small
+    energy differences alone, which used to read as "close but not quite"
+    the same arrangement; this makes a real repeat read as the exact same
+    one, matching how hitsounds and (add_sliders_v2.py's own) circle/
+    slider layout already reuse a verse/chorus's first pass.
     """
     half_beat_ms = beat_length_ms / 2.0
     pos_in_measure = int(round((time_ms - offset_ms) / half_beat_ms)) % HALF_BEAT_STEPS_PER_MEASURE
     measure_index = int((time_ms - offset_ms) // measure_length_ms)
+    if measure_repeat_map is not None:
+        measure_index = measure_repeat_map.get(measure_index, measure_index)
     bucket = measure_buckets.get(measure_index, 0)
     motifs = MOTIFS[tier]
     motif = motifs[bucket % len(motifs)]
@@ -186,7 +243,7 @@ def motif_turn_degrees(tier: str, time_ms: float, offset_ms: float, beat_length_
 
 def next_angle(prev_angle: float, tier: str, time_ms: float, offset_ms: float, beat_length_ms: float,
                measure_length_ms: float, measure_buckets: dict[int, int], rng: random.Random,
-               jitter_degrees: float = 4.0) -> float:
+               jitter_degrees: float = 4.0, measure_repeat_map: dict[int, int] | None = None) -> float:
     """Advance the flow angle using the tier's motif, plus a small humanizing jitter.
 
     The jitter is `jitter_degrees` wide by default — small, since the point
@@ -196,7 +253,8 @@ def next_angle(prev_angle: float, tier: str, time_ms: float, offset_ms: float, b
     function only ever changes the flow *angle*, never `time_ms`, so a
     wider jitter still can't move an object off the beat grid.
     """
-    turn_degrees = motif_turn_degrees(tier, time_ms, offset_ms, beat_length_ms, measure_length_ms, measure_buckets)
+    turn_degrees = motif_turn_degrees(tier, time_ms, offset_ms, beat_length_ms, measure_length_ms, measure_buckets,
+                                       measure_repeat_map=measure_repeat_map)
     turn_degrees += rng.uniform(-jitter_degrees, jitter_degrees)
     return prev_angle + math.radians(turn_degrees)
 
@@ -262,6 +320,66 @@ def place_at_distance(cur_x: float, cur_y: float, spacing: float, angle: float) 
     # edge case. Fall back to whatever the last bounce attempt produced;
     # the caller still clamps it onto the playfield afterward.
     return x, y, angle
+
+
+def p_curve_arc_bbox(p0: tuple[float, float], p1: tuple[float, float],
+                      p2: tuple[float, float]) -> tuple[float, float, float, float] | None:
+    """Bounding box of the actual rendered arc of a "P" (perfect-circle)
+    slider through (p0, p1, p2) — the arc's *own* extent, not just the
+    bounding box of its three defining points. This is what makes a P
+    curve unsafe in a way a Bezier through the same points never is: all
+    three points can individually sit well inside the playfield while the
+    circular arc connecting them still bulges outside it, whenever the
+    arc's radius is large relative to the chord (near-collinear points
+    especially). Returns None if the three points are exactly collinear
+    (no finite circle fits) — the caller should treat that as unsafe too.
+    """
+    (ax, ay), (bx, by), (cx, cy) = p0, p1, p2
+    d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs(d) < 1e-9:
+        return None
+    ux = ((ax**2 + ay**2) * (by - cy) + (bx**2 + by**2) * (cy - ay) + (cx**2 + cy**2) * (ay - by)) / d
+    uy = ((ax**2 + ay**2) * (cx - bx) + (bx**2 + by**2) * (ax - cx) + (cx**2 + cy**2) * (bx - ax)) / d
+    r = math.hypot(ax - ux, ay - uy)
+
+    a0 = math.atan2(ay - uy, ax - ux)
+    a1 = math.atan2(by - uy, bx - ux)
+    a2 = math.atan2(cy - uy, cx - ux)
+
+    def normalize_above(angle: float, ref: float) -> float:
+        while angle < ref:
+            angle += 2 * math.pi
+        while angle > ref + 2 * math.pi:
+            angle -= 2 * math.pi
+        return angle
+
+    # Sweep from a0 to a2 the way that actually passes through a1 (the
+    # slider's own bow/anchor point, its declared shape) -- the *other*
+    # way around the circle is not the arc osu! renders.
+    a2n = normalize_above(a2, a0)
+    a1n = normalize_above(a1, a0)
+    if not (a0 <= a1n <= a2n):
+        a2n = a0 - (2 * math.pi - (a2n - a0))
+    lo, hi = min(a0, a2n), max(a0, a2n)
+
+    xs, ys = [ax, bx, cx], [ay, by, cy]
+    steps = 32
+    for i in range(steps + 1):
+        angle = lo + (hi - lo) * i / steps
+        xs.append(ux + r * math.cos(angle))
+        ys.append(uy + r * math.sin(angle))
+    return min(xs), max(xs), min(ys), max(ys)
+
+
+def p_curve_fits_playfield(p0: tuple[float, float], p1: tuple[float, float], p2: tuple[float, float],
+                            margin: float) -> bool:
+    """Whether a P-curve slider's actual rendered arc through these three
+    points stays within the playfield margin -- see p_curve_arc_bbox."""
+    bbox = p_curve_arc_bbox(p0, p1, p2)
+    if bbox is None:
+        return False
+    xlo, xhi, ylo, yhi = bbox
+    return xlo >= margin and xhi <= PLAYFIELD_W - margin and ylo >= margin and yhi <= PLAYFIELD_H - margin
 
 
 def snap_distance(gap_ms: float, beat_length_ms: float, slider_multiplier: float) -> float:
@@ -370,9 +488,16 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
     why --stack-probability stopped visibly doing anything.)
     """
     quarter_beat_ms = beat_length_ms / 4.0
+    eighth_beat_ms = beat_length_ms / 8.0
     threshold = quarter_beat_ms + 1.0
     MAX_RUN_LEN = 8  # matches add_variety.py's own hard cap (cap_stream_length's max_len at frequency 1)
     MIN_STREAM_LEN = 4  # fewer than this is a quick triplet, not a stream (see docstring)
+
+    def gap_rate(gap_ms: float) -> str:
+        # "eighth" (a climax burst's own rate) vs. "quarter" (everything
+        # else this loop ever sees, since threshold above already only
+        # lets a quarter-beat-or-closer gap through in the first place).
+        return "eighth" if gap_ms <= eighth_beat_ms + 1.0 else "quarter"
 
     mode_of: dict[int, tuple[int, str]] = {}
     i = 0
@@ -383,8 +508,22 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
             i += 1
             continue
         j = i + 1
+        run_rate = None
         while (j < n and not objects[j].is_slider
                and (objects[j].time - objects[j - 1].time) <= threshold):
+            # A run only ever streams at one consistent pace -- a stack
+            # mixing an eighth-beat climax burst with a slower quarter-beat
+            # stretch reads as one held-in-place gesture even though the
+            # actual pacing changed partway through it, which is
+            # disorienting (the same held spot no longer means "hit these
+            # all at the same rate"). Splitting into a fresh run right at
+            # the rate change gives the change its own entry/exit gap and
+            # (if it streams) its own stack position instead.
+            rate = gap_rate(objects[j].time - objects[j - 1].time)
+            if run_rate is None:
+                run_rate = rate
+            elif rate != run_rate:
+                break
             j += 1
         run_len = j - i
         if run_len >= 2:
@@ -505,6 +644,12 @@ def main() -> None:
         q_low, q_high = 0.35, 0.75
 
     measure_buckets = compute_measure_energy_buckets(energy_at, offset_ms, measure_length_ms, objects[-1].time)
+    # A genuinely-repeating measure (its own windowed sequence of buckets
+    # recurring elsewhere, not just this one measure's bucket value
+    # coincidentally matching) plays its motif from the *first*
+    # occurrence's own measure index -- see motif_turn_degrees' own
+    # docstring.
+    measure_repeat_map = find_repeating_measure_map(measure_buckets)
     stream_mode = build_stream_runs(objects, beat_length_ms, rng, args.seed, offset_ms=offset_ms,
                                      measure_length_ms=measure_length_ms, measure_buckets=measure_buckets,
                                      stream_frequency=args.stream_frequency,
@@ -607,6 +752,20 @@ def main() -> None:
     # a run at all, so the boost applies leaving one too, not just entering.
     STREAM_TRANSITION_BOOST = 1.4
     was_in_stream = False
+    last_stream_mode = None  # the mode ("stack"/"line"/"flow") the just-finished run used, if any
+    last_stack_anchor = None  # that run's stack spot, if it was a "stack" run — see leaving_stream below
+
+    # Slider shape consistency within a combo: once the *first* slider in a
+    # combo lands on straight or curved, every later slider in that same
+    # combo (until the next new-combo) is held to the same choice — a
+    # combo mixing a straight slider, a gentle Bezier, and a pronounced
+    # arc back to back reads as random rather than a deliberate pattern.
+    # Only the straight-vs-curved split is locked; a "curved" combo can
+    # still vary between a gentle Bezier and a pronounced arc slider to
+    # slider (and a chain's own polyline-vs-smooth-curve choice), so there
+    # is still real shape variety from one combo to the next and within a
+    # curved one, just not a jarring flip mid-phrase.
+    combo_curved: bool | None = None
 
     def wander_nudge(angle: float, x: float, y: float) -> float:
         bias = math.atan2(wander_target[1] - y, wander_target[0] - x)
@@ -622,6 +781,7 @@ def main() -> None:
         if obj.is_new_combo:
             wander_target = (wander_rng.uniform(MARGIN, PLAYFIELD_W - MARGIN),
                               wander_rng.uniform(MARGIN, PLAYFIELD_H - MARGIN))
+            combo_curved = None
 
         tier = classify_tier(energy_at(obj.time), q_low, q_high)
         entry = stream_mode.get(idx)
@@ -641,6 +801,15 @@ def main() -> None:
         leaving_stream = mode is None and was_in_stream
         boost = STREAM_TRANSITION_BOOST if (entering_stream or leaving_stream) else 1.0
 
+        if mode is not None:
+            # Tracks which mode (and, for "stack", which spot) the run this
+            # object belongs to uses — read once, right as the run ends
+            # (see leaving_stream below), then cleared, so a stale value
+            # from several runs back can never wrongly re-fire once a
+            # "line"/"flow" run has come and gone since.
+            last_stream_mode = mode
+            last_stack_anchor = stack_anchor if mode == "stack" else None
+
         if mode == "stack":
             if stack_anchor is None:
                 # First member of this stack run: it still moves normally
@@ -653,7 +822,7 @@ def main() -> None:
                 # object several beats away that just happened to precede
                 # it.
                 spacing = max(MIN_SPACING, min(MAX_SPACING, boost * styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing * spacing_scale_for(obj.time), rng)))
-                cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
+                cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter, measure_repeat_map=measure_repeat_map)
                 cur_angle = wander_nudge(cur_angle, cur_x, cur_y)
                 new_x, new_y, cur_angle = place_at_distance(cur_x, cur_y, spacing, cur_angle)
                 cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
@@ -661,13 +830,14 @@ def main() -> None:
             else:
                 # Every other circle in this run: hold the exact same spot.
                 cur_x, cur_y = stack_anchor
+            last_stack_anchor = stack_anchor  # this run's just-established anchor, for leaving_stream below
         elif mode == "line":
             # The whole run moves along one fixed direction, decided once
             # when the run is first entered, so consecutive circles
             # overlap along a straight line rather than zigzagging.
             if line_run_angle is None:
                 line_run_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
-                                             measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
+                                             measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter, measure_repeat_map=measure_repeat_map)
                 line_run_angle = wander_nudge(line_run_angle, cur_x, cur_y)
             spacing = max(MIN_SPACING, min(MAX_SPACING, boost * styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing * spacing_scale_for(obj.time), rng)))
             # A run's direction is locked in once, above — but if it
@@ -696,12 +866,22 @@ def main() -> None:
             new_x, new_y, _ = place_at_distance(cur_x, cur_y, spacing, line_run_angle)
             cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
             cur_angle = line_run_angle
+        elif leaving_stream and last_stream_mode == "stack" and last_stack_anchor is not None:
+            # The very first object right after a "stack" run holds the
+            # exact same spot as the stack itself, one time only — a
+            # stack (all zero px apart) reads as one held-in-place gesture,
+            # and having whatever immediately follows it jump away right
+            # on its heels undercuts that read; the object *after* this
+            # one goes back to normal flow. One-shot: cleared below so a
+            # second stream ending later doesn't keep re-triggering it.
+            cur_x, cur_y = last_stack_anchor
+            last_stack_anchor = None
         else:
             # Outside a stream: normal distance-snap + motif-driven flow
             # (plus the transition boost on the one gap right after a
             # stream ends, for the same readability reason as entering one).
             spacing = max(MIN_SPACING, min(MAX_SPACING, boost * styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing * spacing_scale_for(obj.time), rng)))
-            cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
+            cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter, measure_repeat_map=measure_repeat_map)
             cur_angle = wander_nudge(cur_angle, cur_x, cur_y)
             new_x, new_y, cur_angle = place_at_distance(cur_x, cur_y, spacing, cur_angle)
             cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
@@ -721,24 +901,36 @@ def main() -> None:
                 # a more pronounced circular arc that actually guides the
                 # cursor through a real curve.
                 end_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
-                                        measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
+                                        measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter, measure_repeat_map=measure_repeat_map)
                 end_x, end_y, end_angle = place_at_distance(cur_x, cur_y, segment_length, end_angle)
                 end_x, end_y = clamp_to_playfield(end_x, end_y, margin=MARGIN)
 
                 _, straight_prob, bezier_prob, bow_scale = shape_mix_for(obj.time)
-                shape_roll = rng.random()
+                # Straight-vs-curved is decided once per combo (see
+                # combo_curved's own comment) — only the *first* slider of
+                # a combo actually rolls for it; every later slider in the
+                # same combo just inherits that choice. Bezier-vs-perfect-
+                # circle still gets its own fresh roll per slider (rescaled
+                # into the same [straight_prob, 1) range the original single
+                # roll used, so the relative odds between them are
+                # unchanged), so a curved combo still has real shape
+                # variety slider to slider, just never flips to straight
+                # mid-combo.
+                if combo_curved is None:
+                    combo_curved = rng.random() >= straight_prob
                 # A tiny seeded wobble on the bow itself, same reasoning as
                 # styled_spacing: keeps curves from looking mechanically
                 # identical whenever curviness happens to land the same
                 # shape twice, while staying reproducible for a given seed.
                 bow_jitter = 1.0 + rng.uniform(-0.1, 0.1)
-                if shape_roll < straight_prob:
+                if not combo_curved:
                     obj.curve_type = "L"
                     obj.points = [(end_x, end_y)]
                 else:
                     mid_x, mid_y = (cur_x + end_x) / 2.0, (cur_y + end_y) / 2.0
                     perp_angle = end_angle + math.pi / 2
-                    if shape_roll < bezier_prob:
+                    subtype_roll = rng.uniform(straight_prob, 1.0)
+                    if subtype_roll < bezier_prob:
                         # A quadratic Bezier through (start, bow, end) — a
                         # gentle arc. Unlike a "P" (perfect-circle) curve
                         # with a *small* bow, whose rendered path can swing
@@ -749,19 +941,44 @@ def main() -> None:
                         obj.curve_type = "B"
                         bow = min(40.0 * bow_scale, segment_length * 0.25 * bow_scale) * bow_jitter
                     else:
-                        # A real circular arc: safe here specifically
-                        # because the bow is deliberately large relative to
-                        # the chord (well clear of the near-collinear
-                        # configuration that causes a perfect-circle curve
-                        # to balloon outward) — a pronounced, legible curve
+                        # A real circular arc: a pronounced, legible curve
                         # that actually guides the cursor around a bend.
+                        # The bow is deliberately large relative to the
+                        # chord specifically to stay clear of the near-
+                        # collinear configuration that makes a perfect-
+                        # circle curve balloon outward -- but "less likely"
+                        # isn't "never," especially at high --curviness
+                        # (a larger bow_scale directly widens the bow), so
+                        # this is still verified for real below rather than
+                        # just trusted.
                         obj.curve_type = "P"
                         bow = min(70.0 * bow_scale, segment_length * 0.45 * bow_scale) * bow_jitter
                     bow_x, bow_y = clamp_to_playfield(mid_x + bow * math.cos(perp_angle),
                                                        mid_y + bow * math.sin(perp_angle), margin=MARGIN)
+                    # A P curve's three points can each individually sit in
+                    # bounds while the arc actually connecting them still
+                    # bulges off the playfield (p_curve_arc_bbox computes
+                    # the arc's own extent, not just its points' bounding
+                    # box) — a Bezier through the exact same three points
+                    # is provably safe instead (always within their convex
+                    # hull), so that's the fallback rather than trying to
+                    # iteratively shrink the bow until it happens to fit.
+                    if obj.curve_type == "P" and not p_curve_fits_playfield(
+                            (cur_x, cur_y), (bow_x, bow_y), (end_x, end_y), MARGIN):
+                        obj.curve_type = "B"
                     obj.points = [(bow_x, bow_y), (end_x, end_y)]
 
-                cur_x, cur_y, cur_angle = end_x, end_y, end_angle
+                if obj.slides % 2 == 1:
+                    cur_x, cur_y, cur_angle = end_x, end_y, end_angle
+                else:
+                    # A bouncing slider with an *even* number of repeats
+                    # ends back exactly where it started (HitObject.
+                    # end_position() already accounts for this) -- cur_x/
+                    # cur_y must match that, or the next object gets
+                    # distance-snapped from a point the cursor was never
+                    # actually left at, which is exactly what was silently
+                    # breaking distance-snap right after a bounce slider.
+                    cur_angle = end_angle + math.pi
             else:
                 # Chain slider: walk one flow-angle segment per waypoint so
                 # each note in the chain still reads as a distinct hop, then
@@ -771,11 +988,18 @@ def main() -> None:
                 # guaranteed to stay within their convex hull, so this is
                 # safe even for a long, sweeping chain).
                 chain_curviness, _, _, _ = shape_mix_for(obj.time)
-                obj.curve_type = "L" if rng.random() >= chain_curviness else "B"
+                # Same combo-locked straight-vs-curved rule as the single-
+                # anchor case above (see combo_curved's own comment) — a
+                # chain only ever chooses between "L" and "B" to begin
+                # with, so the combo's lock applies directly with no
+                # subtype re-roll needed.
+                if combo_curved is None:
+                    combo_curved = rng.random() < chain_curviness
+                obj.curve_type = "B" if combo_curved else "L"
                 new_points = []
                 for _ in range(num_segments):
                     cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
-                                            measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
+                                            measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter, measure_repeat_map=measure_repeat_map)
                     px, py, cur_angle = place_at_distance(cur_x, cur_y, segment_length, cur_angle)
                     cur_x, cur_y = clamp_to_playfield(px, py, margin=MARGIN)
                     new_points.append((cur_x, cur_y))

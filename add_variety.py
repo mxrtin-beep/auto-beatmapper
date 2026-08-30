@@ -61,6 +61,7 @@ import random
 import librosa
 import numpy as np
 
+from apply_style import compute_measure_energy_buckets, find_repeating_measure_map
 from beatmap_utils import HitObject, read_osu, slider_length_for_gap, write_osu
 
 # Hitsound bit flags (osu! HitObject hitSound field / slider edgeHitsounds).
@@ -163,6 +164,95 @@ def hitsound_for(energy_value: float, is_downbeat: bool, q_high: float, q_climax
     if energy_value > q_high:
         return HS_WHISTLE
     return HS_NORMAL
+
+
+
+def assign_hitsounds(objects: list[HitObject], energy_at, offset_ms: float, measure_length_ms: float,
+                      q_high: float, q_climax: float, measure_repeat_map: dict[int, int] | None = None) -> None:
+    """Assign every object's hitsound (and, for sliders, edge_hitsounds) from
+    local loudness and downbeat position, mutating `objects` in place.
+    Shared between add_variety.py's own pipeline and add_sliders_v2.py (the
+    Base Map v2 pathway) — a map with every object left on the default
+    "normal" sample reads as broken/unfinished to any checker.
+
+    Decided once per whole beat, not once per object: checking the
+    reference set (example/keha_backstabber/) found every hitsound change
+    lines up with a whole- or half-beat position, never switching between
+    two objects that share the same whole beat, and a real accent (clap/
+    finish) tends to land on one consistent beat of the bar (e.g. the
+    backbeat) rather than flickering note to note the way sampling energy
+    per-object could when it hovers right at a quantile threshold. All
+    objects within the same beat share one hitsound, decided from that
+    beat's own energy (sampled at its start) and whether it's a downbeat.
+
+    `measure_repeat_map` (see find_repeating_measure_map) is optional but
+    strongly recommended — without it, a verse's second pass gets its own
+    hitsounds decided independently from its own (very similar, but not
+    identical) energy, which drifts from the first pass's choices exactly
+    where the reference set stays consistent. When given, a beat whose
+    measure repeats an earlier one just copies that earlier measure's own
+    corresponding beat, if it made one — a section's own accent pattern
+    replaying, not a coincidence.
+
+    A bouncing slider only accents its head — repeating the same clap/
+    finish on every one of a dozen rapid reversals is jarring rather than
+    emphatic, so its repeats and tail stay a plain normal sample instead.
+    A long quiet/normal stretch can otherwise go many measures with every
+    hit landing on plain HS_NORMAL, which itself reads as "no hitsounds"
+    to a checker — at least a soft whistle is forced often enough that
+    never happens, even where the energy alone wouldn't have earned one.
+    """
+    beat_length_ms = measure_length_ms / 4.0
+    MAX_MS_WITHOUT_ACCENT = measure_length_ms
+    last_accent_time = None
+    beat_hitsound: dict[int, int] = {}
+    for obj in objects:
+        beat_idx = int(round((obj.time - offset_ms) / beat_length_ms))
+        if beat_idx not in beat_hitsound:
+            beat_time = offset_ms + beat_idx * beat_length_ms
+
+            canonical_beat_idx = None
+            if measure_repeat_map is not None:
+                measure_idx, beat_in_measure = divmod(beat_idx, 4)
+                canonical_measure = measure_repeat_map.get(measure_idx, measure_idx)
+                if canonical_measure != measure_idx:
+                    canonical_beat_idx = canonical_measure * 4 + beat_in_measure
+
+            if canonical_beat_idx is not None and canonical_beat_idx in beat_hitsound:
+                # This measure repeats an earlier one, and that earlier
+                # measure's own corresponding beat already had an object
+                # (and so a hitsound decided) -- reuse it verbatim, rather
+                # than re-deriving independently from this pass's own
+                # (similar but not identical) energy.
+                hs = beat_hitsound[canonical_beat_idx]
+            else:
+                e = energy_at(beat_time)
+                on_downbeat = is_on_downbeat(beat_time, offset_ms, measure_length_ms)
+                hs = hitsound_for(e, on_downbeat, q_high, q_climax)
+                if hs == HS_NORMAL and (last_accent_time is None
+                                         or beat_time - last_accent_time > MAX_MS_WITHOUT_ACCENT):
+                    hs = HS_WHISTLE
+            beat_hitsound[beat_idx] = hs
+            if hs != HS_NORMAL:
+                last_accent_time = beat_time
+        hs = beat_hitsound[beat_idx]
+        obj.hitsound = hs
+        if obj.is_slider:
+            if obj.slides > 1:
+                obj.edge_hitsounds = [hs] + [HS_NORMAL] * obj.slides
+            else:
+                obj.edge_hitsounds = [hs] * (obj.slides + 1)
+
+
+def chain_len_weights(bias: float) -> tuple[float, float, float]:
+    """Weights for chain lengths (2, 3, 4 nodes), interpolated so bias=0.5
+    reproduces the original fixed (50, 30, 20) split exactly (keeping the
+    default behavior identical), tilting toward (2) below that and (4)
+    above it. Shared with add_sliders_v2.py, which uses the exact same
+    length-bias idea for the Base Map v2 pathway's own slider merging."""
+    SHORT, MID, LONG = (70.0, 22.0, 8.0), (50.0, 30.0, 20.0), (15.0, 30.0, 55.0)
+    a, b, t = (SHORT, MID, bias / 0.5) if bias <= 0.5 else (MID, LONG, (bias - 0.5) / 0.5)
+    return tuple(a[i] + (b[i] - a[i]) * t for i in range(3))
 
 
 def cap_stream_length(objects: list[HitObject], beat_length_ms: float, slider_multiplier: float,
@@ -385,16 +475,6 @@ def main() -> None:
     # definition), 8 at frequency 1 (matches the pre-existing hard cap).
     stream_max_len = round(3 + args.stream_frequency * 5)
     args.slider_length_bias = max(0.0, min(1.0, args.slider_length_bias))
-
-    def chain_len_weights(bias: float) -> tuple[float, float, float]:
-        """Weights for chain lengths (2, 3, 4 nodes), interpolated so bias=0.5
-        reproduces the original fixed (50, 30, 20) split exactly (keeping the
-        default behavior identical), tilting toward (2) below that and (4)
-        above it."""
-        SHORT, MID, LONG = (70.0, 22.0, 8.0), (50.0, 30.0, 20.0), (15.0, 30.0, 55.0)
-        a, b, t = (SHORT, MID, bias / 0.5) if bias <= 0.5 else (MID, LONG, (bias - 0.5) / 0.5)
-        return tuple(a[i] + (b[i] - a[i]) * t for i in range(3))
-
     chain_weights = chain_len_weights(args.slider_length_bias)
 
     if args.seed is None:
@@ -687,32 +767,15 @@ def main() -> None:
 
     # Hitsounds: bigger accents (finish/clap/whistle) line up with strong
     # downbeats and louder moments; quieter/off-beat hits stay a plain
-    # normal sample. A bouncing slider only accents its head — repeating
-    # the same clap/finish on every one of a dozen rapid reversals is
-    # jarring rather than emphatic, so its repeats and tail stay a plain
-    # normal sample instead.
-    MAX_MS_WITHOUT_ACCENT = measure_length_ms
-    last_accent_time = None
-    for obj in new_objects:
-        e = energy_at(obj.time)
-        on_downbeat = is_on_downbeat(obj.time, offset_ms, measure_length_ms)
-        hs = hitsound_for(e, on_downbeat, q_high, q_climax)
-        # A long quiet/normal stretch can otherwise go many measures with
-        # every hit landing on plain HS_NORMAL, which reads as "no
-        # hitsounds" to any checker — force at least a soft whistle often
-        # enough that never happens, even where the energy alone wouldn't
-        # have earned one.
-        if hs == HS_NORMAL and (last_accent_time is None
-                                 or obj.time - last_accent_time > MAX_MS_WITHOUT_ACCENT):
-            hs = HS_WHISTLE
-        obj.hitsound = hs
-        if hs != HS_NORMAL:
-            last_accent_time = obj.time
-        if obj.is_slider:
-            if obj.slides > 1:
-                obj.edge_hitsounds = [hs] + [HS_NORMAL] * obj.slides
-            else:
-                obj.edge_hitsounds = [hs] * (obj.slides + 1)
+    # normal sample. measure_repeat_map lets a verse/chorus's second pass
+    # copy its first pass's own accent pattern (see find_repeating_measure_
+    # map and assign_hitsounds' own docstring) rather than re-deriving
+    # independently from that pass's own, merely similar energy.
+    measure_buckets = compute_measure_energy_buckets(energy_at, offset_ms, measure_length_ms,
+                                                       new_objects[-1].time if new_objects else 0.0)
+    measure_repeat_map = find_repeating_measure_map(measure_buckets)
+    assign_hitsounds(new_objects, energy_at, offset_ms, measure_length_ms, q_high, q_climax,
+                      measure_repeat_map=measure_repeat_map)
 
     # Sanity check: nothing should overlap in time, judged the same way the
     # .osu file itself will be read back (every object's time rounded to a
