@@ -264,6 +264,66 @@ def place_at_distance(cur_x: float, cur_y: float, spacing: float, angle: float) 
     return x, y, angle
 
 
+def p_curve_arc_bbox(p0: tuple[float, float], p1: tuple[float, float],
+                      p2: tuple[float, float]) -> tuple[float, float, float, float] | None:
+    """Bounding box of the actual rendered arc of a "P" (perfect-circle)
+    slider through (p0, p1, p2) — the arc's *own* extent, not just the
+    bounding box of its three defining points. This is what makes a P
+    curve unsafe in a way a Bezier through the same points never is: all
+    three points can individually sit well inside the playfield while the
+    circular arc connecting them still bulges outside it, whenever the
+    arc's radius is large relative to the chord (near-collinear points
+    especially). Returns None if the three points are exactly collinear
+    (no finite circle fits) — the caller should treat that as unsafe too.
+    """
+    (ax, ay), (bx, by), (cx, cy) = p0, p1, p2
+    d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs(d) < 1e-9:
+        return None
+    ux = ((ax**2 + ay**2) * (by - cy) + (bx**2 + by**2) * (cy - ay) + (cx**2 + cy**2) * (ay - by)) / d
+    uy = ((ax**2 + ay**2) * (cx - bx) + (bx**2 + by**2) * (ax - cx) + (cx**2 + cy**2) * (bx - ax)) / d
+    r = math.hypot(ax - ux, ay - uy)
+
+    a0 = math.atan2(ay - uy, ax - ux)
+    a1 = math.atan2(by - uy, bx - ux)
+    a2 = math.atan2(cy - uy, cx - ux)
+
+    def normalize_above(angle: float, ref: float) -> float:
+        while angle < ref:
+            angle += 2 * math.pi
+        while angle > ref + 2 * math.pi:
+            angle -= 2 * math.pi
+        return angle
+
+    # Sweep from a0 to a2 the way that actually passes through a1 (the
+    # slider's own bow/anchor point, its declared shape) -- the *other*
+    # way around the circle is not the arc osu! renders.
+    a2n = normalize_above(a2, a0)
+    a1n = normalize_above(a1, a0)
+    if not (a0 <= a1n <= a2n):
+        a2n = a0 - (2 * math.pi - (a2n - a0))
+    lo, hi = min(a0, a2n), max(a0, a2n)
+
+    xs, ys = [ax, bx, cx], [ay, by, cy]
+    steps = 32
+    for i in range(steps + 1):
+        angle = lo + (hi - lo) * i / steps
+        xs.append(ux + r * math.cos(angle))
+        ys.append(uy + r * math.sin(angle))
+    return min(xs), max(xs), min(ys), max(ys)
+
+
+def p_curve_fits_playfield(p0: tuple[float, float], p1: tuple[float, float], p2: tuple[float, float],
+                            margin: float) -> bool:
+    """Whether a P-curve slider's actual rendered arc through these three
+    points stays within the playfield margin -- see p_curve_arc_bbox."""
+    bbox = p_curve_arc_bbox(p0, p1, p2)
+    if bbox is None:
+        return False
+    xlo, xhi, ylo, yhi = bbox
+    return xlo >= margin and xhi <= PLAYFIELD_W - margin and ylo >= margin and yhi <= PLAYFIELD_H - margin
+
+
 def snap_distance(gap_ms: float, beat_length_ms: float, slider_multiplier: float) -> float:
     """The exact pixel distance a slider spanning gap_ms would travel.
 
@@ -749,16 +809,31 @@ def main() -> None:
                         obj.curve_type = "B"
                         bow = min(40.0 * bow_scale, segment_length * 0.25 * bow_scale) * bow_jitter
                     else:
-                        # A real circular arc: safe here specifically
-                        # because the bow is deliberately large relative to
-                        # the chord (well clear of the near-collinear
-                        # configuration that causes a perfect-circle curve
-                        # to balloon outward) — a pronounced, legible curve
+                        # A real circular arc: a pronounced, legible curve
                         # that actually guides the cursor around a bend.
+                        # The bow is deliberately large relative to the
+                        # chord specifically to stay clear of the near-
+                        # collinear configuration that makes a perfect-
+                        # circle curve balloon outward -- but "less likely"
+                        # isn't "never," especially at high --curviness
+                        # (a larger bow_scale directly widens the bow), so
+                        # this is still verified for real below rather than
+                        # just trusted.
                         obj.curve_type = "P"
                         bow = min(70.0 * bow_scale, segment_length * 0.45 * bow_scale) * bow_jitter
                     bow_x, bow_y = clamp_to_playfield(mid_x + bow * math.cos(perp_angle),
                                                        mid_y + bow * math.sin(perp_angle), margin=MARGIN)
+                    # A P curve's three points can each individually sit in
+                    # bounds while the arc actually connecting them still
+                    # bulges off the playfield (p_curve_arc_bbox computes
+                    # the arc's own extent, not just its points' bounding
+                    # box) — a Bezier through the exact same three points
+                    # is provably safe instead (always within their convex
+                    # hull), so that's the fallback rather than trying to
+                    # iteratively shrink the bow until it happens to fit.
+                    if obj.curve_type == "P" and not p_curve_fits_playfield(
+                            (cur_x, cur_y), (bow_x, bow_y), (end_x, end_y), MARGIN):
+                        obj.curve_type = "B"
                     obj.points = [(bow_x, bow_y), (end_x, end_y)]
 
                 cur_x, cur_y, cur_angle = end_x, end_y, end_angle

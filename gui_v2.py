@@ -6,21 +6,27 @@ add_sliders_v2.py, in one window.
 This is a deliberately separate app from gui.py, not a tab or checkbox
 inside it: the v2 pathway is an independent, standalone alternative to the
 main pipeline (see generate_base_beatmap_v2.py's own module docstring),
-and it exposes a completely different, much smaller set of knobs — no
-Difficulties spread, no streams/stacks, no statistics report, just three
-sliders:
+and it exposes a smaller, pathway-specific set of knobs:
 
-  * Intensity       -- generate_base_beatmap_v2.py's --intensity: how much
-                        of the song ends up on half/quarter-beat spacing
-                        (and measure-anchored eighth-note bursts) versus
-                        staying whole-beat dominant.
-  * Slider length    -- add_sliders_v2.py's --slider-length-bias: fewer/
-                         longer sliders vs. more/shorter ones, when
-                         circles get merged into sliders.
-  * Slider curviness -- forwarded to add_sliders_v2.py's --curviness (the
-                         same knob apply_style.py's own --curviness is,
-                         since add_sliders_v2.py re-runs apply_style.py to
-                         do the actual positioning).
+  * Intensity          -- generate_base_beatmap_v2.py's --intensity: how
+                           much of the song ends up on half/quarter-beat
+                           spacing (and measure-anchored eighth-note
+                           bursts) versus staying whole-beat dominant.
+  * Slider vs. circle mix -- add_sliders_v2.py's --chain-probability: how
+                           often an eligible run of circles actually
+                           becomes a slider at all, versus staying plain
+                           circles.
+  * Slider length       -- add_sliders_v2.py's --slider-length-bias: of
+                            whichever runs do become sliders, fewer/longer
+                            vs. more/shorter ones.
+  * Slider curviness    -- forwarded to add_sliders_v2.py's --curviness
+                            (the same knob apply_style.py's own
+                            --curviness is, since add_sliders_v2.py
+                            re-runs apply_style.py for positioning).
+  * Jump distance       -- forwarded to apply_style.py's own --spacing,
+                            the same knob that already produces
+                            accurately-spaced, error-free output for the
+                            main pipeline.
 
 Reuses gui.py's dark theme (_configure_style) and color constants directly
 so the two apps look like part of the same project, without duplicating
@@ -41,7 +47,9 @@ from dataclasses import dataclass
 from tkinter import filedialog, messagebox, ttk
 
 import add_sliders_v2
+import beatmap_report
 import generate_base_beatmap_v2
+from beatmap_stats import compute_stats
 from build_osz import build_osz
 from gui import BG, BG_ENTRY, FONT_MONO, PAD_INNER, PAD_OUTER, TextRedirector, _configure_style, _open_path
 
@@ -68,14 +76,40 @@ SLIDER_PARAMS = [
                 "dominant throughout), max 1 (much more of it on half/quarter-beat spacing, "
                 "including denser measure-anchored bursts). Default 0.5.",
                 0.0, 1.0, 0.5),
+    SliderParam("--chain-probability", "Slider vs. circle mix",
+                "How often an eligible run of adjacent circles actually becomes a slider, "
+                "versus staying plain circles. Min 0 (always circles), max 1 (every eligible "
+                "run becomes a slider). Default 0.8.",
+                0.0, 1.0, 0.8),
     SliderParam("--slider-length-bias", "Slider length",
-                "How long a merged slider tends to run. Min 0 (more, shorter/choppier "
-                "sliders), max 1 (fewer, longer sliders). Default 0.5.",
+                "Of whichever runs do become sliders: how long they tend to run. Min 0 "
+                "(more, shorter/choppier sliders), max 1 (fewer, longer sliders). Default 0.5.",
                 0.0, 1.0, 0.5),
     SliderParam("--curviness", "Slider curviness",
                 "How curved slider paths look, from mostly straight lines to pronounced "
                 "arcs. Min 0 (straight), max 1 (very curved). Default 0.5.",
                 0.0, 1.0, 0.5),
+    SliderParam("--spacing", "Jump distance",
+                "How far apart notes are placed for a given time gap between them. "
+                "Min 0.5 (tight, close together), max 2.5 (wide, dramatic jumps). Default 1.8.",
+                0.5, 2.5, 1.8),
+]
+
+
+@dataclass
+class EntryParam:
+    flag: str
+    label: str
+    description: str
+
+
+TIMING_PARAMS = [
+    EntryParam("--bpm", "BPM override",
+               "Force a specific tempo instead of detecting it from the song automatically. "
+               "Leave blank to auto-detect."),
+    EntryParam("--offset", "Beat offset override (ms)",
+               "Force the time of the very first beat, in milliseconds, instead of detecting "
+               "it automatically. Leave blank to auto-detect."),
 ]
 
 
@@ -92,6 +126,7 @@ class App:
         self.result_error: Exception | None = None
         self.result_path: str | None = None
         self.slider_vars: dict[str, tk.DoubleVar] = {}
+        self.entry_vars: dict[str, tk.StringVar] = {}
 
         outer = ttk.Frame(root)
         outer.pack(fill="both", expand=True)
@@ -141,22 +176,33 @@ class App:
             self._labeled_entry(meta_panel, i, label, desc, var, first=(i == 0), last=(i == len(meta_fields) - 1))
         meta_panel.columnconfigure(1, weight=1)
 
-        # --- Style section (the only three knobs this pathway has) ---
+        # --- Style section ---
         style_panel = self._panel(form, "Style")
         for i, p in enumerate(SLIDER_PARAMS):
             self._slider_row(style_panel, i, p, first=(i == 0))
         style_panel.columnconfigure(0, weight=1)
+
+        # --- Timing section ---
+        timing_panel = self._panel(form, "Timing")
+        for i, p in enumerate(TIMING_PARAMS):
+            var = tk.StringVar()
+            self.entry_vars[p.flag] = var
+            self._labeled_entry(timing_panel, i, p.label, p.description, var,
+                                 first=(i == 0), last=(i == len(TIMING_PARAMS) - 1))
+        timing_panel.columnconfigure(1, weight=1)
 
         # --- Options ---
         opt_panel = self._panel(form, "Options")
         self.osz_var = tk.BooleanVar(value=True)
         self.auto_open_var = tk.BooleanVar(value=True)
         self.keep_intermediate_var = tk.BooleanVar(value=False)
+        self.report_var = tk.BooleanVar(value=False)
         options = (
             (self.osz_var, "Package as .osz (ready to import into osu!)"),
             (self.auto_open_var, "Open the finished map when done"),
             (self.keep_intermediate_var, "Keep intermediate stages too (Circles and Sliders, "
                                           "alongside the final Styled map)"),
+            (self.report_var, "Generate a statistics report (PDF, plotted against Backstabber)"),
         )
         for i, (var, label) in enumerate(options):
             ttk.Checkbutton(opt_panel, text=label, variable=var).grid(
@@ -297,12 +343,18 @@ class App:
                          "--creator", self.creator_var.get().strip() or "auto-beatmapper",
                          "--version", CIRCLES_VERSION,
                          "--intensity", f"{self.slider_vars['--intensity'].get():.3f}"]
+            for p in TIMING_PARAMS:
+                value = self.entry_vars[p.flag].get().strip()
+                if value:
+                    base_argv += [p.flag, value]
             sys.argv = ["generate_base_beatmap_v2.py"] + base_argv
             generate_base_beatmap_v2.main()
 
             sliders_argv = [circles_path, audio, "--output", styled_path, "--version", STYLED_VERSION,
+                             "--chain-probability", f"{self.slider_vars['--chain-probability'].get():.3f}",
                              "--slider-length-bias", f"{self.slider_vars['--slider-length-bias'].get():.3f}",
-                             "--curviness", f"{self.slider_vars['--curviness'].get():.3f}"]
+                             "--curviness", f"{self.slider_vars['--curviness'].get():.3f}",
+                             "--spacing", f"{self.slider_vars['--spacing'].get():.3f}"]
             # The merged-but-unstyled "Sliders" stage is only ever worth
             # writing out when the user actually wants to inspect it --
             # otherwise it's exactly what add_sliders_v2.py already treats
@@ -312,6 +364,22 @@ class App:
                 sliders_argv += ["--merged-output", sliders_path, "--merged-version", SLIDERS_VERSION]
             sys.argv = ["add_sliders_v2.py"] + sliders_argv
             add_sliders_v2.main()
+
+            if self.report_var.get():
+                # Compared against Backstabber's Insane -- the closest
+                # thing to a formal "tier" this pathway has right now,
+                # since it doesn't yet derive a difficulty spread of its
+                # own (see gui_v2.py's own module docstring).
+                try:
+                    gen_stats = compute_stats(styled_path)
+                    ref_path = beatmap_report.find_reference_osu("insane")
+                    ref_stats = compute_stats(ref_path) if ref_path else None
+                    report_path = os.path.join(outdir, f"{title} (Base v2 Statistics Report).pdf")
+                    beatmap_report.render_report({"styled": (gen_stats, ref_stats)},
+                                                  report_path, gen_label=title)
+                    self.log_queue.put(f"Wrote statistics report: {report_path}\n")
+                except Exception as e:  # noqa: BLE001 - the report is a bonus, never fail generation over it
+                    self.log_queue.put(f"\n(couldn't generate statistics report: {e})\n")
 
             # Circles/Sliders are worth keeping around at all only when the
             # user actually checked the box -- otherwise they're the same

@@ -23,6 +23,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime
 import glob
 import os
 
@@ -46,8 +47,39 @@ HIST_FIELDS = [
     ("turn_angle_deg", "Turn angle", "°"),
 ]
 
+# A small, consistent visual identity for the whole document -- one accent
+# pair (generated vs. reference), one neutral ink/muted/rule/panel scale,
+# and one font family, all defined once here rather than repeated (and
+# drifting) across every page-building function below.
 GENERATED_COLOR = "#4c72b0"
 REFERENCE_COLOR = "#dd8452"
+INK = "#1c1e26"
+MUTED = "#6b7280"
+RULE = "#d8dbe2"
+PANEL = "#f4f5f7"
+FONT_FAMILY = "DejaVu Sans"  # matplotlib's own default -- set explicitly so every page agrees
+
+plt.rcParams.update({
+    "font.family": FONT_FAMILY,
+    "text.color": INK,
+    "axes.edgecolor": RULE,
+    "axes.labelcolor": INK,
+    "xtick.color": MUTED,
+    "ytick.color": MUTED,
+    "axes.grid": True,
+    "grid.color": RULE,
+    "grid.linewidth": 0.6,
+    "grid.alpha": 0.7,
+    "axes.axisbelow": True,
+})
+
+
+def _add_footer(fig, page_num: int, total_pages: int, gen_label: str) -> None:
+    """A consistent footer on every page: report identity on the left,
+    page number on the right -- the same "this is one document, not a
+    pile of loose charts" cue a real report's master page would give."""
+    fig.text(0.06, 0.02, f"{gen_label} — Statistics Report", fontsize=7.5, color=MUTED, ha="left")
+    fig.text(0.94, 0.02, f"{page_num} / {total_pages}", fontsize=7.5, color=MUTED, ha="right")
 
 
 def find_reference_osu(tier: str, example_dir: str = EXAMPLE_DIR) -> str | None:
@@ -75,10 +107,17 @@ def find_reference_osu(tier: str, example_dir: str = EXAMPLE_DIR) -> str | None:
 
 def _plot_histogram_pair(ax, gen_dist: Distribution | None, ref_dist: Distribution | None,
                           gen_label: str, ref_label: str, title: str, unit: str) -> None:
-    ax.set_title(title)
+    ax.set_title(title, fontsize=11, fontweight="bold", color=INK, pad=10)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    for spine in ("left", "bottom"):
+        ax.spines[spine].set_color(RULE)
+
     if gen_dist is None and ref_dist is None:
-        ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
-        ax.axis("off")
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes,
+                 fontsize=10, color=MUTED, style="italic")
+        ax.set_xticks([])
+        ax.set_yticks([])
         return
 
     for dist, color, label in ((gen_dist, GENERATED_COLOR, gen_label), (ref_dist, REFERENCE_COLOR, ref_label)):
@@ -88,12 +127,15 @@ def _plot_histogram_pair(ax, gen_dist: Distribution | None, ref_dist: Distributi
         widths = [(hi - lo) for lo, hi, _ in dist.histogram]
         total = sum(c for _, _, c in dist.histogram) or 1
         heights = [c / total for _, _, c in dist.histogram]  # normalized -- comparable across different note counts
-        ax.bar(centers, heights, width=widths, align="center", color=color, alpha=0.55,
-               edgecolor=color, label=f"{label} (median {dist.median:.2f}{unit})")
+        ax.bar(centers, heights, width=widths, align="center", color=color, alpha=0.6,
+               edgecolor=color, linewidth=0.8, label=f"{label}  (median {dist.median:.2f}{unit})")
 
-    ax.set_xlabel(unit)
-    ax.set_ylabel("fraction of objects")
-    ax.legend(fontsize=7, loc="upper right")
+    ax.set_xlabel(unit, fontsize=9, color=MUTED)
+    ax.set_ylabel("Fraction of objects", fontsize=9, color=MUTED)
+    ax.tick_params(labelsize=8)
+    legend = ax.legend(fontsize=7.5, loc="upper right", frameon=True, framealpha=0.9,
+                        edgecolor=RULE, fancybox=False)
+    legend.get_frame().set_linewidth(0.6)
 
 
 def _summary_rows(gen: BeatmapStats, ref: BeatmapStats | None) -> list[tuple[str, str, str]]:
@@ -122,44 +164,115 @@ def _summary_rows(gen: BeatmapStats, ref: BeatmapStats | None) -> list[tuple[str
     return rows
 
 
+def _style_table(table, n_cols: int) -> None:
+    """Header row in the accent color with white text, alternating body-row
+    shading, and thin, consistent rules everywhere else — the difference
+    between "a matplotlib table" and something that reads as a real report
+    table at a glance."""
+    for (row, _col), cell in table.get_celld().items():
+        cell.set_edgecolor(RULE)
+        cell.set_linewidth(0.6)
+        if row == 0:
+            cell.set_facecolor(INK)
+            cell.set_text_props(color="white", fontweight="bold")
+        else:
+            cell.set_facecolor(PANEL if row % 2 == 0 else "white")
+            cell.set_text_props(color=INK)
+
+
+def _cover_page(pdf, gen_label: str, stage_names: list[str], gen_source_paths: list[str]) -> None:
+    """A proper title page — the same reason a real report doesn't open
+    straight on page one of data: it names what the document is, what
+    it's measuring against, and when it was generated, before any chart
+    asks the reader to already know that context."""
+    fig = plt.figure(figsize=(8.5, 11))
+    fig.patch.set_facecolor("white")
+    fig.text(0.5, 0.62, "Statistics Report", fontsize=26, fontweight="bold",
+              color=INK, ha="center")
+    fig.text(0.5, 0.565, gen_label, fontsize=16, color=MUTED, ha="center")
+
+    fig.add_artist(plt.Line2D([0.15, 0.85], [0.52, 0.52], color=RULE, linewidth=1, transform=fig.transFigure))
+
+    fig.text(0.15, 0.47, "Compared against", fontsize=9, color=MUTED)
+    fig.text(0.15, 0.44, EXAMPLE_LABEL, fontsize=12, color=INK, fontweight="bold")
+    fig.text(0.15, 0.395, "Sections in this report", fontsize=9, color=MUTED)
+    for i, name in enumerate(stage_names):
+        fig.text(0.17, 0.365 - i * 0.028, f"•  {name.capitalize()}", fontsize=10.5, color=INK)
+
+    generated_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    fig.text(0.15, 0.10, f"Generated {generated_at}", fontsize=8.5, color=MUTED)
+    fig.text(0.15, 0.075, "Timing distributions are compared in beats, normalized to each map's own BPM.",
+             fontsize=8, color=MUTED, style="italic")
+
+    # Legend swatches, matching every histogram page exactly.
+    for i, (color, label) in enumerate(((GENERATED_COLOR, gen_label), (REFERENCE_COLOR, EXAMPLE_LABEL))):
+        y = 0.20 - i * 0.032
+        fig.add_artist(plt.Rectangle((0.15, y), 0.02, 0.016, color=color, alpha=0.7,
+                                      transform=fig.transFigure, clip_on=False))
+        fig.text(0.185, y + 0.002, label, fontsize=9, color=INK)
+
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
 def render_report(tier_stats: dict[str, tuple[BeatmapStats, BeatmapStats | None]], output_pdf: str,
                    gen_label: str = "Generated") -> None:
-    """Write a multi-page PDF: one summary table page, then one page of
-    overlaid histograms per difficulty tier in `tier_stats` (tier name ->
-    (generated stats, reference stats-or-None if no matching example diff
-    was found))."""
+    """Write a multi-page PDF: a title page, one summary table page, then
+    one page of overlaid histograms per stage in `tier_stats` (stage name
+    -> (generated stats, reference stats-or-None if no matching example
+    diff was found)). "Stage" here is whatever key the caller passes —
+    a difficulty tier for the main pipeline, or any other label (e.g. a
+    Base Map v2 pathway stage) — render_report itself never looks it up
+    against the example set; that's build_report_for_tiers' job, for
+    callers that do mean an actual difficulty tier.
+    """
     os.makedirs(os.path.dirname(os.path.abspath(output_pdf)) or ".", exist_ok=True)
+    total_pages = 2 + len(tier_stats)  # cover + summary + one histogram page per stage
     with PdfPages(output_pdf) as pdf:
+        _cover_page(pdf, gen_label, list(tier_stats.keys()), [g.source for g, _ in tier_stats.values()])
+
         # --- Summary table page ---
         n_tiers = len(tier_stats)
-        fig, axes = plt.subplots(n_tiers, 1, figsize=(8.5, 2.6 * n_tiers + 1))
+        fig_height = 2.6 * n_tiers + 1.3
+        fig, axes = plt.subplots(n_tiers, 1, figsize=(8.5, fig_height))
         if n_tiers == 1:
             axes = [axes]
-        fig.suptitle(f"{gen_label} vs. {EXAMPLE_LABEL} — summary", fontsize=13, y=0.995)
+        # Title/subtitle placed at a constant *inch* offset from the top
+        # edge, not a fixed fraction of the figure height -- fig_height
+        # itself varies with n_tiers, so a fixed fraction (e.g. y=0.98)
+        # lands at a different absolute distance from the top on every
+        # page, close enough on a short (single-tier) page to overlap.
+        fig.suptitle("Summary", fontsize=16, fontweight="bold", color=INK,
+                     y=(fig_height - 0.32) / fig_height)
+        fig.text(0.5, (fig_height - 0.62) / fig_height, f"{gen_label}  vs.  {EXAMPLE_LABEL}",
+                 fontsize=10, color=MUTED, ha="center")
         for ax, (tier, (gen, ref)) in zip(axes, tier_stats.items()):
             ax.axis("off")
-            ref_col_label = os.path.basename(ref.source) if ref is not None else "(no matching reference diff)"
+            ax.set_title(tier.capitalize(), fontsize=11, fontweight="bold", color=INK, loc="left", pad=8)
             rows = _summary_rows(gen, ref)
             table = ax.table(cellText=[[label, g, r] for label, g, r in rows],
-                              colLabels=[tier.capitalize(), gen_label, "Backstabber"],
-                              loc="center", cellLoc="center")
+                              colLabels=["Metric", gen_label, "Backstabber"],
+                              loc="center", cellLoc="center", bbox=(0, 0, 1, 1))
             table.auto_set_font_size(False)
             table.set_fontsize(8)
-            table.scale(1, 1.3)
-        fig.tight_layout(rect=(0, 0, 1, 0.97))
+            _style_table(table, 3)
+        fig.tight_layout(rect=(0.02, 0.04, 0.98, (fig_height - 1.0) / fig_height))
+        _add_footer(fig, 2, total_pages, gen_label)
         pdf.savefig(fig)
         plt.close(fig)
 
-        # --- One histogram page per tier ---
-        for tier, (gen, ref) in tier_stats.items():
-            fig, axes = plt.subplots(2, 2, figsize=(8.5, 8))
-            fig.suptitle(f"{tier.capitalize()} — {gen_label} vs. {EXAMPLE_LABEL}"
-                         + (" (BPM-normalized where applicable)"), fontsize=12)
+        # --- One histogram page per stage ---
+        for page_num, (tier, (gen, ref)) in enumerate(tier_stats.items(), start=3):
+            fig, axes = plt.subplots(2, 2, figsize=(8.5, 8.3))
+            fig.suptitle(tier.capitalize(), fontsize=15, fontweight="bold", color=INK, y=0.975)
+            fig.text(0.5, 0.935, f"{gen_label}  vs.  {EXAMPLE_LABEL}  ·  normalized to BPM",
+                     fontsize=9.5, color=MUTED, ha="center")
             for ax, (field, label, unit) in zip(axes.flat, HIST_FIELDS):
                 gen_dist = getattr(gen, field)
                 ref_dist = getattr(ref, field) if ref is not None else None
                 _plot_histogram_pair(ax, gen_dist, ref_dist, gen_label, "Backstabber", label, unit)
-            fig.tight_layout(rect=(0, 0, 1, 0.95))
+            fig.tight_layout(rect=(0.02, 0.04, 0.98, 0.90))
+            _add_footer(fig, page_num, total_pages, gen_label)
             pdf.savefig(fig)
             plt.close(fig)
 

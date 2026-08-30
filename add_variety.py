@@ -165,6 +165,41 @@ def hitsound_for(energy_value: float, is_downbeat: bool, q_high: float, q_climax
     return HS_NORMAL
 
 
+def assign_hitsounds(objects: list[HitObject], energy_at, offset_ms: float, measure_length_ms: float,
+                      q_high: float, q_climax: float) -> None:
+    """Assign every object's hitsound (and, for sliders, edge_hitsounds) from
+    local loudness and downbeat position, mutating `objects` in place.
+    Shared between add_variety.py's own pipeline and add_sliders_v2.py (the
+    Base Map v2 pathway) — a map with every object left on the default
+    "normal" sample reads as broken/unfinished to any checker.
+
+    A bouncing slider only accents its head — repeating the same clap/
+    finish on every one of a dozen rapid reversals is jarring rather than
+    emphatic, so its repeats and tail stay a plain normal sample instead.
+    A long quiet/normal stretch can otherwise go many measures with every
+    hit landing on plain HS_NORMAL, which itself reads as "no hitsounds"
+    to a checker — at least a soft whistle is forced often enough that
+    never happens, even where the energy alone wouldn't have earned one.
+    """
+    MAX_MS_WITHOUT_ACCENT = measure_length_ms
+    last_accent_time = None
+    for obj in objects:
+        e = energy_at(obj.time)
+        on_downbeat = is_on_downbeat(obj.time, offset_ms, measure_length_ms)
+        hs = hitsound_for(e, on_downbeat, q_high, q_climax)
+        if hs == HS_NORMAL and (last_accent_time is None
+                                 or obj.time - last_accent_time > MAX_MS_WITHOUT_ACCENT):
+            hs = HS_WHISTLE
+        obj.hitsound = hs
+        if hs != HS_NORMAL:
+            last_accent_time = obj.time
+        if obj.is_slider:
+            if obj.slides > 1:
+                obj.edge_hitsounds = [hs] + [HS_NORMAL] * obj.slides
+            else:
+                obj.edge_hitsounds = [hs] * (obj.slides + 1)
+
+
 def chain_len_weights(bias: float) -> tuple[float, float, float]:
     """Weights for chain lengths (2, 3, 4 nodes), interpolated so bias=0.5
     reproduces the original fixed (50, 30, 20) split exactly (keeping the
@@ -688,32 +723,8 @@ def main() -> None:
 
     # Hitsounds: bigger accents (finish/clap/whistle) line up with strong
     # downbeats and louder moments; quieter/off-beat hits stay a plain
-    # normal sample. A bouncing slider only accents its head — repeating
-    # the same clap/finish on every one of a dozen rapid reversals is
-    # jarring rather than emphatic, so its repeats and tail stay a plain
-    # normal sample instead.
-    MAX_MS_WITHOUT_ACCENT = measure_length_ms
-    last_accent_time = None
-    for obj in new_objects:
-        e = energy_at(obj.time)
-        on_downbeat = is_on_downbeat(obj.time, offset_ms, measure_length_ms)
-        hs = hitsound_for(e, on_downbeat, q_high, q_climax)
-        # A long quiet/normal stretch can otherwise go many measures with
-        # every hit landing on plain HS_NORMAL, which reads as "no
-        # hitsounds" to any checker — force at least a soft whistle often
-        # enough that never happens, even where the energy alone wouldn't
-        # have earned one.
-        if hs == HS_NORMAL and (last_accent_time is None
-                                 or obj.time - last_accent_time > MAX_MS_WITHOUT_ACCENT):
-            hs = HS_WHISTLE
-        obj.hitsound = hs
-        if hs != HS_NORMAL:
-            last_accent_time = obj.time
-        if obj.is_slider:
-            if obj.slides > 1:
-                obj.edge_hitsounds = [hs] + [HS_NORMAL] * obj.slides
-            else:
-                obj.edge_hitsounds = [hs] * (obj.slides + 1)
+    # normal sample.
+    assign_hitsounds(new_objects, energy_at, offset_ms, measure_length_ms, q_high, q_climax)
 
     # Sanity check: nothing should overlap in time, judged the same way the
     # .osu file itself will be read back (every object's time rounded to a
