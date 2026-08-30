@@ -86,6 +86,20 @@ from make_easy import recompute_combos
 # once the circles themselves are bigger.
 TIER_SPACING_SCALE: dict[str, float] = {"insane": 1.0, "hard": 0.85, "normal": 0.7, "easy": 0.55}
 
+# How readily a fast (quarter-beat-or-closer) 4+ run gets forced into a
+# deliberate stream (stack/line) on each tier -- see build_tier's own
+# apply_style.py invocation. Insane's own circle set is exactly what
+# generate_base_beatmap_v2.py deliberately built (every fast run there is
+# a real climax burst or embellishment chain, so it should always read as
+# one gesture), but thin_for_tier's random deletion can, on a heavily-
+# thinned tier, coincidentally leave behind a run of 4+ survivors that
+# just happen to still be close together in time without that ever having
+# been a deliberate unit -- force-stacking one of those reads as a real
+# spacing error (a checker comparing it against its true, unrelated
+# neighbors), not a stylistic stack. Scaled down right alongside how much
+# each tier actually thins.
+TIER_STREAM_FREQUENCY: dict[str, float] = {"insane": 1.0, "hard": 0.85, "normal": 0.55, "easy": 0.3}
+
 # Of an otherwise-eligible, evenly-spaced 3-4 circle run that's becoming a
 # slider, how often it becomes a repeating/"bounce" slider (one path back
 # and forth) instead of a waypoint chain visiting each point in turn — see
@@ -382,14 +396,16 @@ def build_tier(tier: str, objects: list[HitObject], bm, args, rng: random.Random
                     # deliberate stream -- appropriate for the main
                     # pipeline, where a fast run can show up incidentally.
                     # Here a fast (quarter-beat-or-closer) run of 4+ circles
-                    # is never incidental: generate_base_beatmap_v2.py only
-                    # ever produces one via its own climax/intense tiers or
-                    # a deliberately sparse embellishment chain (see
-                    # add_embellishment_chains) -- always deliberate, so it
-                    # should always read as one gesture (and, combined with
-                    # --stack-probability's own 1.0 default, always stack
-                    # on the exact same spot).
-                    "--stream-frequency", "1.0"]
+                    # is (on Insane) never incidental: generate_base_
+                    # beatmap_v2.py only ever produces one via its own
+                    # climax/intense tiers or a deliberately sparse
+                    # embellishment chain (see add_embellishment_chains) --
+                    # always deliberate, so it should always read as one
+                    # gesture (and, combined with --stack-probability's own
+                    # 1.0 default, always stack on the exact same spot).
+                    # Scaled down for a thinned tier -- see TIER_STREAM_
+                    # FREQUENCY's own comment.
+                    "--stream-frequency", str(TIER_STREAM_FREQUENCY[tier])]
         apply_style.main()
     finally:
         sys.argv = old_argv

@@ -488,9 +488,16 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
     why --stack-probability stopped visibly doing anything.)
     """
     quarter_beat_ms = beat_length_ms / 4.0
+    eighth_beat_ms = beat_length_ms / 8.0
     threshold = quarter_beat_ms + 1.0
     MAX_RUN_LEN = 8  # matches add_variety.py's own hard cap (cap_stream_length's max_len at frequency 1)
     MIN_STREAM_LEN = 4  # fewer than this is a quick triplet, not a stream (see docstring)
+
+    def gap_rate(gap_ms: float) -> str:
+        # "eighth" (a climax burst's own rate) vs. "quarter" (everything
+        # else this loop ever sees, since threshold above already only
+        # lets a quarter-beat-or-closer gap through in the first place).
+        return "eighth" if gap_ms <= eighth_beat_ms + 1.0 else "quarter"
 
     mode_of: dict[int, tuple[int, str]] = {}
     i = 0
@@ -501,8 +508,22 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
             i += 1
             continue
         j = i + 1
+        run_rate = None
         while (j < n and not objects[j].is_slider
                and (objects[j].time - objects[j - 1].time) <= threshold):
+            # A run only ever streams at one consistent pace -- a stack
+            # mixing an eighth-beat climax burst with a slower quarter-beat
+            # stretch reads as one held-in-place gesture even though the
+            # actual pacing changed partway through it, which is
+            # disorienting (the same held spot no longer means "hit these
+            # all at the same rate"). Splitting into a fresh run right at
+            # the rate change gives the change its own entry/exit gap and
+            # (if it streams) its own stack position instead.
+            rate = gap_rate(objects[j].time - objects[j - 1].time)
+            if run_rate is None:
+                run_rate = rate
+            elif rate != run_rate:
+                break
             j += 1
         run_len = j - i
         if run_len >= 2:
@@ -947,7 +968,17 @@ def main() -> None:
                         obj.curve_type = "B"
                     obj.points = [(bow_x, bow_y), (end_x, end_y)]
 
-                cur_x, cur_y, cur_angle = end_x, end_y, end_angle
+                if obj.slides % 2 == 1:
+                    cur_x, cur_y, cur_angle = end_x, end_y, end_angle
+                else:
+                    # A bouncing slider with an *even* number of repeats
+                    # ends back exactly where it started (HitObject.
+                    # end_position() already accounts for this) -- cur_x/
+                    # cur_y must match that, or the next object gets
+                    # distance-snapped from a point the cursor was never
+                    # actually left at, which is exactly what was silently
+                    # breaking distance-snap right after a bounce slider.
+                    cur_angle = end_angle + math.pi
             else:
                 # Chain slider: walk one flow-angle segment per waypoint so
                 # each note in the chain still reads as a distinct hop, then

@@ -158,9 +158,23 @@ def _climax_covered_end(run_start: int, run_end: int) -> int:
     return seg_start + span
 
 
+# How many circles a climax burst actually places, chosen from its own
+# full eighth-beat (32nd-note) grid (see _emit_climax_run) rather than
+# always filling every slot -- always includes the grid's own first and
+# last slot (so a burst's start/end time, and so _climax_covered_ranges'
+# own beat-index bookkeeping, is untouched), evenly thinning whichever
+# interior slots don't make the cut. Candidates are filtered down to
+# whatever the grid can actually hold (a 1-beat/9-slot burst can't use 11
+# or up) and weighted toward the sparser end, so "9 every time" (an
+# earlier version of this always filled the whole grid) becomes the rare
+# case instead of the default.
+CLIMAX_NOTE_COUNTS = [2, 3, 5, 7, 9, 11, 13, 15, 17]
+CLIMAX_NOTE_WEIGHTS = [3, 3, 3, 2, 2, 1, 1, 1, 1]
+
+
 def _emit_climax_run(kept_times: list[float], climax_times: set[float], start_beat: int, end_beat: int,
-                      offset_seconds: float, beat_seconds: float) -> None:
-    """Append one continuous eighth-beat- (32nd-note-) spaced run of
+                      offset_seconds: float, beat_seconds: float, rng: random.Random | None = None) -> None:
+    """Append a sparse, eighth-beat- (32nd-note-) *grid-aligned* run of
     circles from beat index `start_beat` through `end_beat` (inclusive) —
     climax is the densest tier there is, one subdivision finer than
     "intense"'s own quarter-beat (16th-note) rate, so it actually reads as
@@ -168,22 +182,39 @@ def _emit_climax_run(kept_times: list[float], climax_times: set[float], start_be
     spaced version of this did) slower than intense. A climax burst's
     internal measure-to-measure chaining (see _climax_segments) never
     actually changes rate at its own boundaries — every segment is the
-    same constant eighth-beat spacing, so the whole covered span is just
-    one flat run end to end, nothing measure-shaped about *emitting* it,
-    only about how far it was decided to reach.
+    same constant eighth-beat grid, so the whole covered span is just one
+    flat run end to end, nothing measure-shaped about *emitting* it, only
+    about how far it was decided to reach.
 
-    Every emitted time is also recorded into `climax_times` — cap_fast_run_
-    span must never thin a climax run down (its own quarter-beat-or-closer
-    "fast run" cap exists for the incidental, unshaped intense-tier runs
-    build_intensity_grid's plain per-beat fill can produce, not for a
-    burst deliberately built to span several beats).
+    Not every grid slot is actually used — see CLIMAX_NOTE_COUNTS — so two
+    bursts of the same span can still feel different: a short, punchy
+    3-note burst reads very differently from a dense 9-note one even
+    though both cover the same one beat. Every emitted time is also
+    recorded into `climax_times` — cap_fast_run_span must never thin a
+    climax run down further (its own quarter-beat-or-closer "fast run" cap
+    exists for the incidental, unshaped intense-tier runs build_intensity_
+    grid's plain per-beat fill can produce, not for a burst deliberately
+    built to span several beats).
     """
     start_ms = (offset_seconds + start_beat * beat_seconds) * 1000.0
     step_ms = beat_seconds * 1000.0 / 8.0
     num_steps = (end_beat - start_beat) * 8
-    new_times = [start_ms + k * step_ms for k in range(num_steps + 1)]
-    kept_times.extend(new_times)
-    climax_times.update(new_times)
+    grid = [start_ms + k * step_ms for k in range(num_steps + 1)]
+
+    if rng is not None and len(grid) > 2:
+        candidates = [c for c in CLIMAX_NOTE_COUNTS if c <= len(grid)]
+        weights = CLIMAX_NOTE_WEIGHTS[:len(candidates)]
+        count = rng.choices(candidates, weights=weights)[0]
+        if count < len(grid):
+            # Evenly spaced indices into `grid`, always keeping the first
+            # and last (the burst's own declared start/end) -- a Bresenham-
+            # style even spread rather than np.linspace, so this stays
+            # exact-integer and dependency-free.
+            indices = sorted({round(k * (len(grid) - 1) / (count - 1)) for k in range(count)})
+            grid = [grid[idx] for idx in indices]
+
+    kept_times.extend(grid)
+    climax_times.update(grid)
 
 
 def _climax_covered_ranges(tiers: list[str], max_span_beats: float = 2.0,
@@ -305,7 +336,7 @@ def build_intensity_grid(offset_seconds: float, bpm: float, duration_seconds: fl
     while i < n:
         if i in covered_starts:
             end = covered_starts[i]
-            _emit_climax_run(kept_times, climax_times, i, end, offset_seconds, beat_seconds)
+            _emit_climax_run(kept_times, climax_times, i, end, offset_seconds, beat_seconds, rng=rng)
             i = end + 1
             continue
         if i in covered_set:
