@@ -58,7 +58,7 @@ from gui import BG, BG_ENTRY, FONT_MONO, PAD_INNER, PAD_OUTER, TextRedirector, _
 # Base/Variety/Styled naming.
 CIRCLES_VERSION = "Auto Base v2 (Circles)"
 SLIDERS_VERSION = "Auto Base v2 (Sliders)"
-STYLED_VERSION = "Auto Base v2 (Styled)"
+STYLED_VERSION = "Insane"
 
 
 @dataclass

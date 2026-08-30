@@ -428,7 +428,8 @@ def main() -> None:
     parser.add_argument("beatmap", help="Path to the Base Map v2 .osu file (from generate_base_beatmap_v2.py).")
     parser.add_argument("audio", help="Path to the same song's audio file (for apply_style.py's energy-aware patterns).")
     parser.add_argument("--output", required=True)
-    parser.add_argument("--version", default="Auto Base v2 (Styled)", help="Difficulty/version name to write into the final, styled map.")
+    parser.add_argument("--version", default="Insane", help="Difficulty/version name to write into the final, styled map "
+                                                              "-- named like the other tiers (Hard/Normal/Easy) by default.")
     parser.add_argument("--chain-probability", type=float, default=0.8,
                          help="How often an otherwise-eligible run of adjacent circles actually "
                               "becomes a slider at all, 0-1 (default 0.8). 0 = always plain circles, "
