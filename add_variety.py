@@ -61,7 +61,7 @@ import random
 import librosa
 import numpy as np
 
-from apply_style import compute_measure_energy_buckets
+from apply_style import compute_measure_energy_buckets, find_repeating_measure_map
 from beatmap_utils import HitObject, read_osu, slider_length_for_gap, write_osu
 
 # Hitsound bit flags (osu! HitObject hitSound field / slider edgeHitsounds).
@@ -165,43 +165,6 @@ def hitsound_for(energy_value: float, is_downbeat: bool, q_high: float, q_climax
         return HS_WHISTLE
     return HS_NORMAL
 
-
-def find_repeating_measure_map(measure_buckets: dict[int, int], window: int = 4) -> dict[int, int]:
-    """For every measure that's part of a >=2-times-repeating `window`-
-    measure shingle, map it to the *first* occurrence of that same shingle
-    — every other measure maps to itself. Mirrors make_easy.py's own
-    find_repetitive_measures (same windowed-shingle matching, so a single
-    coincidentally-matching measure isn't enough — a real multi-measure
-    section has to recur), but returns *which* earlier measure each repeat
-    matches, not just whether it's a repeat, so a later occurrence of a
-    verse/chorus can be pointed back at its first: checking the reference
-    set (example/keha_backstabber/) found a section's second and third
-    pass mostly reusing its *first* pass's exact hitsound sequence, and
-    frequently its exact circle/slider layout too (e.g. measures 11 and 19
-    both come out CCCSSSS; measures 25 and 29 both CCCCCCS) — not just
-    landing in the same coarse energy bucket independently each time.
-    """
-    n = max(measure_buckets) + 1 if measure_buckets else 0
-    result = {m: m for m in range(n)}
-    if n < window * 2:
-        return result
-
-    signature_starts: dict[tuple[int, ...], list[int]] = {}
-    for start in range(n - window + 1):
-        sig = tuple(measure_buckets.get(start + k, 0) for k in range(window))
-        signature_starts.setdefault(sig, []).append(start)
-
-    for starts in signature_starts.values():
-        distinct_starts = []
-        for s in starts:
-            if not distinct_starts or s - distinct_starts[-1] >= window:
-                distinct_starts.append(s)
-        if len(distinct_starts) >= 2:
-            first = distinct_starts[0]
-            for s in distinct_starts[1:]:
-                for k in range(window):
-                    result[s + k] = first + k
-    return result
 
 
 def assign_hitsounds(objects: list[HitObject], energy_at, offset_ms: float, measure_length_ms: float,

@@ -236,11 +236,16 @@ class App:
             (self.keep_intermediate_var, "Keep intermediate stages too (Circles and Sliders, "
                                           "alongside the final Styled map)"),
             (self.report_var, "Generate a statistics report (PDF, plotted against Backstabber)"),
-            (self.reuse_layout_var, "Reuse a repeated section's own circle/slider layout (uncheck to "
-                                     "roll every section independently instead, the original behavior)"),
+            (self.reuse_layout_var, "Reuse a repeated section's own layout (uncheck for the original, "
+                                     "independent-per-run behavior)"),
         )
         for i, (var, label) in enumerate(options):
-            ttk.Checkbutton(opt_panel, text=label, variable=var).grid(
+            # wraplength (not just a long window) is what actually keeps a
+            # label from being cut off at the panel's right edge -- a
+            # ttk.Checkbutton never wraps or truncates its own text by
+            # default, it just gets clipped by whatever width the window
+            # ends up at.
+            ttk.Checkbutton(opt_panel, text=label, variable=var, wraplength=560).grid(
                 row=i, column=0, sticky="w", padx=PAD_INNER,
                 pady=(PAD_INNER if i == 0 else 6, PAD_INNER if i == len(options) - 1 else 0))
         opt_panel.columnconfigure(0, weight=1)

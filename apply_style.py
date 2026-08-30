@@ -165,8 +165,52 @@ def compute_measure_energy_buckets(energy_at, offset_ms: float, measure_length_m
     return buckets
 
 
+def find_repeating_measure_map(measure_buckets: dict[int, int], window: int = 4) -> dict[int, int]:
+    """For every measure that's part of a >=2-times-repeating `window`-
+    measure shingle, map it to the *first* occurrence of that same shingle
+    — every other measure maps to itself. Mirrors make_easy.py's own
+    find_repetitive_measures (same windowed-shingle matching, so a single
+    coincidentally-matching measure isn't enough — a real multi-measure
+    section has to recur), but returns *which* earlier measure each repeat
+    matches, not just whether it's a repeat, so a later occurrence of a
+    verse/chorus can be pointed back at its first: checking the reference
+    set (example/keha_backstabber/) found a section's second and third
+    pass mostly reusing its *first* pass's exact hitsound sequence, and
+    frequently its exact circle/slider layout too (e.g. measures 11 and 19
+    both come out CCCSSSS; measures 25 and 29 both CCCCCCS) — not just
+    landing in the same coarse energy bucket independently each time.
+
+    Lives here (not add_variety.py, which imports it back) since
+    apply_style.py's own motif_turn_degrees also uses it directly, to
+    remap which measure's motif an occurrence plays -- see its own
+    docstring.
+    """
+    n = max(measure_buckets) + 1 if measure_buckets else 0
+    result = {m: m for m in range(n)}
+    if n < window * 2:
+        return result
+
+    signature_starts: dict[tuple[int, ...], list[int]] = {}
+    for start in range(n - window + 1):
+        sig = tuple(measure_buckets.get(start + k, 0) for k in range(window))
+        signature_starts.setdefault(sig, []).append(start)
+
+    for starts in signature_starts.values():
+        distinct_starts = []
+        for s in starts:
+            if not distinct_starts or s - distinct_starts[-1] >= window:
+                distinct_starts.append(s)
+        if len(distinct_starts) >= 2:
+            first = distinct_starts[0]
+            for s in distinct_starts[1:]:
+                for k in range(window):
+                    result[s + k] = first + k
+    return result
+
+
 def motif_turn_degrees(tier: str, time_ms: float, offset_ms: float, beat_length_ms: float,
-                        measure_length_ms: float, measure_buckets: dict[int, int]) -> float:
+                        measure_length_ms: float, measure_buckets: dict[int, int],
+                        measure_repeat_map: dict[int, int] | None = None) -> float:
     """The signed turn angle (degrees) for an object, from its tier's repeating motif.
 
     Which of a tier's motifs plays is keyed to the measure's energy bucket,
@@ -174,10 +218,23 @@ def motif_turn_degrees(tier: str, time_ms: float, offset_ms: float, beat_length_
     section" (the same verse or chorus repeating) reuses the exact same
     motif, giving the player a real, learnable pattern instead of a motif
     that happens to cycle on its own unrelated schedule.
+
+    `measure_repeat_map` (see find_repeating_measure_map), when given,
+    tightens that up further: a measure whose own windowed sequence of
+    buckets genuinely recurs elsewhere (not just this one measure's bucket
+    value coincidentally matching) plays its motif from the *first*
+    occurrence's own measure index, rather than its own -- two energy
+    passes of the same section can land in adjacent buckets from small
+    energy differences alone, which used to read as "close but not quite"
+    the same arrangement; this makes a real repeat read as the exact same
+    one, matching how hitsounds and (add_sliders_v2.py's own) circle/
+    slider layout already reuse a verse/chorus's first pass.
     """
     half_beat_ms = beat_length_ms / 2.0
     pos_in_measure = int(round((time_ms - offset_ms) / half_beat_ms)) % HALF_BEAT_STEPS_PER_MEASURE
     measure_index = int((time_ms - offset_ms) // measure_length_ms)
+    if measure_repeat_map is not None:
+        measure_index = measure_repeat_map.get(measure_index, measure_index)
     bucket = measure_buckets.get(measure_index, 0)
     motifs = MOTIFS[tier]
     motif = motifs[bucket % len(motifs)]
@@ -186,7 +243,7 @@ def motif_turn_degrees(tier: str, time_ms: float, offset_ms: float, beat_length_
 
 def next_angle(prev_angle: float, tier: str, time_ms: float, offset_ms: float, beat_length_ms: float,
                measure_length_ms: float, measure_buckets: dict[int, int], rng: random.Random,
-               jitter_degrees: float = 4.0) -> float:
+               jitter_degrees: float = 4.0, measure_repeat_map: dict[int, int] | None = None) -> float:
     """Advance the flow angle using the tier's motif, plus a small humanizing jitter.
 
     The jitter is `jitter_degrees` wide by default — small, since the point
@@ -196,7 +253,8 @@ def next_angle(prev_angle: float, tier: str, time_ms: float, offset_ms: float, b
     function only ever changes the flow *angle*, never `time_ms`, so a
     wider jitter still can't move an object off the beat grid.
     """
-    turn_degrees = motif_turn_degrees(tier, time_ms, offset_ms, beat_length_ms, measure_length_ms, measure_buckets)
+    turn_degrees = motif_turn_degrees(tier, time_ms, offset_ms, beat_length_ms, measure_length_ms, measure_buckets,
+                                       measure_repeat_map=measure_repeat_map)
     turn_degrees += rng.uniform(-jitter_degrees, jitter_degrees)
     return prev_angle + math.radians(turn_degrees)
 
@@ -565,6 +623,12 @@ def main() -> None:
         q_low, q_high = 0.35, 0.75
 
     measure_buckets = compute_measure_energy_buckets(energy_at, offset_ms, measure_length_ms, objects[-1].time)
+    # A genuinely-repeating measure (its own windowed sequence of buckets
+    # recurring elsewhere, not just this one measure's bucket value
+    # coincidentally matching) plays its motif from the *first*
+    # occurrence's own measure index -- see motif_turn_degrees' own
+    # docstring.
+    measure_repeat_map = find_repeating_measure_map(measure_buckets)
     stream_mode = build_stream_runs(objects, beat_length_ms, rng, args.seed, offset_ms=offset_ms,
                                      measure_length_ms=measure_length_ms, measure_buckets=measure_buckets,
                                      stream_frequency=args.stream_frequency,
@@ -737,7 +801,7 @@ def main() -> None:
                 # object several beats away that just happened to precede
                 # it.
                 spacing = max(MIN_SPACING, min(MAX_SPACING, boost * styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing * spacing_scale_for(obj.time), rng)))
-                cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
+                cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter, measure_repeat_map=measure_repeat_map)
                 cur_angle = wander_nudge(cur_angle, cur_x, cur_y)
                 new_x, new_y, cur_angle = place_at_distance(cur_x, cur_y, spacing, cur_angle)
                 cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
@@ -752,7 +816,7 @@ def main() -> None:
             # overlap along a straight line rather than zigzagging.
             if line_run_angle is None:
                 line_run_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
-                                             measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
+                                             measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter, measure_repeat_map=measure_repeat_map)
                 line_run_angle = wander_nudge(line_run_angle, cur_x, cur_y)
             spacing = max(MIN_SPACING, min(MAX_SPACING, boost * styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing * spacing_scale_for(obj.time), rng)))
             # A run's direction is locked in once, above — but if it
@@ -796,7 +860,7 @@ def main() -> None:
             # (plus the transition boost on the one gap right after a
             # stream ends, for the same readability reason as entering one).
             spacing = max(MIN_SPACING, min(MAX_SPACING, boost * styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing * spacing_scale_for(obj.time), rng)))
-            cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
+            cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter, measure_repeat_map=measure_repeat_map)
             cur_angle = wander_nudge(cur_angle, cur_x, cur_y)
             new_x, new_y, cur_angle = place_at_distance(cur_x, cur_y, spacing, cur_angle)
             cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
@@ -816,7 +880,7 @@ def main() -> None:
                 # a more pronounced circular arc that actually guides the
                 # cursor through a real curve.
                 end_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
-                                        measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
+                                        measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter, measure_repeat_map=measure_repeat_map)
                 end_x, end_y, end_angle = place_at_distance(cur_x, cur_y, segment_length, end_angle)
                 end_x, end_y = clamp_to_playfield(end_x, end_y, margin=MARGIN)
 
@@ -904,7 +968,7 @@ def main() -> None:
                 new_points = []
                 for _ in range(num_segments):
                     cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
-                                            measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter)
+                                            measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter, measure_repeat_map=measure_repeat_map)
                     px, py, cur_angle = place_at_distance(cur_x, cur_y, segment_length, cur_angle)
                     cur_x, cur_y = clamp_to_playfield(px, py, margin=MARGIN)
                     new_points.append((cur_x, cur_y))

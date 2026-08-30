@@ -120,7 +120,7 @@ def intensity_quantiles(intensity: float) -> dict[str, float]:
     """
     intensity = max(0.0, min(1.0, intensity))
     LOW = {"silent": 0.05, "quiet": 0.95, "intense": 0.999, "climax": 0.9999}
-    MID = {"silent": 0.10, "quiet": 0.35, "intense": 0.90, "climax": 0.98}
+    MID = {"silent": 0.10, "quiet": 0.35, "intense": 0.90, "climax": 0.988}
     HIGH = {"silent": 0.0, "quiet": 0.05, "intense": 0.30, "climax": 0.70}
     a, b, t = (LOW, MID, intensity / 0.5) if intensity <= 0.5 else (MID, HIGH, (intensity - 0.5) / 0.5)
     return {k: a[k] + (b[k] - a[k]) * t for k in LOW}
@@ -186,7 +186,8 @@ def _emit_climax_run(kept_times: list[float], climax_times: set[float], start_be
     climax_times.update(new_times)
 
 
-def _climax_covered_ranges(tiers: list[str], max_span_beats: float = 2.0) -> list[tuple[int, int]]:
+def _climax_covered_ranges(tiers: list[str], max_span_beats: float = 2.0,
+                            rng: random.Random | None = None) -> list[tuple[int, int]]:
     """Beat-index ranges [start, end] (inclusive) that climax bursts end up
     covering — `start` is always a measure downbeat (a multiple of
     MEASURE_BEATS from the very first beat), regardless of which beat
@@ -228,7 +229,13 @@ def _climax_covered_ranges(tiers: list[str], max_span_beats: float = 2.0) -> lis
             j += 1
 
         start = (i // MEASURE_BEATS) * MEASURE_BEATS
-        capped_run_end = min(j, start + round(max_span_beats))
+        # This burst's own target span is rolled fresh each time, biased
+        # toward the short end (1 beat) rather than always maxing out at
+        # max_span_beats -- otherwise every burst reads as the same fixed
+        # length, and averages out far longer than it needs to (max_span_
+        # beats is a ceiling, not a target).
+        target_span = rng.triangular(1.0, max_span_beats, 1.0) if rng is not None else max_span_beats
+        capped_run_end = min(j, start + round(target_span))
         end = _climax_covered_end(start, capped_run_end)
         covered.append((start, end))
 
@@ -244,7 +251,8 @@ def _climax_covered_ranges(tiers: list[str], max_span_beats: float = 2.0) -> lis
 
 def build_intensity_grid(offset_seconds: float, bpm: float, duration_seconds: float,
                           energy_at, q_silent: float, q_quiet: float, q_intense: float, q_climax: float,
-                          smoothing_beats: float = 2.0, intensity: float = 0.5) -> tuple[list[float], set[float]]:
+                          smoothing_beats: float = 2.0, intensity: float = 0.5,
+                          rng: random.Random | None = None) -> tuple[list[float], set[float]]:
     """Return hit-object times (ms), one whole beat classified at a time —
     every beat gets exactly one intensity tier, and every circle in that
     beat follows that same tier's subdivision rate for the beat's entire
@@ -287,7 +295,7 @@ def build_intensity_grid(offset_seconds: float, bpm: float, duration_seconds: fl
     # (33/65 circles) -- even the capped version still read as far too
     # long a wall of notes in practice.
     max_span_beats = 1.0 + max(0.0, (intensity - 0.5) / 0.5)
-    covered_ranges = _climax_covered_ranges(tiers, max_span_beats=max_span_beats)
+    covered_ranges = _climax_covered_ranges(tiers, max_span_beats=max_span_beats, rng=rng)
     covered_starts = dict(covered_ranges)
     covered_set = {b for start, end in covered_ranges for b in range(start, end + 1)}
 
@@ -523,7 +531,8 @@ def main() -> None:
 
     times, climax_times = build_intensity_grid(offset_seconds, bpm, duration_seconds, energy_at,
                                                  q_silent, q_quiet, q_intense, q_climax,
-                                                 smoothing_beats=args.smoothing_beats, intensity=args.intensity)
+                                                 smoothing_beats=args.smoothing_beats, intensity=args.intensity,
+                                                 rng=rng)
     before_cap = len(times)
     times = cap_fast_run_span(times, beat_length_ms, quarter_beat_ms, protected_ms=climax_times)
     if before_cap != len(times):

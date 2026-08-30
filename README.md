@@ -120,8 +120,16 @@ doesn't fit the replayed one (a chain crossing a measure boundary can
 leave a repeat's own circles slightly out of alignment with the
 original, for instance — the fallback just means that one decision rolls
 fresh instead of forcing a bad fit). Pass `--no-reuse-layout` (or uncheck
-"Reuse a repeated section's own circle/slider layout" in the GUI) to
-revert to the original, fully independent-per-run behavior.
+"Reuse a repeated section's own layout" in the GUI) to revert to the
+original, fully independent-per-run behavior.
+
+`apply_style.py`'s own turn-angle motif selection (see Pipeline, above)
+uses the same repeat map too: a measure that genuinely repeats an earlier
+one (the stricter windowed-shingle match, not just this one measure's
+own energy bucket coincidentally landing the same) plays its motif from
+that earlier occurrence's own measure index — so the actual on-screen
+*arrangement* (turn angles, not just which objects are circles vs.
+sliders) reads as the same repeated shape too, not just similar.
 
 ## Usage
 
@@ -310,7 +318,13 @@ that document:
   throughout (playfield margin, `slider_length_for_gap`'s rounded-gap
   derivation, a slider curve's actual rendered arc — not just its control
   points — checked against the playfield before it's ever used); see the
-  pipeline stage docstrings.
+  pipeline stage docstrings. `add_sliders_v2.py`'s own merge step also
+  rejects any circle-to-slider merge whose total span (or, for a bounce
+  slider, any individual repeat leg) would fall under 125ms, matching the
+  ranking criteria's minimum slider duration — checked once, at the one
+  shared merge every tier's own thinning derives from, rather than only
+  showing up as an error on whichever tier happened to still be carrying
+  a too-short one.
 - **Combo colours / hitsounds** — `beatmap_utils.default_metadata` sets
   three custom combo colours and every hittable edge gets an audible
   hitsound (never silent) via `assign_hitsounds` (see above), with a

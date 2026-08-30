@@ -94,6 +94,15 @@ TIER_SPACING_SCALE: dict[str, float] = {"insane": 1.0, "hard": 0.85, "normal": 0
 # separate knob worth surfacing.
 BOUNCE_PROBABILITY = 0.3
 
+# Ranking-criteria minimum slider duration -- a slider (or, for a bounce
+# slider, each individual repeat leg) shorter than this reads as an
+# effectively-instant flick, flagged by checkers regardless of tier. Every
+# tier merges from the exact same circle timestamps (only *which* survive
+# thinning differs, see thin_for_tier), so a too-short merge is rejected
+# here, once, rather than only showing up as an error on whichever tier
+# happens to still be carrying it.
+MIN_SLIDER_DURATION_MS = 125.0
+
 
 def _burst_ranges(circles: list[HitObject], beat_length_ms: float, min_len: int = 4) -> dict[int, tuple[int, int]]:
     """Maps every circle index that's part of a "burst" — a maximal run of
@@ -233,17 +242,30 @@ def merge_into_sliders(circles: list[HitObject], beat_length_ms: float, slider_m
                          if can_chain else None)
             want_bounce = can_chain and rng.random() < BOUNCE_PROBABILITY
 
+        if can_chain and (circles[i + chain_len - 1].time - circles[i].time) < MIN_SLIDER_DURATION_MS:
+            # The merge itself would be too short to ever be a valid
+            # slider (see MIN_SLIDER_DURATION_MS) -- these circles stay
+            # plain rather than becoming an invalid one.
+            can_chain = False
+            if replay_key is not None:
+                replayed_decisions.pop(replay_key, None)
+
         if can_chain:
             nodes = circles[i:i + chain_len]
             gaps = [nodes[k + 1].time - nodes[k].time for k in range(len(nodes) - 1)]
             evenly_spaced = chain_len >= 3 and (max(gaps) - min(gaps)) < 1.0
-            if want_bounce and evenly_spaced:
+            # A bounce slider's own repeat leg (one_way_ms) is a separate
+            # duration from the merge's overall span checked above -- a
+            # long-enough overall span split into several short bounces can
+            # still leave each individual leg under the minimum.
+            if want_bounce and evenly_spaced and gaps[0] >= MIN_SLIDER_DURATION_MS:
                 result.append(make_bounce_slider(nodes[0], nodes[1], beat_length_ms, slider_multiplier,
                                                    num_bounces=chain_len - 1, one_way_ms=gaps[0]))
             else:
                 result.append(make_slider_chain(nodes, beat_length_ms, slider_multiplier))
             if replay_key is not None:
-                replayed_decisions[replay_key] = ("chain", chain_len, want_bounce and evenly_spaced)
+                replayed_decisions[replay_key] = ("chain", chain_len,
+                                                   want_bounce and evenly_spaced and gaps[0] >= MIN_SLIDER_DURATION_MS)
             i += chain_len
         else:
             result.append(cur)
