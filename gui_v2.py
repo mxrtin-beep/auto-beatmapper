@@ -109,20 +109,10 @@ SLIDER_PARAMS = [
                 "Min (tight, close together) to max (wide, dramatic jumps). Default 1.9.",
                 0.5, 1.9, 2.5),
     SliderParam("--uniformity", "Pattern uniformity",
-                "Makes a repeated part of the song actually play like a repeat, instead of "
-                "every pass through it being freshly, independently rolled. Whenever a measure "
-                "sounds like an earlier one — a verse's second pass, a chorus that returns "
-                "after a bridge — its circle/chain/bounce layout, hitsounds, turn-angle motif, "
-                "and slider curviness are reused from that earlier measure, beyond what 'Reuse "
-                "a repeated section's own layout' below already does for an *exact* repeat. "
-                "Min (off: matching only on an exact repeat, today's default) to max (even a "
-                "loose resemblance between two sections is enough to make them play the same "
-                "way). Not a hard guarantee below max — more a strong tendency, so a repeat "
-                "reads as a clear family resemblance rather than a rigid, robotic loop. "
-                "On-screen position still isn't identical (the cursor path keeps flowing from "
-                "wherever the previous section left it), but the shape, rhythm, and hitsounds "
-                "are. Default 0.",
-                0.0, 0.0, 1.0),
+                "How much the circle/slider layout repeats across measures with the same "
+                "note density, from independent every measure (min) to one fixed pattern "
+                "per density (max), default in the middle.",
+                0.0, 0.5, 1.0),
 ]
 
 
@@ -244,14 +234,12 @@ class App:
         self.auto_open_var = tk.BooleanVar(value=True)
         self.keep_intermediate_var = tk.BooleanVar(value=False)
         self.report_var = tk.BooleanVar(value=False)
-        self.reuse_layout_var = tk.BooleanVar(value=True)
         options = (
             (self.osz_var, "Package as .osz (ready to import into osu!)"),
             (self.auto_open_var, "Open the finished map when done"),
             (self.keep_intermediate_var, "Keep intermediate stages too (Circles and Sliders, "
                                           "alongside the final Styled map)"),
             (self.report_var, "Generate a statistics report (PDF, plotted against Backstabber)"),
-            (self.reuse_layout_var, "Reuse a repeated section's own layout"),
         )
         # ttk::checkbutton has no -wraplength option on every platform/Tk
         # build (it raised TclError: unknown option "-wraplength" on
@@ -432,8 +420,7 @@ class App:
                              "--curviness", f"{self._actual('--curviness'):.3f}",
                              "--spacing", f"{self._actual('--spacing'):.3f}",
                              "--uniformity", f"{self._actual('--uniformity'):.3f}",
-                             "--seed", str(seed),
-                             "--reuse-layout" if self.reuse_layout_var.get() else "--no-reuse-layout"]
+                             "--seed", str(seed)]
             # The merged-but-unstyled "Sliders" stage is only ever worth
             # writing out when the user actually wants to inspect it --
             # otherwise it's exactly what add_sliders_v2.py already treats

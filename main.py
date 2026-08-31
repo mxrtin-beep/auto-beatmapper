@@ -112,22 +112,6 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=None,
                          help="Forwarded to apply_style.py's --temperature (0-1, how creative vs. "
                               "structured the styling gets). Omit to use apply_style.py's own default.")
-    parser.add_argument("--uniformity", type=float, default=None,
-                         help="Make repeated parts of the song actually play like repeats, "
-                              "instead of every part being freshly, independently improvised: "
-                              "whenever a section sounds like an earlier one (a verse's second "
-                              "pass, a chorus that returns after a bridge), reuse that earlier "
-                              "section's slider-vs-circle layout, hitsounds, turn-angle motif, "
-                              "curviness, and stream/stack style, all at the same position -- "
-                              "instead of rolling fresh, unrelated choices for something the "
-                              "player will recognize by ear as the same bit of music. Forwarded "
-                              "to both add_variety.py's and apply_style.py's own --uniformity "
-                              "(0-1). 0 is today's behavior (matching only on an *exact* repeat, "
-                              "and only for hitsounds); raising it starts treating sections that "
-                              "only sound similar, not identical, as repeats too -- not a hard "
-                              "guarantee below 1, more a strong tendency, so a repeated verse "
-                              "reads as a clear family resemblance rather than a rigid, robotic "
-                              "loop. Omit to use each stage's own default (0).")
     parser.add_argument("--bpm", type=float, default=None,
                          help="Forwarded to generate_base_beatmap.py's --bpm, to set it manually "
                               "instead of auto-detecting it. Ignored with --restyle-only.")
@@ -156,8 +140,7 @@ def main() -> None:
                          ("--stream-frequency", args.stream_frequency),
                          ("--stack-probability", args.stack_probability),
                          ("--angle-jitter", args.angle_jitter),
-                         ("--temperature", args.temperature),
-                         ("--uniformity", args.uniformity)):
+                         ("--temperature", args.temperature)):
         if value is not None:
             style_extra_args += [flag, str(value)]
 
@@ -171,8 +154,6 @@ def main() -> None:
         variety_extra_args += ["--stream-frequency", str(args.stream_frequency)]
     if args.slider_length_bias is not None:
         variety_extra_args += ["--slider-length-bias", str(args.slider_length_bias)]
-    if args.uniformity is not None:
-        variety_extra_args += ["--uniformity", str(args.uniformity)]
 
     title = args.title or os.path.splitext(os.path.basename(args.audio))[0]
     outdir = args.outdir

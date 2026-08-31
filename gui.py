@@ -99,21 +99,6 @@ SLIDER_PARAMS = [
                 "distance shifts over the course of the song. Min 0 (tight and repetitive, "
                 "spacing never changes), max 1 (loose and varied). Default 0.5.",
                 0.0, 1.0, 0.5),
-    SliderParam("--uniformity", "Pattern uniformity",
-                "Makes a repeated part of the song actually play like a repeat, instead of "
-                "every pass through it being freshly, independently improvised. Whenever a "
-                "section sounds like an earlier one — a verse's second pass, a chorus that "
-                "returns after a bridge — its slider-vs-circle layout, hitsounds, turn-angle "
-                "motif, and slider curviness are reused from that earlier section at the same "
-                "position, instead of rolled fresh. Min 0 (today's default: matching only "
-                "happens for hitsounds, and only on an *exact* repeat), max 1 (even a loose "
-                "resemblance between two sections is enough to make them play the same way). "
-                "Not a hard guarantee below 1 — more a strong tendency, so a repeat reads as a "
-                "clear family resemblance rather than a rigid, robotic loop. On-screen "
-                "position still isn't identical (the cursor path keeps flowing from wherever "
-                "the previous section left it), but the shape, rhythm, and hitsounds are. "
-                "Default 0.",
-                0.0, 1.0, 0.0),
 ]
 
 

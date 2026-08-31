@@ -61,9 +61,8 @@ import random
 import librosa
 import numpy as np
 
-from apply_style import compute_measure_energy_buckets, find_repeating_measure_map  # noqa: F401 -- re-exported for add_sliders_v2.py
+from apply_style import compute_measure_energy_buckets, find_repeating_measure_map
 from beatmap_utils import HitObject, read_osu, slider_length_for_gap, write_osu
-from pattern_uniformity import blended_choice, fuzzy_repeat_map
 
 # Hitsound bit flags (osu! HitObject hitSound field / slider edgeHitsounds).
 HS_NORMAL = 0
@@ -470,24 +469,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=None,
                          help="Random seed. Omit for a different map every run; pass a fixed "
                               "value (printed on every run) to reproduce the exact same map later.")
-    parser.add_argument("--uniformity", type=float, default=0.0,
-                         help="Make repeated parts of the song play like repeats, instead of "
-                              "every part being freshly, independently improvised: whenever a "
-                              "measure sounds like an earlier one (a verse's second pass, a "
-                              "chorus that returns after a bridge), reuse that earlier measure's "
-                              "slider-vs-circle layout, its rests, and its hitsounds at the same "
-                              "position -- rather than rolling fresh, unrelated choices for "
-                              "something the player will recognize by ear as the same bit of "
-                              "music. 0-1, default 0 (today's behavior: matching happens only for "
-                              "hitsounds, and only on an *exact* repeat). Raising it also starts "
-                              "recognizing sections that only sound similar, not identical, as "
-                              "repeats -- not a hard guarantee at every value below 1, more a "
-                              "strong tendency, so it reads as a family resemblance rather than a "
-                              "rigid, robotic loop. Also forwarded to apply_style.py's own "
-                              "--uniformity (by main.py) for the styling/positioning half of the "
-                              "same idea -- see its help text for what that changes.")
     args = parser.parse_args()
-    args.uniformity = max(0.0, min(1.0, args.uniformity))
     args.stream_frequency = max(0.0, min(1.0, args.stream_frequency))
     # 3 at frequency 0 (never long enough to be a stream, per the 4-note
     # definition), 8 at frequency 1 (matches the pre-existing hard cap).
@@ -533,27 +515,6 @@ def main() -> None:
 
     categories = [classify(e, q_low, q_high) for e in smoothed_energy]
 
-    # A rough repeat map, computed early from the base grid's own energy (a
-    # close enough stand-in for the final objects' -- energy buckets don't
-    # depend on what ends up a circle vs. a slider) so the slider-vs-circle
-    # decisions in the main loop below can already lean on it. Empty at
-    # --uniformity 0's default: no repeat is trusted here beyond what a
-    # canonical-measure lookup already misses (fuzzy_repeat_map's own
-    # window=4 exact-match floor still applies once uniformity > 0).
-    early_measure_buckets = compute_measure_energy_buckets(energy_at, offset_ms, measure_length_ms,
-                                                            circles[-1].time)
-    measure_repeat_map_early = (fuzzy_repeat_map(early_measure_buckets, args.uniformity, args.seed)
-                                 if args.uniformity > 0.0 else {})
-
-    def canonical_measure_for(time_ms: float) -> int | None:
-        if not measure_repeat_map_early:
-            return None
-        measure_idx = int((time_ms - offset_ms) // measure_length_ms)
-        return measure_repeat_map_early.get(measure_idx, measure_idx)
-
-    def slot_for(time_ms: float) -> int:
-        return int(round((time_ms - offset_ms) / half_beat_ms)) % 8
-
     new_objects: list[HitObject] = []
     i = 0
     n = len(circles)
@@ -579,17 +540,8 @@ def main() -> None:
 
         # A short, occasional rest: drop this beat entirely so busy sections
         # get a breath instead of being wall-to-wall notes. Never applied to
-        # quiet sections, which are already thinned out above. Blended the
-        # same way as the chain/treatment decisions below it -- otherwise
-        # this roll alone (drawn from the same shared, position-independent
-        # `rng` stream every other call site still uses) can silently drop
-        # a different circle in one occurrence of an otherwise identical
-        # repeated measure than another, shifting which index every later,
-        # properly pattern-aware decision in that measure sees and
-        # defeating the replay even at uniformity 1.
-        if blended_choice(args.seed, "rest", canonical_measure_for(cur.time), slot_for(cur.time), args.uniformity,
-                           group_fn=lambda r: r.random() < args.rest_probability,
-                           indep_fn=lambda: rng.random() < args.rest_probability):
+        # quiet sections, which are already thinned out above.
+        if rng.random() < args.rest_probability:
             i += 1
             continue
 
@@ -608,17 +560,9 @@ def main() -> None:
             while (i + max_chain < n and max_chain < 4
                    and categories[i + max_chain] != "intense"):
                 max_chain += 1
-            def draw_chain(chain_rng: random.Random, max_chain: int = max_chain) -> tuple[bool, int]:
-                can_chain = max_chain >= 2 and chain_rng.random() < args.chain_probability
-                if not can_chain:
-                    return False, 0
-                chain_len = chain_rng.choices([2, 3, 4][:max_chain - 1], weights=chain_weights[:max_chain - 1])[0]
-                return True, chain_len
-
-            can_chain, chain_len = blended_choice(
-                args.seed, "chain", canonical_measure_for(cur.time), slot_for(cur.time), args.uniformity,
-                group_fn=draw_chain, indep_fn=lambda: draw_chain(rng))
+            can_chain = max_chain >= 2 and rng.random() < args.chain_probability
             if can_chain:
+                chain_len = rng.choices([2, 3, 4][:max_chain - 1], weights=chain_weights[:max_chain - 1])[0]
                 nodes = circles[i:i + chain_len]
                 new_objects.append(make_slider_chain(nodes, beat_length_ms, slider_multiplier))
                 i += chain_len
@@ -648,10 +592,7 @@ def main() -> None:
         pos = i
         last_treatment = None
         while pos <= run_end:
-            pos_time = circles[pos].time
-            if blended_choice(args.seed, "rest", canonical_measure_for(pos_time), slot_for(pos_time), args.uniformity,
-                               group_fn=lambda r: r.random() < args.rest_probability,
-                               indep_fn=lambda: rng.random() < args.rest_probability):
+            if rng.random() < args.rest_probability:
                 pos += 1
                 continue
 
@@ -675,13 +616,7 @@ def main() -> None:
                 options = ["stream", "bounce", "rest"]
             else:
                 options = [t for t in ("stream", "bounce", "rest") if t != last_treatment]
-            def draw_treatment(t_rng: random.Random, options: list[str] = options) -> str:
-                return t_rng.choices(options, weights=[weights[t] for t in options])[0]
-
-            pos_time = circles[pos].time
-            treatment = blended_choice(
-                args.seed, "treatment", canonical_measure_for(pos_time), slot_for(pos_time), args.uniformity,
-                group_fn=draw_treatment, indep_fn=lambda: draw_treatment(rng))
+            treatment = rng.choices(options, weights=[weights[t] for t in options])[0]
             last_treatment = treatment
 
             chunk_end = lookahead_end
@@ -748,10 +683,7 @@ def main() -> None:
             chunk_avg_energy = float(np.mean(slot_energy[pos:chunk_end + 1]))
             subdivision = eighth_beat_ms if chunk_avg_energy > q_climax else quarter_beat_ms
             for j in range(pos, chunk_end + 1):
-                j_time = circles[j].time
-                if blended_choice(args.seed, "rest", canonical_measure_for(j_time), slot_for(j_time), args.uniformity,
-                                   group_fn=lambda r: r.random() < args.rest_probability,
-                                   indep_fn=lambda: rng.random() < args.rest_probability):
+                if rng.random() < args.rest_probability:
                     continue
                 cur_j = circles[j]
                 has_next_j = j + 1 < n
@@ -841,7 +773,7 @@ def main() -> None:
     # independently from that pass's own, merely similar energy.
     measure_buckets = compute_measure_energy_buckets(energy_at, offset_ms, measure_length_ms,
                                                        new_objects[-1].time if new_objects else 0.0)
-    measure_repeat_map = fuzzy_repeat_map(measure_buckets, args.uniformity, args.seed)
+    measure_repeat_map = find_repeating_measure_map(measure_buckets)
     assign_hitsounds(new_objects, energy_at, offset_ms, measure_length_ms, q_high, q_climax,
                       measure_repeat_map=measure_repeat_map)
 
