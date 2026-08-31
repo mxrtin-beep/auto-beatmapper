@@ -25,7 +25,7 @@ import argparse
 from dataclasses import dataclass
 
 from beatmap_stats import BeatmapStats, compute_stats
-from beatmap_utils import Beatmap, PLAYFIELD_H, PLAYFIELD_W, read_osu
+from beatmap_utils import Beatmap, PLAYFIELD_H, PLAYFIELD_W, extract_osz, guess_tier, read_osu
 
 PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
 
@@ -228,12 +228,40 @@ def format_findings(findings: list[Finding], tier: str, source: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Judge a .osu file against osu! ranking criteria rules "
                                                    "of thumb, for the checks decidable from the file alone.")
-    parser.add_argument("beatmap", help="Path to the .osu file to judge.")
-    parser.add_argument("--tier", default="insane",
-                         help="Difficulty tier to judge against (easy/normal/hard/insane/expert).")
+    parser.add_argument("beatmap", help="Path to the .osu file to judge, or a packaged .osz -- every "
+                                          "difficulty inside whose Version: names a recognized tier "
+                                          "(easy/normal/hard/insane/expert) is judged against its own tier.")
+    parser.add_argument("--tier", default=None,
+                         help="Difficulty tier to judge against (easy/normal/hard/insane/expert). "
+                              "Required for a single .osu input (default: insane); for a .osz input, "
+                              "restricts judging to just this one recognized tier instead of every "
+                              "tier found inside it.")
     args = parser.parse_args()
-    findings = judge_beatmap(args.beatmap, args.tier)
-    print(format_findings(findings, args.tier, args.beatmap))
+
+    if args.beatmap.lower().endswith(".osz"):
+        osu_paths = extract_osz(args.beatmap)
+        tier_paths: dict[str, str] = {}
+        for path in osu_paths:
+            tier = guess_tier(path)
+            if tier is not None and tier not in tier_paths:  # first match wins over a same-tier guest diff
+                tier_paths[tier] = path
+        if args.tier:
+            if args.tier.lower() not in tier_paths:
+                raise SystemExit(f"No difficulty matching --tier {args.tier!r} found inside {args.beatmap}. "
+                                  f"Found: {', '.join(sorted(tier_paths)) or '(none recognized)'}")
+            tier_paths = {args.tier.lower(): tier_paths[args.tier.lower()]}
+        if not tier_paths:
+            raise SystemExit(f"No recognizable difficulty names (easy/normal/hard/insane/expert) found "
+                              f"inside {args.beatmap}.")
+        for tier, path in tier_paths.items():
+            findings = judge_beatmap(path, tier)
+            print(format_findings(findings, tier, path))
+            print()
+        return
+
+    tier = args.tier or "insane"
+    findings = judge_beatmap(args.beatmap, tier)
+    print(format_findings(findings, tier, args.beatmap))
 
 
 if __name__ == "__main__":

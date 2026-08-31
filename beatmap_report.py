@@ -34,6 +34,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 
 from beatmap_judge import Finding, PASS, WARN, FAIL, judge_beatmap
 from beatmap_stats import BeatmapStats, Distribution, compute_stats
+from beatmap_utils import extract_osz, guess_tier
 
 EXAMPLE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "example", "keha_backstabber")
 EXAMPLE_LABEL = "Backstabber (reference)"
@@ -376,28 +377,53 @@ def build_report_for_tiers(tier_paths: dict[str, str], output_pdf: str, gen_labe
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate a PDF statistics report comparing a beatmap "
                                                    "against the bundled Backstabber example, normalized to BPM.")
-    parser.add_argument("beatmap", help="Path to the generated .osu file to report on.")
-    parser.add_argument("--tier", default="insane",
+    parser.add_argument("beatmap", help="Path to the generated .osu file to report on, or a packaged .osz "
+                                          "-- every difficulty inside whose Version: names a recognized "
+                                          "tier (easy/normal/hard/insane/expert) is reported on.")
+    parser.add_argument("--tier", default=None,
                          help="Difficulty name, used to pick the matching Backstabber difficulty to "
-                              "compare against (default: insane).")
+                              "compare against for a single .osu input (default: insane). For a .osz "
+                              "input, restricts the report to just this one recognized tier instead of "
+                              "every tier found inside it.")
     parser.add_argument("--against", default=None,
                          help="Explicit .osu file to compare against instead of auto-picking a "
-                              "Backstabber difficulty by --tier.")
+                              "Backstabber difficulty by --tier. Only valid for a single .osu input.")
     parser.add_argument("--output", required=True, help="Path to write the PDF report to.")
     parser.add_argument("--label", default="Generated", help="Label for the generated map in the report.")
     args = parser.parse_args()
 
+    if args.beatmap.lower().endswith(".osz"):
+        if args.against:
+            raise SystemExit("--against is only valid for a single .osu input, not a .osz package.")
+        osu_paths = extract_osz(args.beatmap)
+        tier_paths: dict[str, str] = {}
+        for path in osu_paths:
+            tier = guess_tier(path)
+            if tier is not None and tier not in tier_paths:  # first match wins over a same-tier guest diff
+                tier_paths[tier] = path
+        if args.tier:
+            if args.tier.lower() not in tier_paths:
+                raise SystemExit(f"No difficulty matching --tier {args.tier!r} found inside {args.beatmap}. "
+                                  f"Found: {', '.join(sorted(tier_paths)) or '(none recognized)'}")
+            tier_paths = {args.tier.lower(): tier_paths[args.tier.lower()]}
+        if not tier_paths:
+            raise SystemExit(f"No recognizable difficulty names (easy/normal/hard/insane/expert) found "
+                              f"inside {args.beatmap}.")
+        build_report_for_tiers(tier_paths, args.output, gen_label=args.label)
+        return
+
+    tier = args.tier or "insane"
     gen_stats = compute_stats(args.beatmap)
     if args.against:
         ref_stats = compute_stats(args.against)
     else:
-        ref_path = find_reference_osu(args.tier)
+        ref_path = find_reference_osu(tier)
         ref_stats = compute_stats(ref_path) if ref_path else None
         if ref_stats is None:
-            print(f"Warning: no Backstabber difficulty matching {args.tier!r} found; "
+            print(f"Warning: no Backstabber difficulty matching {tier!r} found; "
                   f"report will show generated stats only.")
 
-    render_report({args.tier: (gen_stats, ref_stats)}, args.output, gen_label=args.label)
+    render_report({tier: (gen_stats, ref_stats)}, args.output, gen_label=args.label)
 
 
 if __name__ == "__main__":

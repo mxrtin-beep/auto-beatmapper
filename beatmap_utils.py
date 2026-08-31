@@ -9,6 +9,9 @@ stage1 -> stage2 -> stage3 without any of them guessing at the others' output.
 
 from __future__ import annotations
 
+import os
+import tempfile
+import zipfile
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -325,6 +328,52 @@ def read_osu(path: str) -> Beatmap:
             bm.hit_objects.append(HitObject.from_line(stripped))
 
     return bm
+
+
+# --- .osz packages -----------------------------------------------------------
+
+# Difficulty names this project's own pipeline uses, in "most-specific
+# first" order for guessing a tier from a `Version:` string -- checked
+# before "hard" so e.g. "Hero's Insane" doesn't get mis-classified.
+KNOWN_TIERS = ["insane", "expert", "hard", "normal", "easy"]
+
+
+def extract_osz(osz_path: str, dest_dir: Optional[str] = None) -> List[str]:
+    """Unzip every `.osu` difficulty out of a `.osz` package (an .osz is
+    just a zip of .osu files plus audio/background/etc.) into `dest_dir`
+    (a fresh temp directory if not given) and return their extracted
+    paths, sorted for deterministic ordering. Non-.osu members (audio,
+    images, storyboards) are left in the zip -- nothing downstream of this
+    needs them."""
+    if dest_dir is None:
+        dest_dir = tempfile.mkdtemp(prefix="osz_")
+    else:
+        os.makedirs(dest_dir, exist_ok=True)
+
+    extracted: List[str] = []
+    with zipfile.ZipFile(osz_path) as zf:
+        for member in zf.namelist():
+            if not member.lower().endswith(".osu"):
+                continue
+            # Flatten to just the basename -- some .osz files nest their
+            # contents in a subfolder, and we don't want that structure.
+            out_path = os.path.join(dest_dir, os.path.basename(member))
+            with zf.open(member) as src, open(out_path, "wb") as dst:
+                dst.write(src.read())
+            extracted.append(out_path)
+    return sorted(extracted)
+
+
+def guess_tier(osu_path: str) -> Optional[str]:
+    """Guess which difficulty tier (easy/normal/hard/insane/expert) an .osu
+    file is, from its `Version:` metadata (e.g. "Hero's Insane" -> "insane").
+    Returns None if no known tier name appears in the version string, e.g.
+    a guest-diff-only name like "cRaZy"."""
+    version = read_osu(osu_path).metadata.get("Version", "").lower()
+    for tier in KNOWN_TIERS:
+        if tier in version:
+            return tier
+    return None
 
 
 # --- geometry helpers shared by later stages --------------------------------
