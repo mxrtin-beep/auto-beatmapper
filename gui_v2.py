@@ -561,8 +561,8 @@ class ReportWindow:
     def __init__(self, master: tk.Tk) -> None:
         self.win = tk.Toplevel(master)
         self.win.title("Auto Beatmapper — Statistics Report")
-        self.win.geometry("560x460")
-        self.win.minsize(480, 380)
+        self.win.geometry("560x600")
+        self.win.minsize(480, 420)
         self.win.transient(master)
 
         self.log_queue: "queue.Queue[str]" = queue.Queue()
@@ -632,8 +632,13 @@ class ReportWindow:
     # --- Layout helpers (same patterns as App) ---
 
     def _panel(self, parent: tk.Widget, title: str) -> ttk.Labelframe:
+        # Unlike App's own _panel, this window has no scrollable canvas
+        # behind it -- expand=True here would let these fixed-size panels
+        # eat all the Toplevel's height, pushing the Generate button and
+        # log below the visible window instead of just taking their
+        # natural height and leaving the rest to the log frame below.
         panel = ttk.Labelframe(parent, text=title)
-        panel.pack(fill="x", expand=True, pady=(0, PAD_OUTER))
+        panel.pack(fill="x", pady=(0, PAD_OUTER))
         return panel
 
     def _file_row(self, parent: tk.Widget, row: int, var: tk.StringVar, browse_cmd, last: bool = False) -> None:
