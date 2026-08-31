@@ -89,8 +89,15 @@ class HitObject:
     edge_hitsounds: Optional[List[int]] = None
     edge_samplesets: Optional[List[str]] = None
 
+    # spinner-only field. Never produced by this pipeline (see beatmap_judge.py's
+    # module docstring on why -- no stage here places spinners), but parsed/written
+    # here so a hand-authored or hand-edited .osu round-trips correctly and so
+    # beatmap_judge.py can actually see spinners that exist in files it's handed.
+    is_spinner: bool = False
+    spinner_end_time: float = 0.0  # ms
+
     def object_type(self) -> int:
-        t = HIT_SLIDER if self.is_slider else HIT_CIRCLE
+        t = HIT_SPINNER if self.is_spinner else (HIT_SLIDER if self.is_slider else HIT_CIRCLE)
         if self.is_new_combo:
             t |= NEW_COMBO
         return t
@@ -123,6 +130,8 @@ class HitObject:
 
     def to_line(self) -> str:
         obj_type = self.object_type()
+        if self.is_spinner:
+            return f"{self.x},{self.y},{self.time:.0f},{obj_type},{self.hitsound},{self.spinner_end_time:.0f},0:0:0:0:"
         if not self.is_slider:
             return f"{self.x},{self.y},{self.time:.0f},{obj_type},{self.hitsound},0:0:0:0:"
 
@@ -142,6 +151,12 @@ class HitObject:
                                            int(parts[3]), int(parts[4]))
         is_new_combo = bool(obj_type & NEW_COMBO)
         is_slider = bool(obj_type & HIT_SLIDER)
+        is_spinner = bool(obj_type & HIT_SPINNER)
+
+        if is_spinner:
+            spinner_end_time = float(parts[5]) if len(parts) > 5 and parts[5] else time
+            return HitObject(x=x, y=y, time=time, is_new_combo=is_new_combo, hitsound=hitsound,
+                              is_spinner=True, spinner_end_time=spinner_end_time)
 
         if not is_slider:
             return HitObject(x=x, y=y, time=time, is_new_combo=is_new_combo, hitsound=hitsound)

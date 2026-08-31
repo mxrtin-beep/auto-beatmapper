@@ -74,6 +74,44 @@ DISTANCE_SNAP_RANGE = {"easy": (0.8, 1.2), "normal": (0.8, 1.3)}
 # well outside what any real mapset would use.
 REASONABLE_COMBO_LENGTH = (2, 24)
 
+# "Spinners must be long enough for Auto to achieve 1000 bonus score"
+# (General rule). The real threshold depends on OD; 4 beats is a simple,
+# tier-independent floor used as a decidable proxy.
+SPINNER_MIN_BEATS_GENERAL = 4.0
+
+# "There should be at least <N> beats between a spinner's end and the next
+# object" (difficulty-specific guideline; no requirement stated for
+# Insane/Expert).
+SPINNER_GAP_BEATS = {"easy": 4.0, "normal": 2.0, "hard": 1.0}
+
+# Beat subdivisions a sliderend "should be snapped according to" (straight
+# beat: 1/2, 1/4, 1/8, 1/16; swing beat: 1/3, 1/6, 1/12) -- checked together
+# since a plain .osu file doesn't record which feel the song actually uses.
+SNAP_DIVISORS = (1.0, 1/2, 1/3, 1/4, 1/6, 1/8, 1/12, 1/16)
+SNAP_TOLERANCE_MS = 3.0
+
+# "Avoid using combo colours ... with ~50 luminosity or lower" (General
+# guideline). Luminosity here is the standard perceived-brightness formula,
+# scaled to 0-100.
+DARK_LUMINOSITY_THRESHOLD = 50.0
+
+# "Avoid slider-only sections" (Easy/Normal guideline) -- a run of at least
+# this many consecutive sliders with no circle or rest moment between them.
+SLIDER_ONLY_RUN_THRESHOLD = {"easy": 3, "normal": 4}
+
+# "Slider tick hitsounds are discouraged" (Hard/Insane/Expert guideline).
+# Not directly decidable from a .osu file (skin/sample driven), so this
+# uses SliderTickRate > 1 as the closest available proxy: a tick rate
+# above the default 1 makes slider ticks fire more often, and so be more
+# audible, than the guideline's "used sparingly" framing assumes.
+TICK_DISCOURAGED_TIERS = {"hard", "insane", "expert"}
+
+# "Frequently manipulating slider velocity is discouraged" (Easy/Normal
+# guideline) -- flagged once a map's inherited (green) timing points imply
+# more than this many actual slider-velocity *changes* (not just lines).
+SV_CHANGE_TIERS = {"easy", "normal"}
+SV_CHANGE_THRESHOLD = 3
+
 
 @dataclass
 class Finding:
@@ -262,6 +300,254 @@ def _check_short_sliders(stats: BeatmapStats, tier: str) -> Finding | None:
                     f"be able to read on Easy.")
 
 
+def _parse_combo_colours(bm: Beatmap) -> list[tuple[int, int, int]]:
+    """RGB triples for every `ComboN : r,g,b` line under [Colours] --
+    SliderBorder/SliderTrackOverride and any malformed line are skipped."""
+    colours = []
+    for line in bm.colours:
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        if not key.strip().startswith("Combo"):
+            continue
+        try:
+            r, g, b = (int(v.strip()) for v in value.strip().split(",")[:3])
+        except ValueError:
+            continue
+        colours.append((r, g, b))
+    return colours
+
+
+def _check_combo_colour_count(bm: Beatmap) -> Finding:
+    """Rule: at least two different custom combo colours (unless the
+    default skin is forced, which no custom Combo lines at all implies)."""
+    distinct = set(_parse_combo_colours(bm))
+    if not distinct:
+        return Finding("Combo colours", "Rule", PASS,
+                        "No custom combo colours set -- the default skin's colours apply.")
+    if len(distinct) >= 2:
+        return Finding("Combo colours", "Rule", PASS,
+                        f"{len(distinct)} distinct custom combo colour(s) defined.")
+    return Finding("Combo colours", "Rule", FAIL,
+                    "Only 1 distinct custom combo colour is defined; at least 2 are required "
+                    "unless the default skin is forced.")
+
+
+def _check_combo_colour_luminosity(bm: Beatmap) -> Finding | None:
+    """Guideline: avoid combo colours at ~50 luminosity or lower."""
+    colours = _parse_combo_colours(bm)
+    if not colours:
+        return None
+    def luminosity(rgb: tuple[int, int, int]) -> float:
+        r, g, b = rgb
+        return (0.299 * r + 0.587 * g + 0.114 * b) / 255.0 * 100.0
+    dark = sorted({c for c in colours if luminosity(c) <= DARK_LUMINOSITY_THRESHOLD})
+    if not dark:
+        return Finding("Combo colour brightness guideline", "Guideline", PASS,
+                        f"No combo colours read at or below {DARK_LUMINOSITY_THRESHOLD:g} luminosity.")
+    listing = ", ".join(f"({r},{g},{b})" for r, g, b in dark)
+    return Finding("Combo colour brightness guideline", "Guideline", WARN,
+                    f"{len(dark)} combo colour(s) at or below {DARK_LUMINOSITY_THRESHOLD:g} luminosity "
+                    f"({listing}) -- dark colours hurt approach-circle readability at high background dim.")
+
+
+def _check_hitsound_audibility(bm: Beatmap) -> Finding:
+    """Rule: every actively clicked part must have an audible hitsound.
+    Approximated via timing-point volume, the one thing in the file that
+    can make a hitsound outright silent regardless of what sample plays."""
+    tps = sorted(((tp.time, tp.volume) for tp in bm.timing_points), key=lambda t: t[0])
+    if not tps:
+        return Finding("Audible hitsounds", "Rule", WARN,
+                        "No timing points found; can't verify hitsound volume.")
+    silent = 0
+    for ho in bm.hit_objects:
+        volume = tps[0][1]
+        for t, v in tps:
+            if t <= ho.time + 0.5:
+                volume = v
+            else:
+                break
+        if volume <= 0:
+            silent += 1
+    if silent == 0:
+        return Finding("Audible hitsounds", "Rule", PASS,
+                        "Every hit object falls under a timing section with nonzero hitsound volume.")
+    return Finding("Audible hitsounds", "Rule", FAIL,
+                    f"{silent}/{len(bm.hit_objects)} hit object(s) fall under a timing section with "
+                    f"volume=0 -- silent, with no feedback when clicked.")
+
+
+def _check_sliderend_snapping(bm: Beatmap) -> Finding | None:
+    """Guideline: sliderends not representing a specific musical sound
+    should be snapped to the beat grid (1/2, 1/4, 1/8, 1/16, or the swing
+    equivalents 1/3, 1/6, 1/12). A .osu file can't say which sliderends are
+    meant to land on a real musical cue vs. just be beat-snapped, so this
+    flags any sliderend that isn't close to *either* kind of grid point --
+    a slider deliberately ending exactly on a musical hit will typically
+    still land near the grid anyway, since that's usually itself a snapped
+    beat position."""
+    sliders = [o for o in bm.hit_objects if o.is_slider]
+    if not sliders:
+        return None
+    beat_length, offset, slider_multiplier = bm.beat_length, bm.offset, bm.slider_multiplier
+    if not beat_length:
+        return None
+    unsnapped = 0
+    for o in sliders:
+        end = o.end_time(beat_length, slider_multiplier)
+        rel = (end - offset) % beat_length
+        deviation = min(min(abs(rel - d * beat_length) for d in SNAP_DIVISORS), abs(rel - beat_length))
+        if deviation > SNAP_TOLERANCE_MS:
+            unsnapped += 1
+    if unsnapped == 0:
+        return Finding("Slider end snapping guideline", "Guideline", PASS,
+                        f"All {len(sliders)} slider end(s) land within {SNAP_TOLERANCE_MS:g}ms of a "
+                        f"recognized beat subdivision.")
+    frac = 100.0 * unsnapped / len(sliders)
+    return Finding("Slider end snapping guideline", "Guideline", WARN,
+                    f"{unsnapped}/{len(sliders)} slider end(s) (~{frac:.0f}%) don't land on a recognized "
+                    f"beat subdivision (1/2, 1/3, 1/4, 1/6, 1/8, 1/12, 1/16) -- sliderends not tied to a "
+                    f"specific sound in the music should be snapped to the beat structure.")
+
+
+def _check_hitsound_feedback(bm: Beatmap) -> Finding | None:
+    """Guideline: spinner ends, slider ends, and slider reverses should
+    have hitsound feedback -- approximated as: is *any* such edge point in
+    the whole map using a nonzero hitsound addition at all. A map with
+    literally none anywhere is the one confidently flaggable case; how
+    often any individual map *should* use one varies by held-sound
+    exceptions the file itself can't distinguish."""
+    edge_sounds: list[int] = []
+    for o in bm.hit_objects:
+        if o.is_slider:
+            sounds = o.edge_hitsounds or [0] * (o.slides + 1)
+            edge_sounds.extend(sounds[1:])  # exclude the head -- covered by the general audibility check
+        elif o.is_spinner:
+            edge_sounds.append(o.hitsound)
+    if not edge_sounds:
+        return None
+    with_feedback = sum(1 for h in edge_sounds if h != 0)
+    if with_feedback > 0:
+        return Finding("Slider/spinner end hitsound feedback guideline", "Guideline", PASS,
+                        f"{with_feedback}/{len(edge_sounds)} slider-end/reverse/spinner-end point(s) "
+                        f"carry an explicit hitsound addition.")
+    return Finding("Slider/spinner end hitsound feedback guideline", "Guideline", WARN,
+                    f"None of {len(edge_sounds)} slider-end/reverse/spinner-end point(s) carry an "
+                    f"explicit hitsound addition -- add feedback unless these represent a held sound.")
+
+
+def _check_slider_tick_hitsound(bm: Beatmap, tier: str) -> Finding | None:
+    if tier not in TICK_DISCOURAGED_TIERS:
+        return None
+    tick_rate = float(bm.difficulty.get("SliderTickRate", 1))
+    if tick_rate <= 1:
+        return Finding("Slider tick hitsound guideline", "Guideline", PASS,
+                        f"SliderTickRate={tick_rate:g} keeps slider ticks (and their hitsound) "
+                        f"infrequent on {tier}.")
+    return Finding("Slider tick hitsound guideline", "Guideline", WARN,
+                    f"SliderTickRate={tick_rate:g} on {tier} -- slider tick hitsounds are discouraged "
+                    f"here; if used, make sure their volume is balanced (notably quieter) against "
+                    f"regular hitsounds.")
+
+
+def _check_spinner_length(bm: Beatmap) -> Finding | None:
+    """Rule: spinners must be long enough for Auto to reach 1000 bonus
+    score -- approximated as a flat beat-length floor (see
+    SPINNER_MIN_BEATS_GENERAL's own docstring)."""
+    spinners = [o for o in bm.hit_objects if o.is_spinner]
+    beat_length = bm.beat_length
+    if not spinners or not beat_length:
+        return None
+    short = [(o.spinner_end_time - o.time) / beat_length for o in spinners]
+    short = [d for d in short if d < SPINNER_MIN_BEATS_GENERAL]
+    if not short:
+        return Finding("Spinner length", "Rule", PASS,
+                        f"All {len(spinners)} spinner(s) are at least {SPINNER_MIN_BEATS_GENERAL:g} "
+                        f"beats long.")
+    return Finding("Spinner length", "Rule", FAIL,
+                    f"{len(short)}/{len(spinners)} spinner(s) are shorter than "
+                    f"{SPINNER_MIN_BEATS_GENERAL:g} beats (shortest: {min(short):.2f}) -- too short "
+                    f"for Auto to achieve 1000 bonus score.")
+
+
+def _check_spinner_gap(bm: Beatmap, tier: str) -> Finding | None:
+    min_gap = SPINNER_GAP_BEATS.get(tier)
+    spinners = [o for o in bm.hit_objects if o.is_spinner]
+    beat_length = bm.beat_length
+    if min_gap is None or not spinners or not beat_length:
+        return None
+    objects_sorted = sorted(bm.hit_objects, key=lambda h: h.time)
+    violations = 0
+    for spinner in spinners:
+        following = next((h for h in objects_sorted
+                           if h.time >= spinner.spinner_end_time and h is not spinner), None)
+        if following is None:
+            continue
+        gap_beats = (following.time - spinner.spinner_end_time) / beat_length
+        if gap_beats < min_gap:
+            violations += 1
+    if violations == 0:
+        return Finding("Spinner recovery gap guideline", "Guideline", PASS,
+                        f"Every spinner has at least {min_gap:g} beats before the next object "
+                        f"(required on {tier}).")
+    return Finding("Spinner recovery gap guideline", "Guideline", WARN,
+                    f"{violations} spinner(s) have less than {min_gap:g} beats before the next object "
+                    f"-- not enough time to recognize a hit object after spinning, on {tier}.")
+
+
+def _check_slider_only_sections(bm: Beatmap, tier: str) -> Finding | None:
+    threshold = SLIDER_ONLY_RUN_THRESHOLD.get(tier)
+    if threshold is None:
+        return None
+    objects = sorted(bm.hit_objects, key=lambda h: h.time)
+    longest = run = offending_runs = 0
+    for o in objects:
+        if o.is_slider:
+            run += 1
+            continue
+        if run >= threshold:
+            offending_runs += 1
+        longest = max(longest, run)
+        run = 0
+    if run >= threshold:
+        offending_runs += 1
+    longest = max(longest, run)
+    if offending_runs == 0:
+        return Finding("Slider-only section guideline", "Guideline", PASS,
+                        f"Longest all-slider run is {longest} slider(s) (guideline: avoid "
+                        f"{threshold}+ in a row with no circle or rest, on {tier}).")
+    return Finding("Slider-only section guideline", "Guideline", WARN,
+                    f"{offending_runs} run(s) of {threshold}+ consecutive sliders with no circle or "
+                    f"rest between them (longest: {longest}) -- can be tiring to aim/follow on {tier}.")
+
+
+def _check_frequent_sv_changes(bm: Beatmap, tier: str) -> Finding | None:
+    if tier not in SV_CHANGE_TIERS:
+        return None
+    green_lines = sorted((tp for tp in bm.timing_points if not tp.uninherited), key=lambda tp: tp.time)
+    if len(green_lines) < 2:
+        return Finding("Slider velocity stability guideline", "Guideline", PASS,
+                        "No (or only one) slider-velocity change found.")
+
+    def sv_of(tp) -> float:
+        return -100.0 / tp.beat_length if tp.beat_length < 0 else 1.0
+
+    transitions = 0
+    prev: float | None = None
+    for tp in green_lines:
+        sv = sv_of(tp)
+        if prev is not None and abs(sv - prev) > 1e-6:
+            transitions += 1
+        prev = sv
+    if transitions <= SV_CHANGE_THRESHOLD:
+        return Finding("Slider velocity stability guideline", "Guideline", PASS,
+                        f"{transitions} slider-velocity change(s) found -- within a reasonable range "
+                        f"for {tier}.")
+    return Finding("Slider velocity stability guideline", "Guideline", WARN,
+                    f"{transitions} slider-velocity changes found -- frequently manipulating slider "
+                    f"velocity is discouraged on {tier}; reserve SV changes for real pacing changes.")
+
+
 def judge_beatmap(osu_path: str, tier: str) -> list[Finding]:
     tier = tier.lower()
     bm = read_osu(osu_path)
@@ -271,9 +557,15 @@ def judge_beatmap(osu_path: str, tier: str) -> list[Finding]:
     findings.extend(_check_difficulty_settings(bm, tier))
     findings.append(_check_off_screen(bm))
     findings.append(_check_full_overlap(stats, bm, tier))
+    findings.append(_check_combo_colour_count(bm))
+    findings.append(_check_hitsound_audibility(bm))
     for f in (_check_slider_velocity(bm, tier), _check_streams(bm, tier),
               _check_note_density(stats, tier), _check_short_sliders(stats, tier),
-              _check_distance_snap(bm, stats, tier), _check_combo_length(stats)):
+              _check_distance_snap(bm, stats, tier), _check_combo_length(stats),
+              _check_combo_colour_luminosity(bm), _check_sliderend_snapping(bm),
+              _check_hitsound_feedback(bm), _check_slider_tick_hitsound(bm, tier),
+              _check_spinner_length(bm), _check_spinner_gap(bm, tier),
+              _check_slider_only_sections(bm, tier), _check_frequent_sv_changes(bm, tier)):
         if f is not None:
             findings.append(f)
     return findings
