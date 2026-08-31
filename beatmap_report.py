@@ -90,6 +90,17 @@ def _add_footer(fig, page_num: int, total_pages: int, gen_label: str) -> None:
     fig.text(0.94, 0.02, f"{page_num} / {total_pages}", fontsize=7.5, color=MUTED, ha="right")
 
 
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+
+
+def default_report_path(beatmap_path: str) -> str:
+    """output/<beatmap name>/report.pdf -- a report gets its own subfolder
+    named after the input file (extension stripped), matching the layout
+    main.py already writes generated .osu/.osz files under."""
+    name = os.path.splitext(os.path.basename(beatmap_path))[0]
+    return os.path.join(OUTPUT_DIR, name, "report.pdf")
+
+
 def find_reference_osu(tier: str, example_dir: str = EXAMPLE_DIR) -> str | None:
     """Find the bundled example .osu file whose difficulty name best matches
     `tier` (case-insensitive substring match against the `[Difficulty]`
@@ -388,9 +399,13 @@ def main() -> None:
     parser.add_argument("--against", default=None,
                          help="Explicit .osu file to compare against instead of auto-picking a "
                               "Backstabber difficulty by --tier. Only valid for a single .osu input.")
-    parser.add_argument("--output", required=True, help="Path to write the PDF report to.")
+    parser.add_argument("--output", default=None,
+                         help="Path to write the PDF report to. Defaults to "
+                              "output/<beatmap name>/report.pdf, named after the input file.")
     parser.add_argument("--label", default="Generated", help="Label for the generated map in the report.")
     args = parser.parse_args()
+
+    output_pdf = args.output or default_report_path(args.beatmap)
 
     if args.beatmap.lower().endswith(".osz"):
         if args.against:
@@ -409,7 +424,7 @@ def main() -> None:
         if not tier_paths:
             raise SystemExit(f"No recognizable difficulty names (easy/normal/hard/insane/expert) found "
                               f"inside {args.beatmap}.")
-        build_report_for_tiers(tier_paths, args.output, gen_label=args.label)
+        build_report_for_tiers(tier_paths, output_pdf, gen_label=args.label)
         return
 
     tier = args.tier or "insane"
@@ -423,7 +438,7 @@ def main() -> None:
             print(f"Warning: no Backstabber difficulty matching {tier!r} found; "
                   f"report will show generated stats only.")
 
-    render_report({tier: (gen_stats, ref_stats)}, args.output, gen_label=args.label)
+    render_report({tier: (gen_stats, ref_stats)}, output_pdf, gen_label=args.label)
 
 
 if __name__ == "__main__":
