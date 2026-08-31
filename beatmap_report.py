@@ -32,6 +32,7 @@ matplotlib.use("Agg")  # headless -- this module never opens a window
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
+from beatmap_judge import Finding, PASS, WARN, FAIL, judge_beatmap
 from beatmap_stats import BeatmapStats, Distribution, compute_stats
 
 EXAMPLE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "example", "keha_backstabber")
@@ -58,6 +59,12 @@ MUTED = "#6b7280"
 RULE = "#d8dbe2"
 PANEL = "#f4f5f7"
 FONT_FAMILY = "DejaVu Sans"  # matplotlib's own default -- set explicitly so every page agrees
+
+# Verdict colors for the judgment table -- a fail on a Rule reads as urgent
+# (red), a guideline miss as advisory (amber), a pass as quiet confirmation
+# (green), all pale enough that the black verdict/clause text stays legible.
+VERDICT_COLOR = {PASS: "#2e7d4f", WARN: "#b8860b", FAIL: "#c0392b"}
+VERDICT_ROW_TINT = {PASS: "#eef7f1", WARN: "#fdf6e8", FAIL: "#fbeceb"}
 
 plt.rcParams.update({
     "font.family": FONT_FAMILY,
@@ -180,6 +187,68 @@ def _style_table(table, n_cols: int) -> None:
             cell.set_text_props(color=INK)
 
 
+def _judgment_page(pdf, tier: str, findings: list[Finding], page_num: int, total_pages: int,
+                    gen_label: str) -> None:
+    """One page per stage: every ranking-criteria check decidable from the
+    .osu file alone (see beatmap_judge.py), as a colored pass/warn/fail
+    table, with an overall verdict line summarizing the tally."""
+    n_pass = sum(1 for f in findings if f.verdict == PASS)
+    n_warn = sum(1 for f in findings if f.verdict == WARN)
+    n_fail = sum(1 for f in findings if f.verdict == FAIL)
+
+    n_rows = max(1, len(findings))
+    fig_height = min(11.0, 0.42 * n_rows + 2.2)
+    fig, ax = plt.subplots(figsize=(8.5, fig_height))
+    ax.axis("off")
+
+    fig.suptitle(f"{tier.capitalize()} — Ranking Criteria Judgment", fontsize=15, fontweight="bold",
+                 color=INK, y=(fig_height - 0.32) / fig_height)
+    if n_fail:
+        verdict_text, verdict_color = f"{n_fail} rule failure(s) — not ready to submit", VERDICT_COLOR[FAIL]
+    elif n_warn:
+        verdict_text, verdict_color = f"{n_warn} guideline warning(s) — worth a look", VERDICT_COLOR[WARN]
+    else:
+        verdict_text, verdict_color = "All checks pass", VERDICT_COLOR[PASS]
+    fig.text(0.5, (fig_height - 0.6) / fig_height, verdict_text, fontsize=11, fontweight="bold",
+              color=verdict_color, ha="center")
+    fig.text(0.5, (fig_height - 0.82) / fig_height,
+              f"{n_pass} pass · {n_warn} warn · {n_fail} fail  (of {len(findings)} checks decidable from the .osu file)",
+              fontsize=8.5, color=MUTED, ha="center")
+
+    if findings:
+        cell_text = [[f.kind, f.clause, f.verdict, f.detail] for f in findings]
+        table = ax.table(cellText=cell_text, colLabels=["Type", "Clause", "Verdict", "Detail"],
+                          loc="upper center", cellLoc="left",
+                          colWidths=[0.1, 0.22, 0.1, 0.58],
+                          bbox=(0, 0, 1, (fig_height - 1.15) / fig_height))
+        table.auto_set_font_size(False)
+        table.set_fontsize(7.5)
+        for (row, col), cell in table.get_celld().items():
+            cell.set_edgecolor(RULE)
+            cell.set_linewidth(0.6)
+            cell.PAD = 0.02
+            if row == 0:
+                cell.set_facecolor(INK)
+                cell.set_text_props(color="white", fontweight="bold")
+                continue
+            finding = findings[row - 1]
+            cell.set_facecolor(VERDICT_ROW_TINT[finding.verdict])
+            cell.set_text_props(color=INK, wrap=True)
+            if col == 2:
+                cell.set_text_props(color=VERDICT_COLOR[finding.verdict], fontweight="bold", wrap=True)
+    else:
+        fig.text(0.5, 0.5, "No checks applicable at this tier.", fontsize=10, color=MUTED,
+                  ha="center", style="italic")
+
+    fig.text(0.06, 0.02, "Checks cover geometry, timing, and [Difficulty] settings only -- anything "
+                          "tied to the music itself (musical timing of cues, hitsounds, difficulty "
+                          "spikes vs. song intensity) is outside what a file alone can judge.",
+              fontsize=6.5, color=MUTED, ha="left", style="italic", wrap=True)
+    _add_footer(fig, page_num, total_pages, gen_label)
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
 def _cover_page(pdf, gen_label: str, stage_names: list[str], gen_source_paths: list[str]) -> None:
     """A proper title page — the same reason a real report doesn't open
     straight on page one of data: it names what the document is, what
@@ -227,7 +296,7 @@ def render_report(tier_stats: dict[str, tuple[BeatmapStats, BeatmapStats | None]
     callers that do mean an actual difficulty tier.
     """
     os.makedirs(os.path.dirname(os.path.abspath(output_pdf)) or ".", exist_ok=True)
-    total_pages = 2 + len(tier_stats)  # cover + summary + one histogram page per stage
+    total_pages = 2 + 2 * len(tier_stats)  # cover + summary + (histogram + judgment) per stage
     with PdfPages(output_pdf) as pdf:
         _cover_page(pdf, gen_label, list(tier_stats.keys()), [g.source for g, _ in tier_stats.values()])
 
@@ -261,8 +330,9 @@ def render_report(tier_stats: dict[str, tuple[BeatmapStats, BeatmapStats | None]
         pdf.savefig(fig)
         plt.close(fig)
 
-        # --- One histogram page per stage ---
-        for page_num, (tier, (gen, ref)) in enumerate(tier_stats.items(), start=3):
+        # --- One histogram page, then one judgment page, per stage ---
+        page_num = 3
+        for tier, (gen, ref) in tier_stats.items():
             fig, axes = plt.subplots(2, 2, figsize=(8.5, 8.3))
             fig.suptitle(tier.capitalize(), fontsize=15, fontweight="bold", color=INK, y=0.975)
             fig.text(0.5, 0.935, f"{gen_label}  vs.  {EXAMPLE_LABEL}  ·  normalized to BPM",
@@ -275,6 +345,11 @@ def render_report(tier_stats: dict[str, tuple[BeatmapStats, BeatmapStats | None]
             _add_footer(fig, page_num, total_pages, gen_label)
             pdf.savefig(fig)
             plt.close(fig)
+            page_num += 1
+
+            findings = judge_beatmap(gen.source, tier)
+            _judgment_page(pdf, tier, findings, page_num, total_pages, gen_label)
+            page_num += 1
 
     print(f"Wrote statistics report: {output_pdf}")
 
