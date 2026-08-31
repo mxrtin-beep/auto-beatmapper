@@ -61,7 +61,7 @@ import random
 import librosa
 import numpy as np
 
-from apply_style import compute_measure_energy_buckets
+from apply_style import compute_measure_energy_buckets, find_repeating_measure_map  # noqa: F401 -- re-exported for add_sliders_v2.py
 from beatmap_utils import HitObject, read_osu, slider_length_for_gap, write_osu
 from pattern_uniformity import blended_choice, fuzzy_repeat_map
 
