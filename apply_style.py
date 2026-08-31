@@ -70,6 +70,7 @@ import random
 import numpy as np
 
 from beatmap_utils import HitObject, PLAYFIELD_H, PLAYFIELD_W, clamp_to_playfield, read_osu, write_osu
+from pattern_uniformity import blended_choice, fuzzy_repeat_map
 
 MARGIN = 30
 MIN_SPACING = 10.0    # px, safety floor only — the distance-snap formula rarely needs it
@@ -609,10 +610,20 @@ def main() -> None:
                               "formula; default 1.8, above the ranking-criteria-recommended "
                               "0.8x-1.3x range, since lower values still read as too close together / "
                               "prone to crisscrossing).")
+    parser.add_argument("--uniformity", type=float, default=0.0,
+                         help="How strongly a returning section (a verse's second repeat, a "
+                              "chorus that comes back later) reuses its earlier motif and slider "
+                              "curviness, beyond what's already found by matching *exact* runs of "
+                              "repeating energy -- 0-1, default 0 (a no-op: exactly today's "
+                              "exact-match-only behavior). Above 0, sections that only sound "
+                              "similar (not identical) increasingly get treated as repeats too, "
+                              "reusing an earlier section's pattern instead of its own. At 1, "
+                              "even a loose resemblance is enough.")
     args = parser.parse_args()
     args.curviness = max(0.0, min(1.0, args.curviness))
     args.spacing = max(0.1, args.spacing)
     args.temperature = max(0.0, min(1.0, args.temperature))
+    args.uniformity = max(0.0, min(1.0, args.uniformity))
     if args.angle_jitter is None:
         args.angle_jitter = 1.0 + args.temperature * 9.0  # 1-10 degrees
     curviness_variance = 0.15 + args.temperature * 0.4  # 0.15-0.55
@@ -649,7 +660,7 @@ def main() -> None:
     # coincidentally matching) plays its motif from the *first*
     # occurrence's own measure index -- see motif_turn_degrees' own
     # docstring.
-    measure_repeat_map = find_repeating_measure_map(measure_buckets)
+    measure_repeat_map = fuzzy_repeat_map(measure_buckets, args.uniformity, args.seed)
     stream_mode = build_stream_runs(objects, beat_length_ms, rng, args.seed, offset_ms=offset_ms,
                                      measure_length_ms=measure_length_ms, measure_buckets=measure_buckets,
                                      stream_frequency=args.stream_frequency,

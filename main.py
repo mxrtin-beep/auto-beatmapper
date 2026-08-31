@@ -112,6 +112,13 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=None,
                          help="Forwarded to apply_style.py's --temperature (0-1, how creative vs. "
                               "structured the styling gets). Omit to use apply_style.py's own default.")
+    parser.add_argument("--uniformity", type=float, default=None,
+                         help="Forwarded to both add_variety.py's and apply_style.py's own "
+                              "--uniformity (0-1): how strongly a returning section (a verse's "
+                              "second repeat, a chorus that comes back later) reuses its earlier "
+                              "slider-vs-circle, hitsound, and motif/curviness choices, beyond "
+                              "what's already reused on an *exact* repeat. Omit to use each "
+                              "stage's own default (0 -- a no-op).")
     parser.add_argument("--bpm", type=float, default=None,
                          help="Forwarded to generate_base_beatmap.py's --bpm, to set it manually "
                               "instead of auto-detecting it. Ignored with --restyle-only.")
@@ -140,7 +147,8 @@ def main() -> None:
                          ("--stream-frequency", args.stream_frequency),
                          ("--stack-probability", args.stack_probability),
                          ("--angle-jitter", args.angle_jitter),
-                         ("--temperature", args.temperature)):
+                         ("--temperature", args.temperature),
+                         ("--uniformity", args.uniformity)):
         if value is not None:
             style_extra_args += [flag, str(value)]
 
@@ -154,6 +162,8 @@ def main() -> None:
         variety_extra_args += ["--stream-frequency", str(args.stream_frequency)]
     if args.slider_length_bias is not None:
         variety_extra_args += ["--slider-length-bias", str(args.slider_length_bias)]
+    if args.uniformity is not None:
+        variety_extra_args += ["--uniformity", str(args.uniformity)]
 
     title = args.title or os.path.splitext(os.path.basename(args.audio))[0]
     outdir = args.outdir

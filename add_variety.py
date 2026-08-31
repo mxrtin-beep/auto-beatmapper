@@ -61,8 +61,9 @@ import random
 import librosa
 import numpy as np
 
-from apply_style import compute_measure_energy_buckets, find_repeating_measure_map
+from apply_style import compute_measure_energy_buckets
 from beatmap_utils import HitObject, read_osu, slider_length_for_gap, write_osu
+from pattern_uniformity import blended_choice, fuzzy_repeat_map
 
 # Hitsound bit flags (osu! HitObject hitSound field / slider edgeHitsounds).
 HS_NORMAL = 0
@@ -469,7 +470,18 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=None,
                          help="Random seed. Omit for a different map every run; pass a fixed "
                               "value (printed on every run) to reproduce the exact same map later.")
+    parser.add_argument("--uniformity", type=float, default=0.0,
+                         help="How strongly a returning section (a verse's second repeat, a "
+                              "chorus that comes back later) reuses its earlier slider-vs-circle "
+                              "choices and hitsounds instead of deciding independently, 0-1 "
+                              "(default 0 -- a no-op, today's fully independent behavior plus "
+                              "hitsound reuse on only *exact* repeats, unchanged). Above 0, "
+                              "sections that only sound similar (not identical) increasingly "
+                              "reuse an earlier section's choices too, at the same position in "
+                              "the pattern -- not a guarantee, more a family resemblance the "
+                              "closer this gets to 1, where even a loose resemblance is enough.")
     args = parser.parse_args()
+    args.uniformity = max(0.0, min(1.0, args.uniformity))
     args.stream_frequency = max(0.0, min(1.0, args.stream_frequency))
     # 3 at frequency 0 (never long enough to be a stream, per the 4-note
     # definition), 8 at frequency 1 (matches the pre-existing hard cap).
@@ -514,6 +526,27 @@ def main() -> None:
     print(f"  energy quantiles -> quiet<{q_low:.3f}  intense>{q_high:.3f}  climax>{q_climax:.3f}")
 
     categories = [classify(e, q_low, q_high) for e in smoothed_energy]
+
+    # A rough repeat map, computed early from the base grid's own energy (a
+    # close enough stand-in for the final objects' -- energy buckets don't
+    # depend on what ends up a circle vs. a slider) so the slider-vs-circle
+    # decisions in the main loop below can already lean on it. Empty at
+    # --uniformity 0's default: no repeat is trusted here beyond what a
+    # canonical-measure lookup already misses (fuzzy_repeat_map's own
+    # window=4 exact-match floor still applies once uniformity > 0).
+    early_measure_buckets = compute_measure_energy_buckets(energy_at, offset_ms, measure_length_ms,
+                                                            circles[-1].time)
+    measure_repeat_map_early = (fuzzy_repeat_map(early_measure_buckets, args.uniformity, args.seed)
+                                 if args.uniformity > 0.0 else {})
+
+    def canonical_measure_for(time_ms: float) -> int | None:
+        if not measure_repeat_map_early:
+            return None
+        measure_idx = int((time_ms - offset_ms) // measure_length_ms)
+        return measure_repeat_map_early.get(measure_idx, measure_idx)
+
+    def slot_for(time_ms: float) -> int:
+        return int(round((time_ms - offset_ms) / half_beat_ms)) % 8
 
     new_objects: list[HitObject] = []
     i = 0
@@ -560,9 +593,17 @@ def main() -> None:
             while (i + max_chain < n and max_chain < 4
                    and categories[i + max_chain] != "intense"):
                 max_chain += 1
-            can_chain = max_chain >= 2 and rng.random() < args.chain_probability
+            def draw_chain(chain_rng: random.Random, max_chain: int = max_chain) -> tuple[bool, int]:
+                can_chain = max_chain >= 2 and chain_rng.random() < args.chain_probability
+                if not can_chain:
+                    return False, 0
+                chain_len = chain_rng.choices([2, 3, 4][:max_chain - 1], weights=chain_weights[:max_chain - 1])[0]
+                return True, chain_len
+
+            can_chain, chain_len = blended_choice(
+                args.seed, "chain", canonical_measure_for(cur.time), slot_for(cur.time), args.uniformity,
+                group_fn=draw_chain, indep_fn=lambda: draw_chain(rng))
             if can_chain:
-                chain_len = rng.choices([2, 3, 4][:max_chain - 1], weights=chain_weights[:max_chain - 1])[0]
                 nodes = circles[i:i + chain_len]
                 new_objects.append(make_slider_chain(nodes, beat_length_ms, slider_multiplier))
                 i += chain_len
@@ -616,7 +657,13 @@ def main() -> None:
                 options = ["stream", "bounce", "rest"]
             else:
                 options = [t for t in ("stream", "bounce", "rest") if t != last_treatment]
-            treatment = rng.choices(options, weights=[weights[t] for t in options])[0]
+            def draw_treatment(t_rng: random.Random, options: list[str] = options) -> str:
+                return t_rng.choices(options, weights=[weights[t] for t in options])[0]
+
+            pos_time = circles[pos].time
+            treatment = blended_choice(
+                args.seed, "treatment", canonical_measure_for(pos_time), slot_for(pos_time), args.uniformity,
+                group_fn=draw_treatment, indep_fn=lambda: draw_treatment(rng))
             last_treatment = treatment
 
             chunk_end = lookahead_end
@@ -773,7 +820,7 @@ def main() -> None:
     # independently from that pass's own, merely similar energy.
     measure_buckets = compute_measure_energy_buckets(energy_at, offset_ms, measure_length_ms,
                                                        new_objects[-1].time if new_objects else 0.0)
-    measure_repeat_map = find_repeating_measure_map(measure_buckets)
+    measure_repeat_map = fuzzy_repeat_map(measure_buckets, args.uniformity, args.seed)
     assign_hitsounds(new_objects, energy_at, offset_ms, measure_length_ms, q_high, q_climax,
                       measure_repeat_map=measure_repeat_map)
 
