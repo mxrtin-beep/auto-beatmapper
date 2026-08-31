@@ -52,7 +52,8 @@ import beatmap_report
 import generate_base_beatmap_v2
 from beatmap_stats import compute_stats
 from build_osz import build_osz
-from gui import BG, BG_ENTRY, FONT_MONO, PAD_INNER, PAD_OUTER, TextRedirector, _configure_style, _open_path
+from gui import BG, BG_ENTRY, FONT_MONO, PAD_INNER, PAD_OUTER, TextRedirector, _bind_click_to_position, \
+    _configure_style, _open_path
 
 # Version names for the three stages, mirroring the main pipeline's own
 # Base/Variety/Styled naming.
@@ -87,31 +88,31 @@ class SliderParam:
 
 SLIDER_PARAMS = [
     SliderParam("--intensity", "Intensity",
-                "How much of the song ends up on faster subdivisions. Min (whole-beat "
-                "dominant throughout) to max (much more of it on half/quarter-beat spacing, "
-                "including denser measure-anchored bursts). Default 0.65.",
+                "How much of the song ends up on faster subdivisions. 0 = whole-beat "
+                "dominant throughout. 1 = much more of it on half/quarter-beat spacing, "
+                "including denser measure-anchored bursts.",
                 0.0, 0.65, 1.0),
     SliderParam("--chain-probability", "Slider vs. circle mix",
                 "How often an eligible run of adjacent circles actually becomes a slider, "
-                "versus staying plain circles. Min (always circles) to max (every eligible "
-                "run becomes a slider). Default 0.3.",
+                "versus staying plain circles. 0 = always circles. 1 = every eligible "
+                "run becomes a slider.",
                 0.0, 0.3, 1.0),
     SliderParam("--slider-length-bias", "Slider length",
-                "Of whichever runs do become sliders: how long they tend to run. Min (more, "
-                "shorter/choppier sliders) to max (fewer, longer sliders). Default 0.4.",
+                "Of whichever runs do become sliders: how long they tend to run. "
+                "0 = more, shorter/choppier sliders. 1 = fewer, longer sliders.",
                 0.0, 0.4, 1.0),
     SliderParam("--curviness", "Slider curviness",
-                "How curved slider paths look, from mostly straight lines to pronounced "
-                "arcs. Min (straight) to max (very curved). Default 0.5.",
+                "How curved slider paths look. 0 = mostly straight lines. "
+                "1 = pronounced arcs.",
                 0.0, 0.5, 1.0),
     SliderParam("--spacing", "Jump distance",
                 "How far apart notes are placed for a given time gap between them. "
-                "Min (tight, close together) to max (wide, dramatic jumps). Default 1.9.",
+                "0 = tight, close together. 1 = wide, dramatic jumps.",
                 0.5, 1.9, 2.5),
     SliderParam("--uniformity", "Pattern uniformity",
                 "How much the circle/slider layout repeats across measures with the same "
-                "note density, from independent every measure (min) to one fixed pattern "
-                "per density (max), default in the middle.",
+                "note density. 0 = independent every measure. 1 = one fixed pattern "
+                "per density.",
                 0.0, 0.5, 1.0),
 ]
 
@@ -316,6 +317,7 @@ class App:
             row=base_row + 1, column=0, columnspan=2, sticky="w", padx=PAD_INNER)
         scale = ttk.Scale(parent, from_=0.0, to=1.0, orient="horizontal", variable=var, command=on_change)
         scale.grid(row=base_row + 2, column=0, columnspan=2, sticky="ew", padx=PAD_INNER, pady=(6, 4))
+        _bind_click_to_position(scale, var, 0.0, 1.0, on_change)
 
     # --- File pickers ---
 

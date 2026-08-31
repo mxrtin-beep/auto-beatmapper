@@ -53,6 +53,7 @@ import generate_base_beatmap
 import add_variety
 import apply_style
 import make_easy
+from background_style import apply_background, extract_combo_colors
 from build_osz import build_osz
 
 
@@ -128,6 +129,10 @@ def main() -> None:
     parser.add_argument("--no-spread", dest="spread", action="store_false", default=True,
                          help="Skip deriving Hard/Normal/Easy from Insane (make_easy.py) — by "
                               "default the full 4-difficulty spread is generated automatically.")
+    parser.add_argument("--background", default=None,
+                         help="Path to an image to use as the map's background. Its most common "
+                              "colors also become the map's combo colors, replacing the pipeline's "
+                              "own fixed default. Omit for no background image.")
     args = parser.parse_args()
 
     if args.seed is None:
@@ -160,6 +165,29 @@ def main() -> None:
     os.makedirs(outdir, exist_ok=True)
 
     audio_filename = os.path.basename(args.audio)
+
+    # Copied into outdir (like a difficulty file, not cleaned up as an
+    # intermediate) so it sits right next to the .osu files a loose-file
+    # user opens directly, not just inside a .osz — same reasoning as why
+    # the audio itself is expected alongside them.
+    background_path = None
+    background_colours = None
+    if args.background:
+        import shutil
+        background_path = os.path.join(outdir, os.path.basename(args.background))
+        if os.path.abspath(background_path) != os.path.abspath(args.background):
+            shutil.copyfile(args.background, background_path)
+        background_colours = extract_combo_colors(background_path)
+
+    def apply_background_to(paths: list[str]) -> None:
+        """No-op without --background. Mutates each already-written .osu
+        in `paths` in place, so this must run after they're written but
+        before they're packaged into a .osz."""
+        if background_path is None:
+            return
+        background_filename = os.path.basename(background_path)
+        for p in paths:
+            apply_background(p, background_filename, background_colours)
     # Intermediate pipeline stages — internal working files, not one of the
     # four finished difficulties, so they keep the old parenthetical
     # pipeline-stage naming and get cleaned up with the rest of output_paths.
@@ -194,9 +222,11 @@ def main() -> None:
                                         "--version", "Styled", "--seed", str(args.seed)] + style_extra_args)
         tier_output_paths = derive_tiers()
         _cleanup_osu_files([styled_path], keep=False)  # never one of the four difficulties
+        apply_background_to(tier_output_paths)
         if args.osz:
             osz_path = os.path.join(outdir, f"{title}.osz")
-            build_osz(tier_output_paths, args.audio, osz_path, audio_filename)
+            build_osz(tier_output_paths, args.audio, osz_path, audio_filename,
+                      extra_files=[background_path] if background_path else None)
             print(f"=== Packaged {osz_path} ===")
             _cleanup_osu_files(tier_output_paths, args.keep_osu_files)
         print("Done.")
@@ -239,10 +269,12 @@ def main() -> None:
     # once packaging is done.
     _cleanup_osu_files([styled_path], keep=False)
     extra_osz_files = [base_path, variety_path] if args.keep_intermediate_files else []
+    apply_background_to(tier_output_paths + extra_osz_files)
 
     if args.osz:
         osz_path = os.path.join(outdir, f"{title}.osz")
-        build_osz(tier_output_paths + extra_osz_files, args.audio, osz_path, audio_filename)
+        build_osz(tier_output_paths + extra_osz_files, args.audio, osz_path, audio_filename,
+                  extra_files=[background_path] if background_path else None)
         print(f"=== Packaged {osz_path} ===")
         _cleanup_osu_files(tier_output_paths, args.keep_osu_files)
         _cleanup_osu_files(extra_osz_files, args.keep_osu_files)

@@ -76,28 +76,27 @@ class SliderParam:
 SLIDER_PARAMS = [
     SliderParam("--spacing", "Jump distance",
                 "How far apart notes are placed for a given time gap between them. "
-                "Min 0.5 (tight, close together), max 2.5 (wide, dramatic jumps). Default 1.8.",
+                "0 = tight, close together. 1 = wide, dramatic jumps.",
                 0.5, 2.5, 1.8),
     SliderParam("--curviness", "Slider curviness",
-                "How curved slider paths look, from mostly straight lines to pronounced "
-                "arcs. Min 0 (straight), max 1 (very curved). Default 0.5.",
+                "How curved slider paths look. 0 = mostly straight lines. "
+                "1 = pronounced arcs.",
                 0.0, 1.0, 0.5),
     SliderParam("--stream-frequency", "Stream frequency",
                 "How often fast bursts (4+ notes a quarter beat or less apart) happen at all. "
-                "Min 0 (none — fast notes stay in short 2-3 note bursts or spread out to half "
-                "beats), max 1 (streams are a regular occurrence — even this end of the dial "
-                "stays deliberately restrained). Default 0.5.",
+                "0 = none (fast notes stay in short 2-3 note bursts or spread out to half "
+                "beats). 1 = streams are a regular occurrence (even this end of the dial "
+                "stays deliberately restrained).",
                 0.0, 1.0, 0.5, scale=0.2),
     SliderParam("--slider-length-bias", "Slider length",
                 "How long a merged slider tends to run, in normal (non-intense) sections. "
-                "Min 0 (more, shorter/choppier sliders), max 1 (fewer, longer sliders). "
-                "Default 0.5.",
+                "0 = more, shorter/choppier sliders. 1 = fewer, longer sliders.",
                 0.0, 1.0, 0.5),
     SliderParam("--temperature", "Creativity",
                 "How much variation the whole map has — turn angles, slider curviness, how "
                 "far the pattern wanders around the screen, and how many times the jump "
-                "distance shifts over the course of the song. Min 0 (tight and repetitive, "
-                "spacing never changes), max 1 (loose and varied). Default 0.5.",
+                "distance shifts over the course of the song. 0 = tight and repetitive "
+                "(spacing never changes). 1 = loose and varied.",
                 0.0, 1.0, 0.5),
 ]
 
@@ -152,6 +151,27 @@ class TextRedirector:
 
     def flush(self) -> None:
         pass
+
+
+def _bind_click_to_position(scale: ttk.Scale, var: "tk.DoubleVar", lo: float, hi: float, on_change=None) -> None:
+    """Make clicking (or dragging) anywhere on `scale`'s trough jump the
+    thumb straight to that spot, instead of Tk's own default: a click on
+    the trough (as opposed to directly on the thumb) normally does a
+    single fixed-size step toward wherever was clicked, which on a 0-1
+    range with the thumb sitting in the middle reads as "jumps to 0 or 1"
+    — nowhere near where the cursor actually landed."""
+    def set_from_event(event: "tk.Event") -> str:
+        width = scale.winfo_width()
+        if width <= 1:
+            return "break"
+        frac = max(0.0, min(1.0, event.x / width))
+        var.set(lo + frac * (hi - lo))
+        if on_change is not None:
+            on_change()
+        return "break"
+
+    scale.bind("<Button-1>", set_from_event)
+    scale.bind("<B1-Motion>", set_from_event)
 
 
 def _configure_style(root: tk.Tk) -> None:
@@ -262,6 +282,15 @@ class App:
         self.outdir_var = tk.StringVar(value="output")
         self._file_row(song_panel, 5, self.outdir_var, self._browse_outdir, last=True)
         song_panel.columnconfigure(0, weight=1)
+
+        # --- Background section ---
+        background_panel = self._panel(form, "Background")
+        self._section_heading(background_panel, 0, "Background image",
+                               "Optional. Its most common colors also become the map's combo "
+                               "colors. Leave blank for no background and the default colors.")
+        self.background_var = tk.StringVar()
+        self._file_row(background_panel, 2, self.background_var, self._browse_background, last=True)
+        background_panel.columnconfigure(0, weight=1)
 
         # --- Song info section ---
         meta_panel = self._panel(form, "Song info")
@@ -412,6 +441,7 @@ class App:
         scale = ttk.Scale(parent, from_=p.lo, to=p.hi, orient="horizontal",
                            variable=var, command=on_change)
         scale.grid(row=base_row + 2, column=0, columnspan=2, sticky="ew", padx=PAD_INNER, pady=(6, 0))
+        _bind_click_to_position(scale, var, p.lo, p.hi, on_change)
         range_frame = ttk.Frame(parent, style="Panel.TFrame")
         range_frame.grid(row=base_row + 3, column=0, columnspan=2, sticky="ew", padx=PAD_INNER, pady=(0, 4))
         range_frame.columnconfigure(1, weight=1)
@@ -430,6 +460,13 @@ class App:
         path = filedialog.askdirectory(title="Choose an output folder")
         if path:
             self.outdir_var.set(path)
+
+    def _browse_background(self) -> None:
+        path = filedialog.askopenfilename(title="Choose a background image",
+                                           filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp"),
+                                                      ("All files", "*.*")])
+        if path:
+            self.background_var.set(path)
 
     # --- Log ---
 
@@ -467,6 +504,13 @@ class App:
 
         if self.title_var.get().strip():
             argv += ["--title", self.title_var.get().strip()]
+
+        background = self.background_var.get().strip()
+        if background:
+            if not os.path.isfile(background):
+                messagebox.showerror("File not found", f"Can't find:\n{background}")
+                return None
+            argv += ["--background", background]
 
         for p in SLIDER_PARAMS:
             argv += [p.flag, f"{self.slider_vars[p.flag].get() * p.scale:.3f}"]

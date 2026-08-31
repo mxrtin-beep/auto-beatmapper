@@ -3,3 +3,4 @@ librosa
 soundfile
 scipy
 matplotlib
+Pillow
