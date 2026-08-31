@@ -69,10 +69,11 @@ import numpy as np
 
 import apply_style
 import make_easy
-from add_variety import (assign_hitsounds, chain_len_weights, compute_energy_curve, find_repeating_measure_map,
+from add_variety import (assign_hitsounds, chain_len_weights, compute_energy_curve,
                           is_on_downbeat, make_bounce_slider, make_energy_lookup, make_slider_chain)
 from beatmap_utils import HitObject, read_osu, write_osu
 from make_easy import recompute_combos
+from pattern_uniformity import fuzzy_repeat_map
 
 # How much --spacing is scaled down per tier below Insane -- osu!'s own
 # distance-snap formula is CircleSize-agnostic, but a lower tier's much
@@ -375,7 +376,7 @@ def build_tier(tier: str, objects: list[HitObject], bm, args, rng: random.Random
     # so which beats) actually exist to copy from.
     measure_buckets = apply_style.compute_measure_energy_buckets(energy_at, offset_ms, measure_length_ms,
                                                                    thinned[-1].time)
-    measure_repeat_map = find_repeating_measure_map(measure_buckets)
+    measure_repeat_map = fuzzy_repeat_map(measure_buckets, args.uniformity, args.seed)
     assign_hitsounds(thinned, energy_at, offset_ms, measure_length_ms, q_high, q_climax,
                       measure_repeat_map=measure_repeat_map)
 
@@ -475,10 +476,19 @@ def main() -> None:
                          help="Revert to the original behavior: every run's circle/chain/bounce choice is "
                               "rolled independently, with no attempt to reuse an earlier repeated "
                               "measure's own layout.")
+    parser.add_argument("--uniformity", type=float, default=0.0,
+                         help="How strongly a returning section (a verse's second repeat, a chorus that "
+                              "comes back later) reuses its earlier circle/chain/bounce layout and "
+                              "hitsounds, beyond just an *exact* repeat -- 0-1, default 0 (a no-op: "
+                              "--reuse-layout, when on, still only matches exact repeats, unchanged). "
+                              "Above 0, sections that only sound similar (not identical) increasingly "
+                              "get treated as repeats too. Ignored for the layout decision specifically "
+                              "when --no-reuse-layout is passed; hitsounds still pick it up either way.")
     parser.add_argument("--seed", type=int, default=None,
                          help="Random seed. Omit for a different result every run; pass a fixed value "
                               "(printed on every run) to reproduce it later.")
     args = parser.parse_args()
+    args.uniformity = max(0.0, min(1.0, args.uniformity))
 
     if args.seed is None:
         args.seed = random.SystemRandom().randrange(2**32)
@@ -504,7 +514,7 @@ def main() -> None:
     measure_length_ms = beat_length_ms * 4.0
     measure_buckets = apply_style.compute_measure_energy_buckets(energy_at, bm.offset, measure_length_ms,
                                                                    circles[-1].time)
-    measure_repeat_map = find_repeating_measure_map(measure_buckets) if args.reuse_layout else None
+    measure_repeat_map = fuzzy_repeat_map(measure_buckets, args.uniformity, args.seed) if args.reuse_layout else None
 
     merged = merge_into_sliders(circles, beat_length_ms, slider_multiplier, rng, args.slider_length_bias,
                                  chain_probability=args.chain_probability, max_gap_beats=args.max_gap_beats,
@@ -538,7 +548,7 @@ def main() -> None:
     q_climax = float(np.quantile(obj_energy, 0.92))
     measure_buckets = apply_style.compute_measure_energy_buckets(energy_at, bm.offset, measure_length_ms,
                                                                    merged[-1].time)
-    measure_repeat_map = find_repeating_measure_map(measure_buckets)
+    measure_repeat_map = fuzzy_repeat_map(measure_buckets, args.uniformity, args.seed)
     assign_hitsounds(merged, energy_at, bm.offset, measure_length_ms, q_high, q_climax,
                       measure_repeat_map=measure_repeat_map)
 

@@ -108,6 +108,14 @@ SLIDER_PARAMS = [
                 "How far apart notes are placed for a given time gap between them. "
                 "Min (tight, close together) to max (wide, dramatic jumps). Default 1.9.",
                 0.5, 1.9, 2.5),
+    SliderParam("--uniformity", "Pattern uniformity",
+                "How strongly a returning section (a verse's second repeat, a chorus that "
+                "comes back later) reuses its earlier circle/chain/bounce layout and "
+                "hitsounds, beyond what 'Reuse a repeated section's own layout' below already "
+                "does for an *exact* repeat. Min (off: only exact repeats match, today's "
+                "default) to max (even a loose resemblance between two sections is enough to "
+                "make them share a pattern). Default 0.",
+                0.0, 0.0, 1.0),
 ]
 
 
@@ -416,6 +424,7 @@ class App:
                              "--slider-length-bias", f"{self._actual('--slider-length-bias'):.3f}",
                              "--curviness", f"{self._actual('--curviness'):.3f}",
                              "--spacing", f"{self._actual('--spacing'):.3f}",
+                             "--uniformity", f"{self._actual('--uniformity'):.3f}",
                              "--seed", str(seed),
                              "--reuse-layout" if self.reuse_layout_var.get() else "--no-reuse-layout"]
             # The merged-but-unstyled "Sliders" stage is only ever worth
