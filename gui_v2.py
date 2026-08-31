@@ -41,6 +41,7 @@ from __future__ import annotations
 import os
 import queue
 import random
+import shutil
 import sys
 import threading
 import tkinter as tk
@@ -50,6 +51,7 @@ from tkinter import filedialog, messagebox, ttk
 import add_sliders_v2
 import beatmap_report
 import generate_base_beatmap_v2
+from background_style import apply_background, extract_combo_colors
 from beatmap_stats import compute_stats
 from build_osz import build_osz
 from gui import BG, BG_ENTRY, FONT_MONO, PAD_INNER, PAD_OUTER, TextRedirector, _bind_click_to_position, \
@@ -183,6 +185,18 @@ class App:
         self.outdir_var = tk.StringVar(value="output")
         self._file_row(song_panel, 3, self.outdir_var, self._browse_outdir, last=True)
         song_panel.columnconfigure(0, weight=1)
+
+        # --- Background section ---
+        background_panel = self._panel(form, "Background")
+        ttk.Label(background_panel, text="Background image", style="Heading.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=PAD_INNER, pady=(PAD_INNER, 2))
+        ttk.Label(background_panel,
+                  text="Optional. Its most common colors also become the map's combo colors. "
+                       "Leave blank for no background and the default colors.",
+                  style="Hint.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", padx=PAD_INNER)
+        self.background_var = tk.StringVar()
+        self._file_row(background_panel, 2, self.background_var, self._browse_background, last=True)
+        background_panel.columnconfigure(0, weight=1)
 
         # --- Song info section ---
         meta_panel = self._panel(form, "Song info")
@@ -332,6 +346,13 @@ class App:
         if path:
             self.outdir_var.set(path)
 
+    def _browse_background(self) -> None:
+        path = filedialog.askopenfilename(title="Choose a background image",
+                                           filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp"),
+                                                      ("All files", "*.*")])
+        if path:
+            self.background_var.set(path)
+
     # --- Log ---
 
     def _append_log(self, text: str) -> None:
@@ -388,6 +409,20 @@ class App:
             os.makedirs(outdir, exist_ok=True)
             keep_intermediate = self.keep_intermediate_var.get()
             seed = random.SystemRandom().randrange(2**32)
+
+            # Copied into outdir (like a difficulty file, not a cleaned-up
+            # intermediate) so it's right there for a loose-file user, not
+            # just inside a .osz -- same reasoning as the audio itself.
+            background_path = None
+            background_colours = None
+            background = self.background_var.get().strip()
+            if background:
+                if not os.path.isfile(background):
+                    raise RuntimeError(f"Background image not found: {background}")
+                background_path = os.path.join(outdir, os.path.basename(background))
+                if os.path.abspath(background_path) != os.path.abspath(background):
+                    shutil.copyfile(background, background_path)
+                background_colours = extract_combo_colors(background_path)
 
             circles_path = os.path.join(outdir, f"{title} [{CIRCLES_VERSION}].osu")
             sliders_path = os.path.join(outdir, f"{title} [{SLIDERS_VERSION}].osu")
@@ -466,9 +501,15 @@ class App:
             if not keep_intermediate:
                 os.remove(circles_path)
 
+            if background_path is not None:
+                background_filename = os.path.basename(background_path)
+                for path in all_paths:
+                    apply_background(path, background_filename, background_colours)
+
             if self.osz_var.get():
                 osz_path = os.path.join(outdir, f"{title} (Base v2).osz")
-                build_osz(all_paths, audio, osz_path)
+                build_osz(all_paths, audio, osz_path,
+                          extra_files=[background_path] if background_path else None)
                 self.log_queue.put(f"Packaged {osz_path}\n")
                 for path in all_paths:
                     os.remove(path)
