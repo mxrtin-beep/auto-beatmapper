@@ -561,8 +561,14 @@ class ReportWindow:
     def __init__(self, master: tk.Tk) -> None:
         self.win = tk.Toplevel(master)
         self.win.title("Auto Beatmapper — Statistics Report")
-        self.win.geometry("560x600")
-        self.win.minsize(480, 420)
+        # A plain Toplevel starts on Tk's own default (light) background --
+        # _configure_style() only ever themed `master`'s own root window,
+        # so without this the window's raw background shows through as a
+        # pale border around every dark ttk panel, instead of matching the
+        # rest of the app.
+        self.win.configure(bg=BG)
+        self.win.geometry("620x760")
+        self.win.minsize(520, 520)
         self.win.transient(master)
 
         self.log_queue: "queue.Queue[str]" = queue.Queue()
@@ -741,6 +747,12 @@ class ReportWindow:
         try:
             output_pdf = self.output_var.get().strip() or beatmap_report.default_report_path(song)
             label = os.path.splitext(os.path.basename(song))[0]
+            # Names whatever _resolve_compare_stats actually compares
+            # against, for the summary-table column header and cover page
+            # -- only shown at all if some stage ends up with a reference
+            # (render_report itself decides that, from tier_stats).
+            custom = self.compare_song_var.get().strip()
+            ref_label = os.path.splitext(os.path.basename(custom))[0] if custom else "Backstabber"
 
             if song.lower().endswith(".osz"):
                 osu_paths = extract_osz(song)
@@ -756,12 +768,13 @@ class ReportWindow:
                 # compares against Backstabber) so each tier gets this window's own comparison choice.
                 tier_stats = {tier: (compute_stats(path), self._resolve_compare_stats(tier))
                                for tier, path in tier_paths.items()}
-                beatmap_report.render_report(tier_stats, output_pdf, gen_label=label)
+                beatmap_report.render_report(tier_stats, output_pdf, gen_label=label, ref_label=ref_label)
             else:
                 tier = guess_tier(song) or "insane"
                 gen_stats = compute_stats(song)
                 ref_stats = self._resolve_compare_stats(tier)
-                beatmap_report.render_report({tier: (gen_stats, ref_stats)}, output_pdf, gen_label=label)
+                beatmap_report.render_report({tier: (gen_stats, ref_stats)}, output_pdf,
+                                              gen_label=label, ref_label=ref_label)
 
             self.log_queue.put(f"Wrote statistics report: {output_pdf}\n")
             self.result_path = output_pdf

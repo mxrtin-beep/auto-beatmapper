@@ -52,6 +52,28 @@ MAX_RECOMMENDED_SLIDER_VELOCITY = {"easy": 1.3, "normal": 1.3}
 MAX_STREAM_LEN = {"hard": 5}
 STREAM_GAP_BEATS = 0.26  # slightly above exact 1/4 to absorb rounding
 
+# "Note density should consist of mostly <rhythm>, or slower" -- each tier's
+# own median-delay floor (in beats) and the rhythm description to report,
+# straight out of the Guidelines subsection for that tier.
+NOTE_DENSITY_GUIDELINE = {
+    "easy": (0.9, "1/1, 2/1, or slower"),
+    "normal": (0.45, "1/1, occasional 1/2, or slower"),
+    "hard": (0.22, "1/2, occasional 1/4, or slower"),
+}
+
+# "When distance snap is used, try to keep it between <lo>x and <hi>x"
+# (Easy/Normal guideline). A map's *actual* distance snap is approximated
+# as its median spacing_per_beat divided by SliderMultiplier*100 (the
+# px-per-beat a 1.0x snap would move at that slider velocity).
+DISTANCE_SNAP_RANGE = {"easy": (0.8, 1.2), "normal": (0.8, 1.3)}
+
+# "Ensure that your combos are not unreasonably short or long" (Overall
+# guideline, every tier). No numeric threshold is given in the criteria
+# text itself, so these are a generous sanity range, not a strict reading
+# of the rule -- flagged only when a map's *typical* (median) combo is
+# well outside what any real mapset would use.
+REASONABLE_COMBO_LENGTH = (2, 24)
+
 
 @dataclass
 class Finding:
@@ -171,16 +193,58 @@ def _check_streams(bm: Beatmap, tier: str) -> Finding | None:
 
 
 def _check_note_density(stats: BeatmapStats, tier: str) -> Finding | None:
-    """Easy guideline: note density should be mostly 1/1, 2/1, or slower."""
-    if tier != "easy" or stats.delay_beats is None:
+    """Note density guideline (Easy/Normal/Hard, each with its own rhythm
+    floor -- see NOTE_DENSITY_GUIDELINE)."""
+    floor = NOTE_DENSITY_GUIDELINE.get(tier)
+    if floor is None or stats.delay_beats is None:
         return None
+    min_beats, rhythm_desc = floor
     median = stats.delay_beats.median
-    if median >= 0.9:
+    if median >= min_beats:
         return Finding("Note density guideline", "Guideline", PASS,
-                        f"Median delay is {median:.2f} beats, consistent with 1/1-or-slower rhythms.")
+                        f"Median delay is {median:.2f} beats, consistent with {rhythm_desc} rhythms.")
     return Finding("Note density guideline", "Guideline", WARN,
-                    f"Median delay is {median:.2f} beats -- denser than the 1/1-or-slower rhythms "
-                    f"recommended for Easy.")
+                    f"Median delay is {median:.2f} beats -- denser than the {rhythm_desc} rhythms "
+                    f"recommended for {tier.capitalize()}.")
+
+
+def _check_distance_snap(bm: Beatmap, stats: BeatmapStats, tier: str) -> Finding | None:
+    """Easy/Normal guideline: keep distance snap within a tier-specific
+    multiple of SliderMultiplier's own px-per-beat, so spacing and slider
+    velocity don't imply contradictory speeds to a new player."""
+    snap_range = DISTANCE_SNAP_RANGE.get(tier)
+    if snap_range is None or stats.spacing_per_beat is None:
+        return None
+    lo, hi = snap_range
+    px_per_beat_at_1x = bm.slider_multiplier * 100.0
+    if px_per_beat_at_1x <= 0:
+        return None
+    actual_snap = stats.spacing_per_beat.median / px_per_beat_at_1x
+    if lo <= actual_snap <= hi:
+        return Finding("Distance snap guideline", "Guideline", PASS,
+                        f"Median spacing implies a ~{actual_snap:.2f}x distance snap, within the "
+                        f"recommended {lo:g}x-{hi:g}x range for {tier}.")
+    return Finding("Distance snap guideline", "Guideline", WARN,
+                    f"Median spacing implies a ~{actual_snap:.2f}x distance snap, outside the "
+                    f"recommended {lo:g}x-{hi:g}x range for {tier} -- spacing and slider velocity may "
+                    f"read as inconsistent.")
+
+
+def _check_combo_length(stats: BeatmapStats) -> Finding | None:
+    """Overall guideline: combos should be neither unreasonably short nor
+    unreasonably long (see REASONABLE_COMBO_LENGTH's own docstring on why
+    this range is a generous sanity check, not a criteria-specified one)."""
+    if stats.combo_length is None:
+        return None
+    lo, hi = REASONABLE_COMBO_LENGTH
+    median = stats.combo_length.median
+    if lo <= median <= hi:
+        return Finding("Combo length guideline", "Guideline", PASS,
+                        f"Median combo length is {median:.0f} objects, a reasonable size.")
+    which = "short" if median < lo else "long"
+    return Finding("Combo length guideline", "Guideline", WARN,
+                    f"Median combo length is {median:.0f} objects, unusually {which} -- combos should "
+                    f"reflect musical phrasing (bars, vocal/instrumental phrases), not read as arbitrary.")
 
 
 def _check_short_sliders(stats: BeatmapStats, tier: str) -> Finding | None:
@@ -208,7 +272,8 @@ def judge_beatmap(osu_path: str, tier: str) -> list[Finding]:
     findings.append(_check_off_screen(bm))
     findings.append(_check_full_overlap(stats, bm, tier))
     for f in (_check_slider_velocity(bm, tier), _check_streams(bm, tier),
-              _check_note_density(stats, tier), _check_short_sliders(stats, tier)):
+              _check_note_density(stats, tier), _check_short_sliders(stats, tier),
+              _check_distance_snap(bm, stats, tier), _check_combo_length(stats)):
         if f is not None:
             findings.append(f)
     return findings

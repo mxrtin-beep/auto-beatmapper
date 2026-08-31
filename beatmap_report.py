@@ -47,7 +47,13 @@ HIST_FIELDS = [
     ("slider_beats", "Slider duration", "beats"),
     ("spacing_px", "Spacing (on-screen distance)", "px"),
     ("turn_angle_deg", "Turn angle", "°"),
+    ("combo_length", "Combo length", "objects"),
+    ("spacing_per_beat", "Spacing per beat (distance-snap)", "px/beat"),
 ]
+# Grid shape the histogram page lays HIST_FIELDS out in -- kept alongside
+# it so the two never drift apart (one entry added to HIST_FIELDS with no
+# matching grid cell would just silently not get plotted).
+HIST_GRID = (3, 2)  # (rows, cols)
 
 # A small, consistent visual identity for the whole document -- one accent
 # pair (generated vs. reference), one neutral ink/muted/rule/panel scale,
@@ -157,29 +163,40 @@ def _plot_histogram_pair(ax, gen_dist: Distribution | None, ref_dist: Distributi
     legend.get_frame().set_linewidth(0.6)
 
 
-def _summary_rows(gen: BeatmapStats, ref: BeatmapStats | None) -> list[tuple[str, str, str]]:
+def _summary_rows(gen: BeatmapStats, ref: BeatmapStats | None, has_ref: bool) -> list[tuple[str, ...]]:
+    """One row per metric: (label, generated-value) if nothing is being
+    compared against at all, or (label, generated-value, reference-value)
+    when `has_ref` -- has_ref is passed in rather than inferred from
+    `ref is not None` alone so a *mixed* report (some stages have a match,
+    some don't -- e.g. a .osz tier with no corresponding Backstabber
+    difficulty) still gets a reference column throughout, just "—" for the
+    stages missing one, instead of the column itself appearing and
+    disappearing page to page."""
     def fmt(stats: BeatmapStats | None, fn) -> str:
         return fn(stats) if stats is not None else "—"
 
+    def row(label: str, gen_val: str, ref_val: str) -> tuple[str, ...]:
+        return (label, gen_val, ref_val) if has_ref else (label, gen_val)
+
     rows = [
-        ("BPM", fmt(gen, lambda s: f"{s.bpm:.1f}"), fmt(ref, lambda s: f"{s.bpm:.1f}")),
-        ("Objects", fmt(gen, lambda s: str(s.n_objects)), fmt(ref, lambda s: str(s.n_objects))),
-        ("Circles", fmt(gen, lambda s: str(s.n_circles)), fmt(ref, lambda s: str(s.n_circles))),
-        ("Sliders", fmt(gen, lambda s: str(s.n_sliders)), fmt(ref, lambda s: str(s.n_sliders))),
-        ("Stacked pairs (<3px)", fmt(gen, lambda s: f"{100*s.stack_fraction:.1f}%"),
-         fmt(ref, lambda s: f"{100*s.stack_fraction:.1f}%")),
+        row("BPM", fmt(gen, lambda s: f"{s.bpm:.1f}"), fmt(ref, lambda s: f"{s.bpm:.1f}")),
+        row("Objects", fmt(gen, lambda s: str(s.n_objects)), fmt(ref, lambda s: str(s.n_objects))),
+        row("Circles", fmt(gen, lambda s: str(s.n_circles)), fmt(ref, lambda s: str(s.n_circles))),
+        row("Sliders", fmt(gen, lambda s: str(s.n_sliders)), fmt(ref, lambda s: str(s.n_sliders))),
+        row("Stacked pairs (<3px)", fmt(gen, lambda s: f"{100*s.stack_fraction:.1f}%"),
+            fmt(ref, lambda s: f"{100*s.stack_fraction:.1f}%")),
     ]
     total_gen = gen.single_anchor_straight + gen.single_anchor_curved
     if total_gen:
-        rows.append(("Straight sliders", f"{100*gen.single_anchor_straight/total_gen:.0f}%",
-                      (f"{100*ref.single_anchor_straight/(ref.single_anchor_straight + ref.single_anchor_curved):.0f}%"
-                       if ref is not None and (ref.single_anchor_straight + ref.single_anchor_curved) else "—")))
+        rows.append(row("Straight sliders", f"{100*gen.single_anchor_straight/total_gen:.0f}%",
+                         (f"{100*ref.single_anchor_straight/(ref.single_anchor_straight + ref.single_anchor_curved):.0f}%"
+                          if ref is not None and (ref.single_anchor_straight + ref.single_anchor_curved) else "—")))
     for field, label, unit in HIST_FIELDS:
         gd: Distribution | None = getattr(gen, field)
         rd: Distribution | None = getattr(ref, field) if ref is not None else None
-        rows.append((f"{label} (median)",
-                      f"{gd.median:.2f}{unit}" if gd else "—",
-                      f"{rd.median:.2f}{unit}" if rd else "—"))
+        rows.append(row(f"{label} (median)",
+                         f"{gd.median:.2f}{unit}" if gd else "—",
+                         f"{rd.median:.2f}{unit}" if rd else "—"))
     return rows
 
 
@@ -261,11 +278,12 @@ def _judgment_page(pdf, tier: str, findings: list[Finding], page_num: int, total
     plt.close(fig)
 
 
-def _cover_page(pdf, gen_label: str, stage_names: list[str], gen_source_paths: list[str]) -> None:
+def _cover_page(pdf, gen_label: str, stage_names: list[str], ref_label: str | None) -> None:
     """A proper title page — the same reason a real report doesn't open
     straight on page one of data: it names what the document is, what
-    it's measuring against, and when it was generated, before any chart
-    asks the reader to already know that context."""
+    it's measuring against (if anything -- `ref_label` is None for a
+    report with no comparison at all), and when it was generated, before
+    any chart asks the reader to already know that context."""
     fig = plt.figure(figsize=(8.5, 11))
     fig.patch.set_facecolor("white")
     fig.text(0.5, 0.62, "Statistics Report", fontsize=26, fontweight="bold",
@@ -274,19 +292,26 @@ def _cover_page(pdf, gen_label: str, stage_names: list[str], gen_source_paths: l
 
     fig.add_artist(plt.Line2D([0.15, 0.85], [0.52, 0.52], color=RULE, linewidth=1, transform=fig.transFigure))
 
-    fig.text(0.15, 0.47, "Compared against", fontsize=9, color=MUTED)
-    fig.text(0.15, 0.44, EXAMPLE_LABEL, fontsize=12, color=INK, fontweight="bold")
-    fig.text(0.15, 0.395, "Sections in this report", fontsize=9, color=MUTED)
+    sections_y = 0.47
+    if ref_label is not None:
+        fig.text(0.15, 0.47, "Compared against", fontsize=9, color=MUTED)
+        fig.text(0.15, 0.44, ref_label, fontsize=12, color=INK, fontweight="bold")
+        sections_y = 0.395
+    fig.text(0.15, sections_y, "Sections in this report", fontsize=9, color=MUTED)
     for i, name in enumerate(stage_names):
-        fig.text(0.17, 0.365 - i * 0.028, f"•  {name.capitalize()}", fontsize=10.5, color=INK)
+        fig.text(0.17, sections_y - 0.03 - i * 0.028, f"•  {name.capitalize()}", fontsize=10.5, color=INK)
 
     generated_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     fig.text(0.15, 0.10, f"Generated {generated_at}", fontsize=8.5, color=MUTED)
     fig.text(0.15, 0.075, "Timing distributions are compared in beats, normalized to each map's own BPM.",
              fontsize=8, color=MUTED, style="italic")
 
-    # Legend swatches, matching every histogram page exactly.
-    for i, (color, label) in enumerate(((GENERATED_COLOR, gen_label), (REFERENCE_COLOR, EXAMPLE_LABEL))):
+    # Legend swatches, matching every histogram page exactly -- just the
+    # generated map's own color if there's nothing to compare against.
+    swatches = [(GENERATED_COLOR, gen_label)]
+    if ref_label is not None:
+        swatches.append((REFERENCE_COLOR, ref_label))
+    for i, (color, label) in enumerate(swatches):
         y = 0.20 - i * 0.032
         fig.add_artist(plt.Rectangle((0.15, y), 0.02, 0.016, color=color, alpha=0.7,
                                       transform=fig.transFigure, clip_on=False))
@@ -297,7 +322,7 @@ def _cover_page(pdf, gen_label: str, stage_names: list[str], gen_source_paths: l
 
 
 def render_report(tier_stats: dict[str, tuple[BeatmapStats, BeatmapStats | None]], output_pdf: str,
-                   gen_label: str = "Generated") -> None:
+                   gen_label: str = "Generated", ref_label: str = EXAMPLE_LABEL) -> None:
     """Write a multi-page PDF: a title page, one summary table page, then
     one page of overlaid histograms per stage in `tier_stats` (stage name
     -> (generated stats, reference stats-or-None if no matching example
@@ -306,11 +331,22 @@ def render_report(tier_stats: dict[str, tuple[BeatmapStats, BeatmapStats | None]
     Base Map v2 pathway stage) — render_report itself never looks it up
     against the example set; that's build_report_for_tiers' job, for
     callers that do mean an actual difficulty tier.
+
+    `ref_label` names whatever `tier_stats`' reference stats actually are
+    (defaults to Backstabber, but a caller comparing against something
+    else -- e.g. gui_v2.py's ReportWindow -- passes that beatmap's own
+    name instead). If *no* stage has a reference at all, the whole
+    reference column/legend/swatch is left out of every page rather than
+    showing a "Backstabber" (or whatever) column full of "—"; this is
+    decided once, from whether any stage has a reference, not per stage,
+    so the column doesn't appear and disappear page to page in a mixed
+    report (see _summary_rows for why that matters there specifically).
     """
     os.makedirs(os.path.dirname(os.path.abspath(output_pdf)) or ".", exist_ok=True)
+    has_ref = any(ref is not None for _, ref in tier_stats.values())
     total_pages = 2 + 2 * len(tier_stats)  # cover + summary + (histogram + judgment) per stage
     with PdfPages(output_pdf) as pdf:
-        _cover_page(pdf, gen_label, list(tier_stats.keys()), [g.source for g, _ in tier_stats.values()])
+        _cover_page(pdf, gen_label, list(tier_stats.keys()), ref_label if has_ref else None)
 
         # --- Summary table page ---
         n_tiers = len(tier_stats)
@@ -325,18 +361,18 @@ def render_report(tier_stats: dict[str, tuple[BeatmapStats, BeatmapStats | None]
         # page, close enough on a short (single-tier) page to overlap.
         fig.suptitle("Summary", fontsize=16, fontweight="bold", color=INK,
                      y=(fig_height - 0.32) / fig_height)
-        fig.text(0.5, (fig_height - 0.62) / fig_height, f"{gen_label}  vs.  {EXAMPLE_LABEL}",
-                 fontsize=10, color=MUTED, ha="center")
+        subtitle = f"{gen_label}  vs.  {ref_label}" if has_ref else gen_label
+        fig.text(0.5, (fig_height - 0.62) / fig_height, subtitle, fontsize=10, color=MUTED, ha="center")
+        col_labels = ["Metric", gen_label, ref_label] if has_ref else ["Metric", gen_label]
         for ax, (tier, (gen, ref)) in zip(axes, tier_stats.items()):
             ax.axis("off")
             ax.set_title(tier.capitalize(), fontsize=11, fontweight="bold", color=INK, loc="left", pad=8)
-            rows = _summary_rows(gen, ref)
-            table = ax.table(cellText=[[label, g, r] for label, g, r in rows],
-                              colLabels=["Metric", gen_label, "Backstabber"],
+            rows = _summary_rows(gen, ref, has_ref)
+            table = ax.table(cellText=[list(r) for r in rows], colLabels=col_labels,
                               loc="center", cellLoc="center", bbox=(0, 0, 1, 1))
             table.auto_set_font_size(False)
             table.set_fontsize(8)
-            _style_table(table, 3)
+            _style_table(table, len(col_labels))
         fig.tight_layout(rect=(0.02, 0.04, 0.98, (fig_height - 1.0) / fig_height))
         _add_footer(fig, 2, total_pages, gen_label)
         pdf.savefig(fig)
@@ -344,16 +380,18 @@ def render_report(tier_stats: dict[str, tuple[BeatmapStats, BeatmapStats | None]
 
         # --- One histogram page, then one judgment page, per stage ---
         page_num = 3
+        rows, cols = HIST_GRID
         for tier, (gen, ref) in tier_stats.items():
-            fig, axes = plt.subplots(2, 2, figsize=(8.5, 8.3))
+            fig, axes = plt.subplots(rows, cols, figsize=(8.5, 3.0 * rows + 2.0))
             fig.suptitle(tier.capitalize(), fontsize=15, fontweight="bold", color=INK, y=0.975)
-            fig.text(0.5, 0.935, f"{gen_label}  vs.  {EXAMPLE_LABEL}  ·  normalized to BPM",
-                     fontsize=9.5, color=MUTED, ha="center")
+            subtitle = f"{gen_label}  vs.  {ref_label}  ·  normalized to BPM" if has_ref \
+                else f"{gen_label}  ·  normalized to BPM"
+            fig.text(0.5, 0.965, subtitle, fontsize=9.5, color=MUTED, ha="center")
             for ax, (field, label, unit) in zip(axes.flat, HIST_FIELDS):
                 gen_dist = getattr(gen, field)
                 ref_dist = getattr(ref, field) if ref is not None else None
-                _plot_histogram_pair(ax, gen_dist, ref_dist, gen_label, "Backstabber", label, unit)
-            fig.tight_layout(rect=(0.02, 0.04, 0.98, 0.90))
+                _plot_histogram_pair(ax, gen_dist, ref_dist, gen_label, ref_label, label, unit)
+            fig.tight_layout(rect=(0.02, 0.03, 0.98, 0.94))
             _add_footer(fig, page_num, total_pages, gen_label)
             pdf.savefig(fig)
             plt.close(fig)
@@ -431,14 +469,16 @@ def main() -> None:
     gen_stats = compute_stats(args.beatmap)
     if args.against:
         ref_stats = compute_stats(args.against)
+        ref_label = os.path.splitext(os.path.basename(args.against))[0]
     else:
         ref_path = find_reference_osu(tier)
         ref_stats = compute_stats(ref_path) if ref_path else None
+        ref_label = EXAMPLE_LABEL
         if ref_stats is None:
             print(f"Warning: no Backstabber difficulty matching {tier!r} found; "
                   f"report will show generated stats only.")
 
-    render_report({tier: (gen_stats, ref_stats)}, output_pdf, gen_label=args.label)
+    render_report({tier: (gen_stats, ref_stats)}, output_pdf, gen_label=args.label, ref_label=ref_label)
 
 
 if __name__ == "__main__":
