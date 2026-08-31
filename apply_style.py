@@ -75,6 +75,16 @@ MARGIN = 30
 MIN_SPACING = 10.0    # px, safety floor only — the distance-snap formula rarely needs it
 MAX_SPACING = 600.0   # px, generous safety ceiling (a little over the playfield diagonal)
 
+# Outside a formal stream/stack run, a plain circle overwhelmingly moves
+# away from whatever came right before it (distance-snap flow) -- but real
+# maps also occasionally drop one circle right on top of the previous
+# object (a circle or a slider's own head) as a deliberate rhythmic pause,
+# not just inside a designated stream. Kept low and only ever considered
+# for a plain circle (never a slider, whose own curve/end point already
+# has to originate from wherever it's placed) so normal flow still
+# dominates.
+STACK_ON_PREVIOUS_PROBABILITY = 0.05
+
 HALF_BEAT_STEPS_PER_MEASURE = 8  # 4/4 time, half-beat resolution
 
 # A handful of repeating turn-angle "motifs" per energy tier (degrees,
@@ -876,6 +886,15 @@ def main() -> None:
             # second stream ending later doesn't keep re-triggering it.
             cur_x, cur_y = last_stack_anchor
             last_stack_anchor = None
+        elif not obj.is_slider and rng.random() < STACK_ON_PREVIOUS_PROBABILITY:
+            # A plain circle, dropped right on top of whatever object came
+            # before it (circle or slider head alike -- cur_x, cur_y is
+            # already wherever that one ended up) instead of moving away
+            # via the usual distance-snap flow below. cur_angle is left
+            # untouched: nothing moved, so there's no new direction to flow
+            # from -- the object right after this one still turns from the
+            # same heading as if this stack never happened.
+            pass
         else:
             # Outside a stream: normal distance-snap + motif-driven flow
             # (plus the transition boost on the one gap right after a

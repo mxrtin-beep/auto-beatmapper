@@ -32,7 +32,8 @@ def _declared_audio_filename(osu_path: str) -> str | None:
         return None
 
 
-def build_osz(osu_paths: list[str], audio_path: str, osz_path: str, audio_filename: str | None = None) -> str:
+def build_osz(osu_paths: list[str], audio_path: str, osz_path: str, audio_filename: str | None = None,
+              extra_files: list[str] | None = None) -> str:
     """Zip the given .osu file(s) together with the audio file into osz_path.
 
     `audio_filename` is the name the audio is stored under inside the
@@ -43,6 +44,10 @@ def build_osz(osu_paths: list[str], audio_path: str, osz_path: str, audio_filena
     checked against every .osu's declared AudioFilename before writing, and
     a mismatch raises a clear error instead of silently producing a
     beatmap with no audio.
+
+    `extra_files` (e.g. a background image) are bundled in too, each under
+    its own basename — same as the audio, just without the AudioFilename
+    matching check, since a beatmap can validly have zero or one of these.
     """
     if not osu_paths:
         raise ValueError("Need at least one .osu file to package.")
@@ -64,6 +69,8 @@ def build_osz(osu_paths: list[str], audio_path: str, osz_path: str, audio_filena
         for path in osu_paths:
             zf.write(path, arcname=os.path.basename(path))
         zf.write(audio_path, arcname=audio_filename)
+        for path in extra_files or []:
+            zf.write(path, arcname=os.path.basename(path))
     return osz_path
 
 

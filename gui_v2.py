@@ -41,6 +41,7 @@ from __future__ import annotations
 import os
 import queue
 import random
+import shutil
 import sys
 import threading
 import tkinter as tk
@@ -50,9 +51,11 @@ from tkinter import filedialog, messagebox, ttk
 import add_sliders_v2
 import beatmap_report
 import generate_base_beatmap_v2
+from background_style import apply_background, extract_combo_colors
 from beatmap_stats import compute_stats
 from build_osz import build_osz
-from gui import BG, BG_ENTRY, FONT_MONO, PAD_INNER, PAD_OUTER, TextRedirector, _configure_style, _open_path
+from gui import BG, BG_ENTRY, FONT_MONO, PAD_INNER, PAD_OUTER, TextRedirector, _bind_click_to_position, \
+    _configure_style, _open_path
 
 # Version names for the three stages, mirroring the main pipeline's own
 # Base/Variety/Styled naming.
@@ -87,27 +90,32 @@ class SliderParam:
 
 SLIDER_PARAMS = [
     SliderParam("--intensity", "Intensity",
-                "How much of the song ends up on faster subdivisions. Min (whole-beat "
-                "dominant throughout) to max (much more of it on half/quarter-beat spacing, "
-                "including denser measure-anchored bursts). Default 0.65.",
+                "How much of the song ends up on faster subdivisions. 0 = whole-beat "
+                "dominant throughout. 1 = much more of it on half/quarter-beat spacing, "
+                "including denser measure-anchored bursts.",
                 0.0, 0.65, 1.0),
     SliderParam("--chain-probability", "Slider vs. circle mix",
                 "How often an eligible run of adjacent circles actually becomes a slider, "
-                "versus staying plain circles. Min (always circles) to max (every eligible "
-                "run becomes a slider). Default 0.3.",
+                "versus staying plain circles. 0 = always circles. 1 = every eligible "
+                "run becomes a slider.",
                 0.0, 0.3, 1.0),
     SliderParam("--slider-length-bias", "Slider length",
-                "Of whichever runs do become sliders: how long they tend to run. Min (more, "
-                "shorter/choppier sliders) to max (fewer, longer sliders). Default 0.4.",
+                "Of whichever runs do become sliders: how long they tend to run. "
+                "0 = more, shorter/choppier sliders. 1 = fewer, longer sliders.",
                 0.0, 0.4, 1.0),
     SliderParam("--curviness", "Slider curviness",
-                "How curved slider paths look, from mostly straight lines to pronounced "
-                "arcs. Min (straight) to max (very curved). Default 0.5.",
+                "How curved slider paths look. 0 = mostly straight lines. "
+                "1 = pronounced arcs.",
                 0.0, 0.5, 1.0),
     SliderParam("--spacing", "Jump distance",
                 "How far apart notes are placed for a given time gap between them. "
-                "Min (tight, close together) to max (wide, dramatic jumps). Default 1.9.",
+                "0 = tight, close together. 1 = wide, dramatic jumps.",
                 0.5, 1.9, 2.5),
+    SliderParam("--uniformity", "Pattern uniformity",
+                "How much the circle/slider layout repeats across measures with the same "
+                "note density. 0 = independent every measure. 1 = one fixed pattern "
+                "per density.",
+                0.0, 0.5, 1.0),
 ]
 
 
@@ -178,6 +186,18 @@ class App:
         self._file_row(song_panel, 3, self.outdir_var, self._browse_outdir, last=True)
         song_panel.columnconfigure(0, weight=1)
 
+        # --- Background section ---
+        background_panel = self._panel(form, "Background")
+        ttk.Label(background_panel, text="Background image", style="Heading.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=PAD_INNER, pady=(PAD_INNER, 2))
+        ttk.Label(background_panel,
+                  text="Optional. Its most common colors also become the map's combo colors. "
+                       "Leave blank for no background and the default colors.",
+                  style="Hint.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", padx=PAD_INNER)
+        self.background_var = tk.StringVar()
+        self._file_row(background_panel, 2, self.background_var, self._browse_background, last=True)
+        background_panel.columnconfigure(0, weight=1)
+
         # --- Song info section ---
         meta_panel = self._panel(form, "Song info")
         self.title_var = tk.StringVar()
@@ -229,14 +249,12 @@ class App:
         self.auto_open_var = tk.BooleanVar(value=True)
         self.keep_intermediate_var = tk.BooleanVar(value=False)
         self.report_var = tk.BooleanVar(value=False)
-        self.reuse_layout_var = tk.BooleanVar(value=True)
         options = (
             (self.osz_var, "Package as .osz (ready to import into osu!)"),
             (self.auto_open_var, "Open the finished map when done"),
             (self.keep_intermediate_var, "Keep intermediate stages too (Circles and Sliders, "
                                           "alongside the final Styled map)"),
             (self.report_var, "Generate a statistics report (PDF, plotted against Backstabber)"),
-            (self.reuse_layout_var, "Reuse a repeated section's own layout"),
         )
         # ttk::checkbutton has no -wraplength option on every platform/Tk
         # build (it raised TclError: unknown option "-wraplength" on
@@ -313,6 +331,7 @@ class App:
             row=base_row + 1, column=0, columnspan=2, sticky="w", padx=PAD_INNER)
         scale = ttk.Scale(parent, from_=0.0, to=1.0, orient="horizontal", variable=var, command=on_change)
         scale.grid(row=base_row + 2, column=0, columnspan=2, sticky="ew", padx=PAD_INNER, pady=(6, 4))
+        _bind_click_to_position(scale, var, 0.0, 1.0, on_change)
 
     # --- File pickers ---
 
@@ -326,6 +345,13 @@ class App:
         path = filedialog.askdirectory(title="Choose an output folder")
         if path:
             self.outdir_var.set(path)
+
+    def _browse_background(self) -> None:
+        path = filedialog.askopenfilename(title="Choose a background image",
+                                           filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp"),
+                                                      ("All files", "*.*")])
+        if path:
+            self.background_var.set(path)
 
     # --- Log ---
 
@@ -384,6 +410,20 @@ class App:
             keep_intermediate = self.keep_intermediate_var.get()
             seed = random.SystemRandom().randrange(2**32)
 
+            # Copied into outdir (like a difficulty file, not a cleaned-up
+            # intermediate) so it's right there for a loose-file user, not
+            # just inside a .osz -- same reasoning as the audio itself.
+            background_path = None
+            background_colours = None
+            background = self.background_var.get().strip()
+            if background:
+                if not os.path.isfile(background):
+                    raise RuntimeError(f"Background image not found: {background}")
+                background_path = os.path.join(outdir, os.path.basename(background))
+                if os.path.abspath(background_path) != os.path.abspath(background):
+                    shutil.copyfile(background, background_path)
+                background_colours = extract_combo_colors(background_path)
+
             circles_path = os.path.join(outdir, f"{title} [{CIRCLES_VERSION}].osu")
             sliders_path = os.path.join(outdir, f"{title} [{SLIDERS_VERSION}].osu")
             styled_path = os.path.join(outdir, f"{title} [{STYLED_VERSION}].osu")
@@ -416,8 +456,8 @@ class App:
                              "--slider-length-bias", f"{self._actual('--slider-length-bias'):.3f}",
                              "--curviness", f"{self._actual('--curviness'):.3f}",
                              "--spacing", f"{self._actual('--spacing'):.3f}",
-                             "--seed", str(seed),
-                             "--reuse-layout" if self.reuse_layout_var.get() else "--no-reuse-layout"]
+                             "--uniformity", f"{self._actual('--uniformity'):.3f}",
+                             "--seed", str(seed)]
             # The merged-but-unstyled "Sliders" stage is only ever worth
             # writing out when the user actually wants to inspect it --
             # otherwise it's exactly what add_sliders_v2.py already treats
@@ -461,9 +501,15 @@ class App:
             if not keep_intermediate:
                 os.remove(circles_path)
 
+            if background_path is not None:
+                background_filename = os.path.basename(background_path)
+                for path in all_paths:
+                    apply_background(path, background_filename, background_colours)
+
             if self.osz_var.get():
                 osz_path = os.path.join(outdir, f"{title} (Base v2).osz")
-                build_osz(all_paths, audio, osz_path)
+                build_osz(all_paths, audio, osz_path,
+                          extra_files=[background_path] if background_path else None)
                 self.log_queue.put(f"Packaged {osz_path}\n")
                 for path in all_paths:
                     os.remove(path)
