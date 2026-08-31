@@ -52,7 +52,8 @@ import add_sliders_v2
 import beatmap_report
 import generate_base_beatmap_v2
 from background_style import apply_background, extract_combo_colors
-from beatmap_stats import compute_stats
+from beatmap_stats import BeatmapStats, compute_stats
+from beatmap_utils import extract_osz, guess_tier
 from build_osz import build_osz
 from gui import BG, BG_ENTRY, FONT_MONO, PAD_INNER, PAD_OUTER, TextRedirector, _bind_click_to_position, \
     _configure_style, _open_path
@@ -243,6 +244,31 @@ class App:
                 row=1, column=i, sticky="w", padx=(PAD_INNER if i == 0 else 8, 8), pady=(0, PAD_INNER))
         diff_panel.columnconfigure(3, weight=1)
 
+        # --- Compare against section ---
+        # Only meaningful when the statistics report (below, in Options) is
+        # actually generated, but kept as its own panel rather than nested
+        # under that checkbox -- the report itself works fine with no
+        # comparison at all, so this is presented as "if you do generate a
+        # report, here's what to plot it against", not a requirement.
+        compare_panel = self._panel(form, "Compare statistics report against")
+        ttk.Label(compare_panel,
+                  text="The statistics report can plot your map's distributions next to a "
+                       "reference beatmap. Pick a specific song below to compare against that "
+                       "instead of (or leave blank and just use) Backstabber -- or leave both "
+                       "off to generate the report with no comparison at all.",
+                  style="Hint.TLabel").grid(row=0, column=0, columnspan=2, sticky="w",
+                                             padx=PAD_INNER, pady=(PAD_INNER, 6))
+        self.compare_backstabber_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(compare_panel, text="Compare against Backstabber (bundled example)",
+                         variable=self.compare_backstabber_var).grid(
+            row=1, column=0, columnspan=2, sticky="w", padx=PAD_INNER, pady=(0, 8))
+        ttk.Label(compare_panel, text="Or compare against a specific .osu/.osz",
+                  style="Heading.TLabel").grid(row=2, column=0, columnspan=2, sticky="w",
+                                                 padx=PAD_INNER, pady=(0, 2))
+        self.compare_song_var = tk.StringVar()
+        self._file_row(compare_panel, 3, self.compare_song_var, self._browse_compare_song, last=True)
+        compare_panel.columnconfigure(0, weight=1)
+
         # --- Options ---
         opt_panel = self._panel(form, "Options")
         self.osz_var = tk.BooleanVar(value=True)
@@ -254,7 +280,7 @@ class App:
             (self.auto_open_var, "Open the finished map when done"),
             (self.keep_intermediate_var, "Keep intermediate stages too (Circles and Sliders, "
                                           "alongside the final Styled map)"),
-            (self.report_var, "Generate a statistics report (PDF, plotted against Backstabber)"),
+            (self.report_var, "Generate a statistics report (PDF)"),
         )
         # ttk::checkbutton has no -wraplength option on every platform/Tk
         # build (it raised TclError: unknown option "-wraplength" on
@@ -353,6 +379,12 @@ class App:
         if path:
             self.background_var.set(path)
 
+    def _browse_compare_song(self) -> None:
+        path = filedialog.askopenfilename(title="Choose a beatmap to compare against",
+                                           filetypes=[("osu! beatmaps", "*.osu *.osz"), ("All files", "*.*")])
+        if path:
+            self.compare_song_var.set(path)
+
     # --- Log ---
 
     def _append_log(self, text: str) -> None:
@@ -395,6 +427,29 @@ class App:
         """The real value forwarded to the pipeline for `flag`'s dial,
         mapped from its current 0-1 display position — see SliderParam.to_actual."""
         return self._slider_params_by_flag[flag].to_actual(self.slider_vars[flag].get())
+
+    def _compare_stats(self, tier: str) -> BeatmapStats | None:
+        """Which reference stats (if any) to plot the report against, in
+        priority order: an explicitly chosen song beats the Backstabber
+        checkbox, and neither being set just means no comparison -- the
+        report still generates fine with only the generated map's own
+        stats (render_report treats a None ref as "no data" per field)."""
+        custom = self.compare_song_var.get().strip()
+        if custom:
+            if not os.path.isfile(custom):
+                raise RuntimeError(f"Compare-against file not found: {custom}")
+            if custom.lower().endswith(".osz"):
+                osu_paths = extract_osz(custom)
+                match = next((p for p in osu_paths if guess_tier(p) == tier), None)
+                match = match or (osu_paths[0] if osu_paths else None)
+                if match is None:
+                    raise RuntimeError(f"No .osu difficulty found inside {custom}")
+                return compute_stats(match)
+            return compute_stats(custom)
+        if self.compare_backstabber_var.get():
+            ref_path = beatmap_report.find_reference_osu(tier)
+            return compute_stats(ref_path) if ref_path else None
+        return None
 
     def _run(self, audio: str) -> None:
         old_stdout, old_stderr, old_argv = sys.stdout, sys.stderr, sys.argv
@@ -475,14 +530,15 @@ class App:
             add_sliders_v2.main()
 
             if self.report_var.get():
-                # Compared against Backstabber's Insane -- the closest
-                # thing to a formal "tier" this pathway has right now,
-                # since it doesn't yet derive a difficulty spread of its
-                # own (see gui_v2.py's own module docstring).
+                # "insane" is the closest thing to a formal tier this
+                # pathway has for its one styled map right now, since it
+                # doesn't yet derive a difficulty spread of its own (see
+                # gui_v2.py's own module docstring) -- used both to pick
+                # the matching Backstabber difficulty and, for a .osz
+                # compare-against, to pick the matching difficulty inside it.
                 try:
                     gen_stats = compute_stats(styled_path)
-                    ref_path = beatmap_report.find_reference_osu("insane")
-                    ref_stats = compute_stats(ref_path) if ref_path else None
+                    ref_stats = self._compare_stats("insane")
                     report_path = os.path.join(outdir, f"{title} (Base v2 Statistics Report).pdf")
                     beatmap_report.render_report({"styled": (gen_stats, ref_stats)},
                                                   report_path, gen_label=title)
