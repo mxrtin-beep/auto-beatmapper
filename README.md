@@ -71,9 +71,22 @@ Checking the statistics-report option produces a PDF comparing the
 generated difficulties (or a hand-mapped beatmap you point it at) side
 by side — distributions, not just single numbers, for things like the
 delay between objects, on-screen jump spacing, slider length/duration,
-turn angles, and the straight/curved/chain slider mix. It's a quick way
-to sanity-check that a map "feels" like a real one, rather than eyeballing
-it in the editor.
+turn angles, and the straight/curved/chain slider mix. It also includes
+a judgment page per difficulty, checking the map against osu!'s ranking
+criteria (AR/OD/HP/CS ranges, off-screen objects, illegal overlaps,
+slider velocity, stream length, and more) with a pass/warn/fail verdict
+for each. It's a quick way to sanity-check that a map "feels" like a
+real one and is close to rankable, rather than eyeballing it in the
+editor.
+
+You can also run it directly on an existing `.osu` or `.osz`:
+
+```bash
+python3 beatmap_report.py "MyMapset.osz"
+```
+
+which writes `output/MyMapset/report.pdf` by default (pass `--output`
+to write somewhere else).
 
 ## The seed
 

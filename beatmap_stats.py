@@ -99,6 +99,8 @@ class BeatmapStats:
     slider_length_px: Distribution | None
     slider_beats: Distribution | None
     turn_angle_deg: Distribution | None
+    combo_length: Distribution | None  # objects per combo (run between new-combo flags)
+    spacing_per_beat: Distribution | None  # spacing_px / delay_beats -- the map's actual distance-snap
 
     def format(self) -> str:
         lines = [f"=== {self.source} ===",
@@ -123,6 +125,8 @@ class BeatmapStats:
             ("Slider length", self.slider_length_px, "px"),
             ("Slider duration", self.slider_beats, " beats"),
             ("Turn angle (direction change at each object)", self.turn_angle_deg, "°"),
+            ("Combo length (objects per combo)", self.combo_length, " objects"),
+            ("Spacing per beat (distance-snap)", self.spacing_per_beat, "px/beat"),
         ):
             if dist is not None:
                 lines.append(f"{label}:")
@@ -162,6 +166,30 @@ def compute_stats(osu_path: str) -> BeatmapStats:
     spacings = [math.hypot(b.x - a.x, b.y - a.y) for a, b in zip(objects, objects[1:])]
     stack_fraction = (sum(1 for d in spacings if d < 3.0) / len(spacings)) if spacings else 0.0
 
+    # Spacing per beat -- the map's *actual* distance-snap, i.e. how many
+    # px it moves per beat of gap, for pairs with a real time gap between
+    # them. Comparable against SliderMultiplier*100 (the px-per-beat a
+    # distance snap of 1.0x would produce) to judge time-distance equality.
+    # Computed in the same pass as `spacings`/`delays`, not by zipping
+    # those two lists together afterward -- `delays` already drops
+    # zero-gap (stacked) pairs that `spacings` keeps, so zipping them
+    # would silently pair each spacing with the wrong pair's delay.
+    spacing_per_beat = [
+        math.hypot(b.x - a.x, b.y - a.y) / ((b.time - a.time) / beat_length_ms)
+        for a, b in zip(objects, objects[1:]) if b.time > a.time
+    ]
+
+    combo_lengths: list[float] = []
+    if objects:
+        run = 1
+        for prev, cur in zip(objects, objects[1:]):
+            if cur.is_new_combo:
+                combo_lengths.append(run)
+                run = 1
+            else:
+                run += 1
+        combo_lengths.append(run)
+
     turn_angles: list[float] = []
     for a, b, c in zip(objects, objects[1:], objects[2:]):
         v1x, v1y = b.x - a.x, b.y - a.y
@@ -187,6 +215,8 @@ def compute_stats(osu_path: str) -> BeatmapStats:
         slider_length_px=Distribution.from_values(slider_lengths),
         slider_beats=Distribution.from_values(slider_beats),
         turn_angle_deg=Distribution.from_values(turn_angles),
+        combo_length=Distribution.from_values(combo_lengths),
+        spacing_per_beat=Distribution.from_values(spacing_per_beat),
     )
 
 

@@ -52,7 +52,8 @@ import add_sliders_v2
 import beatmap_report
 import generate_base_beatmap_v2
 from background_style import apply_background, extract_combo_colors
-from beatmap_stats import compute_stats
+from beatmap_stats import BeatmapStats, compute_stats
+from beatmap_utils import extract_osz, guess_tier
 from build_osz import build_osz
 from gui import BG, BG_ENTRY, FONT_MONO, PAD_INNER, PAD_OUTER, TextRedirector, _bind_click_to_position, \
     _configure_style, _open_path
@@ -272,8 +273,17 @@ class App:
         # --- Generate button + log ---
         bottom = ttk.Frame(root)
         bottom.pack(fill="both", padx=PAD_OUTER, pady=(6, PAD_OUTER))
-        self.generate_button = ttk.Button(bottom, text="Generate", command=self._on_generate)
-        self.generate_button.pack(fill="x", pady=(0, 8))
+
+        button_row = ttk.Frame(bottom, style="Panel.TFrame")
+        button_row.pack(fill="x", pady=(0, 8))
+        button_row.columnconfigure(0, weight=1)
+        self.generate_button = ttk.Button(button_row, text="Generate", command=self._on_generate)
+        self.generate_button.grid(row=0, column=0, sticky="ew")
+        # Separate tool, not a Generate option -- runs the statistics
+        # report against whatever beatmap you point it at, independent of
+        # (and without re-running) this window's own generation pipeline.
+        ttk.Button(button_row, text="Statistics Report...", style="Secondary.TButton",
+                   command=self._open_report_window).grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
         log_frame = ttk.Frame(bottom, style="Panel.TFrame")
         log_frame.pack(fill="both", expand=True)
@@ -352,6 +362,9 @@ class App:
                                                       ("All files", "*.*")])
         if path:
             self.background_var.set(path)
+
+    def _open_report_window(self) -> None:
+        ReportWindow(self.root)
 
     # --- Log ---
 
@@ -478,7 +491,9 @@ class App:
                 # Compared against Backstabber's Insane -- the closest
                 # thing to a formal "tier" this pathway has right now,
                 # since it doesn't yet derive a difficulty spread of its
-                # own (see gui_v2.py's own module docstring).
+                # own (see gui_v2.py's own module docstring). For a report
+                # against something else, use the separate "Statistics
+                # Report..." tool instead (ReportWindow, below).
                 try:
                     gen_stats = compute_stats(styled_path)
                     ref_path = beatmap_report.find_reference_osu("insane")
@@ -531,6 +546,250 @@ class App:
         self.generate_button.configure(state="normal", text="Generate")
         if self.result_error is not None:
             messagebox.showerror("Generation failed", str(self.result_error))
+            return
+        if self.auto_open_var.get() and self.result_path:
+            _open_path(self.result_path)
+
+
+class ReportWindow:
+    """Standalone "Statistics Report..." tool window: generate a report PDF
+    for any beatmap you point it at, compared against Backstabber, an
+    explicit reference beatmap, or nothing at all -- entirely independent
+    of App's own Generate pipeline (no beatmap has to have just been
+    generated, and generating one doesn't touch this window's state)."""
+
+    def __init__(self, master: tk.Tk) -> None:
+        self.win = tk.Toplevel(master)
+        self.win.title("Auto Beatmapper — Statistics Report")
+        # A plain Toplevel starts on Tk's own default (light) background --
+        # _configure_style() only ever themed `master`'s own root window,
+        # so without this the window's raw background shows through as a
+        # pale border around every dark ttk panel, instead of matching the
+        # rest of the app.
+        self.win.configure(bg=BG)
+        self.win.geometry("620x760")
+        self.win.minsize(520, 520)
+        self.win.transient(master)
+
+        self.log_queue: "queue.Queue[str]" = queue.Queue()
+        self.worker: threading.Thread | None = None
+        self.result_error: Exception | None = None
+        self.result_path: str | None = None
+
+        outer = ttk.Frame(self.win)
+        outer.pack(fill="both", expand=True, padx=PAD_OUTER, pady=PAD_OUTER)
+
+        # --- Beatmap section ---
+        song_panel = self._panel(outer, "Beatmap to report on")
+        ttk.Label(song_panel, text="Beatmap file (.osu or .osz)", style="Heading.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=PAD_INNER, pady=(PAD_INNER, 2))
+        ttk.Label(song_panel,
+                  text="A .osz reports on every difficulty inside it whose name is a recognized "
+                       "tier (Easy/Normal/Hard/Insane/Expert).", style="Hint.TLabel").grid(
+            row=1, column=0, columnspan=2, sticky="w", padx=PAD_INNER)
+        self.song_var = tk.StringVar()
+        self._file_row(song_panel, 2, self.song_var, self._browse_song, last=True)
+        song_panel.columnconfigure(0, weight=1)
+
+        # --- Compare against section ---
+        compare_panel = self._panel(outer, "Compare against")
+        ttk.Label(compare_panel,
+                  text="Optional. Pick a specific beatmap to compare against, check Backstabber, "
+                       "or leave both off to generate the report with no comparison at all.",
+                  style="Hint.TLabel").grid(row=0, column=0, columnspan=2, sticky="w",
+                                             padx=PAD_INNER, pady=(PAD_INNER, 6))
+        self.compare_backstabber_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(compare_panel, text="Compare against Backstabber (bundled example)",
+                         variable=self.compare_backstabber_var).grid(
+            row=1, column=0, columnspan=2, sticky="w", padx=PAD_INNER, pady=(0, 8))
+        ttk.Label(compare_panel, text="Or compare against a specific .osu/.osz",
+                  style="Heading.TLabel").grid(row=2, column=0, columnspan=2, sticky="w",
+                                                 padx=PAD_INNER, pady=(0, 2))
+        self.compare_song_var = tk.StringVar()
+        self._file_row(compare_panel, 3, self.compare_song_var, self._browse_compare_song, last=True)
+        compare_panel.columnconfigure(0, weight=1)
+
+        # --- Output ---
+        out_panel = self._panel(outer, "Output")
+        ttk.Label(out_panel, text="Output PDF (optional)", style="Heading.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=PAD_INNER, pady=(PAD_INNER, 2))
+        ttk.Label(out_panel, text="Leave blank to write to output/<beatmap name>/report.pdf.",
+                  style="Hint.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", padx=PAD_INNER)
+        self.output_var = tk.StringVar()
+        self._file_row(out_panel, 2, self.output_var, self._browse_output, last=False)
+        self.auto_open_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(out_panel, text="Open the report when done", variable=self.auto_open_var).grid(
+            row=3, column=0, columnspan=2, sticky="w", padx=PAD_INNER, pady=(4, PAD_INNER))
+        out_panel.columnconfigure(0, weight=1)
+
+        # --- Generate button + log ---
+        self.generate_button = ttk.Button(outer, text="Generate Report", command=self._on_generate)
+        self.generate_button.pack(fill="x", pady=(0, 8))
+
+        log_frame = ttk.Frame(outer, style="Panel.TFrame")
+        log_frame.pack(fill="both", expand=True)
+        self.log_text = tk.Text(log_frame, height=8, state="disabled", wrap="word",
+                                 background=BG_ENTRY, foreground="#e6e6ec", insertbackground="#e6e6ec",
+                                 font=FONT_MONO, relief="flat", padx=10, pady=10)
+        self.log_text.pack(fill="both", expand=True)
+
+        self.win.after(100, self._drain_log_queue)
+
+    # --- Layout helpers (same patterns as App) ---
+
+    def _panel(self, parent: tk.Widget, title: str) -> ttk.Labelframe:
+        # Unlike App's own _panel, this window has no scrollable canvas
+        # behind it -- expand=True here would let these fixed-size panels
+        # eat all the Toplevel's height, pushing the Generate button and
+        # log below the visible window instead of just taking their
+        # natural height and leaving the rest to the log frame below.
+        panel = ttk.Labelframe(parent, text=title)
+        panel.pack(fill="x", pady=(0, PAD_OUTER))
+        return panel
+
+    def _file_row(self, parent: tk.Widget, row: int, var: tk.StringVar, browse_cmd, last: bool = False) -> None:
+        row_frame = ttk.Frame(parent, style="Panel.TFrame")
+        row_frame.grid(row=row, column=0, columnspan=2, sticky="ew",
+                        padx=PAD_INNER, pady=(4, PAD_INNER if last else 4))
+        row_frame.columnconfigure(0, weight=1)
+        ttk.Entry(row_frame, textvariable=var).grid(row=0, column=0, sticky="ew")
+        ttk.Button(row_frame, text="Browse...", style="Secondary.TButton",
+                   command=browse_cmd).grid(row=0, column=1, padx=(8, 0))
+
+    # --- File pickers ---
+
+    def _browse_song(self) -> None:
+        path = filedialog.askopenfilename(title="Choose a beatmap to report on",
+                                           filetypes=[("osu! beatmaps", "*.osu *.osz"), ("All files", "*.*")])
+        if path:
+            self.song_var.set(path)
+
+    def _browse_compare_song(self) -> None:
+        path = filedialog.askopenfilename(title="Choose a beatmap to compare against",
+                                           filetypes=[("osu! beatmaps", "*.osu *.osz"), ("All files", "*.*")])
+        if path:
+            self.compare_song_var.set(path)
+
+    def _browse_output(self) -> None:
+        path = filedialog.asksaveasfilename(title="Save report as", defaultextension=".pdf",
+                                             filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")])
+        if path:
+            self.output_var.set(path)
+
+    # --- Log ---
+
+    def _append_log(self, text: str) -> None:
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", text)
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+    def _drain_log_queue(self) -> None:
+        try:
+            while True:
+                self._append_log(self.log_queue.get_nowait())
+        except queue.Empty:
+            pass
+        self.win.after(100, self._drain_log_queue)
+
+    # --- Generation ---
+
+    def _on_generate(self) -> None:
+        if self.worker is not None and self.worker.is_alive():
+            return
+        song = self.song_var.get().strip()
+        if not song:
+            messagebox.showerror("Missing beatmap", "Choose a .osu or .osz file first.")
+            return
+        if not os.path.isfile(song):
+            messagebox.showerror("File not found", f"Can't find:\n{song}")
+            return
+
+        self.log_text.configure(state="normal")
+        self.log_text.delete("1.0", "end")
+        self.log_text.configure(state="disabled")
+        self.generate_button.configure(state="disabled", text="Generating...")
+
+        self.worker = threading.Thread(target=self._run, args=(song,), daemon=True)
+        self.worker.start()
+        self.win.after(200, self._poll_worker)
+
+    def _resolve_compare_stats(self, tier: str) -> BeatmapStats | None:
+        """Which reference stats (if any) to plot the report against, in
+        priority order: an explicitly chosen song beats the Backstabber
+        checkbox, and neither being set just means no comparison -- the
+        report still generates fine with only the reported-on map's own
+        stats (render_report treats a None ref as "no data" per field)."""
+        custom = self.compare_song_var.get().strip()
+        if custom:
+            if not os.path.isfile(custom):
+                raise RuntimeError(f"Compare-against file not found: {custom}")
+            if custom.lower().endswith(".osz"):
+                osu_paths = extract_osz(custom)
+                match = next((p for p in osu_paths if guess_tier(p) == tier), None)
+                match = match or (osu_paths[0] if osu_paths else None)
+                if match is None:
+                    raise RuntimeError(f"No .osu difficulty found inside {custom}")
+                return compute_stats(match)
+            return compute_stats(custom)
+        if self.compare_backstabber_var.get():
+            ref_path = beatmap_report.find_reference_osu(tier)
+            return compute_stats(ref_path) if ref_path else None
+        return None
+
+    def _run(self, song: str) -> None:
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        redirector = TextRedirector(self.log_queue)
+        sys.stdout = redirector
+        sys.stderr = redirector
+        self.result_error = None
+        self.result_path = None
+        try:
+            output_pdf = self.output_var.get().strip() or beatmap_report.default_report_path(song)
+            label = os.path.splitext(os.path.basename(song))[0]
+            # Names whatever _resolve_compare_stats actually compares
+            # against, for the summary-table column header and cover page
+            # -- only shown at all if some stage ends up with a reference
+            # (render_report itself decides that, from tier_stats).
+            custom = self.compare_song_var.get().strip()
+            ref_label = os.path.splitext(os.path.basename(custom))[0] if custom else "Backstabber"
+
+            if song.lower().endswith(".osz"):
+                osu_paths = extract_osz(song)
+                tier_paths: dict[str, str] = {}
+                for path in osu_paths:
+                    tier = guess_tier(path)
+                    if tier is not None and tier not in tier_paths:  # first match wins over a guest diff
+                        tier_paths[tier] = path
+                if not tier_paths:
+                    raise RuntimeError(f"No recognizable difficulty names (Easy/Normal/Hard/Insane/Expert) "
+                                        f"found inside {song}.")
+                # Built directly (rather than via beatmap_report.build_report_for_tiers, which always
+                # compares against Backstabber) so each tier gets this window's own comparison choice.
+                tier_stats = {tier: (compute_stats(path), self._resolve_compare_stats(tier))
+                               for tier, path in tier_paths.items()}
+                beatmap_report.render_report(tier_stats, output_pdf, gen_label=label, ref_label=ref_label)
+            else:
+                tier = guess_tier(song) or "insane"
+                gen_stats = compute_stats(song)
+                ref_stats = self._resolve_compare_stats(tier)
+                beatmap_report.render_report({tier: (gen_stats, ref_stats)}, output_pdf,
+                                              gen_label=label, ref_label=ref_label)
+
+            self.log_queue.put(f"Wrote statistics report: {output_pdf}\n")
+            self.result_path = output_pdf
+        except Exception as e:  # noqa: BLE001 - surfaced to the user as-is
+            self.result_error = e
+        finally:
+            sys.stdout, sys.stderr = old_stdout, old_stderr
+
+    def _poll_worker(self) -> None:
+        if self.worker is not None and self.worker.is_alive():
+            self.win.after(200, self._poll_worker)
+            return
+        self.generate_button.configure(state="normal", text="Generate Report")
+        if self.result_error is not None:
+            messagebox.showerror("Report failed", str(self.result_error))
             return
         if self.auto_open_var.get() and self.result_path:
             _open_path(self.result_path)
