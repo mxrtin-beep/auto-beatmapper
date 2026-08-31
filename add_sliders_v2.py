@@ -406,7 +406,8 @@ def build_tier(tier: str, objects: list[HitObject], bm, args, rng: random.Random
                     # 1.0 default, always stack on the exact same spot).
                     # Scaled down for a thinned tier -- see TIER_STREAM_
                     # FREQUENCY's own comment.
-                    "--stream-frequency", str(TIER_STREAM_FREQUENCY[tier])]
+                    "--stream-frequency", str(TIER_STREAM_FREQUENCY[tier]),
+                    "--uniformity", str(args.uniformity)]
         apply_style.main()
     finally:
         sys.argv = old_argv
@@ -477,13 +478,22 @@ def main() -> None:
                               "rolled independently, with no attempt to reuse an earlier repeated "
                               "measure's own layout.")
     parser.add_argument("--uniformity", type=float, default=0.0,
-                         help="How strongly a returning section (a verse's second repeat, a chorus that "
-                              "comes back later) reuses its earlier circle/chain/bounce layout and "
-                              "hitsounds, beyond just an *exact* repeat -- 0-1, default 0 (a no-op: "
-                              "--reuse-layout, when on, still only matches exact repeats, unchanged). "
-                              "Above 0, sections that only sound similar (not identical) increasingly "
-                              "get treated as repeats too. Ignored for the layout decision specifically "
-                              "when --no-reuse-layout is passed; hitsounds still pick it up either way.")
+                         help="Make a repeated part of the song actually play like a repeat, "
+                              "instead of every pass through it being freshly, independently "
+                              "rolled: whenever a measure sounds like an earlier one (a verse's "
+                              "second pass, a chorus that returns after a bridge), reuse that "
+                              "earlier measure's circle/chain/bounce layout and hitsounds at the "
+                              "same position, beyond just an *exact* repeat (what --reuse-layout, "
+                              "on its own, already matches). 0-1, default 0 (a no-op on top of "
+                              "--reuse-layout's own default behavior). Raising it also starts "
+                              "recognizing sections that only sound similar, not identical, as "
+                              "repeats -- not a hard guarantee at every value below 1, more a "
+                              "strong tendency toward matching. Also thin apply_style.py's own "
+                              "--uniformity into the styling pass that follows (turn-angle motif, "
+                              "slider curviness, stream/stack layout) -- see that script's help "
+                              "text for what that half changes. Ignored for the circle/chain/bounce "
+                              "layout decision specifically when --no-reuse-layout is passed; "
+                              "hitsounds still pick it up either way.")
     parser.add_argument("--seed", type=int, default=None,
                          help="Random seed. Omit for a different result every run; pass a fixed value "
                               "(printed on every run) to reproduce it later.")

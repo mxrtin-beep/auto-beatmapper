@@ -109,12 +109,19 @@ SLIDER_PARAMS = [
                 "Min (tight, close together) to max (wide, dramatic jumps). Default 1.9.",
                 0.5, 1.9, 2.5),
     SliderParam("--uniformity", "Pattern uniformity",
-                "How strongly a returning section (a verse's second repeat, a chorus that "
-                "comes back later) reuses its earlier circle/chain/bounce layout and "
-                "hitsounds, beyond what 'Reuse a repeated section's own layout' below already "
-                "does for an *exact* repeat. Min (off: only exact repeats match, today's "
-                "default) to max (even a loose resemblance between two sections is enough to "
-                "make them share a pattern). Default 0.",
+                "Makes a repeated part of the song actually play like a repeat, instead of "
+                "every pass through it being freshly, independently rolled. Whenever a measure "
+                "sounds like an earlier one — a verse's second pass, a chorus that returns "
+                "after a bridge — its circle/chain/bounce layout, hitsounds, turn-angle motif, "
+                "and slider curviness are reused from that earlier measure, beyond what 'Reuse "
+                "a repeated section's own layout' below already does for an *exact* repeat. "
+                "Min (off: matching only on an exact repeat, today's default) to max (even a "
+                "loose resemblance between two sections is enough to make them play the same "
+                "way). Not a hard guarantee below max — more a strong tendency, so a repeat "
+                "reads as a clear family resemblance rather than a rigid, robotic loop. "
+                "On-screen position still isn't identical (the cursor path keeps flowing from "
+                "wherever the previous section left it), but the shape, rhythm, and hitsounds "
+                "are. Default 0.",
                 0.0, 0.0, 1.0),
 ]
 

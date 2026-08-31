@@ -471,15 +471,21 @@ def main() -> None:
                          help="Random seed. Omit for a different map every run; pass a fixed "
                               "value (printed on every run) to reproduce the exact same map later.")
     parser.add_argument("--uniformity", type=float, default=0.0,
-                         help="How strongly a returning section (a verse's second repeat, a "
-                              "chorus that comes back later) reuses its earlier slider-vs-circle "
-                              "choices and hitsounds instead of deciding independently, 0-1 "
-                              "(default 0 -- a no-op, today's fully independent behavior plus "
-                              "hitsound reuse on only *exact* repeats, unchanged). Above 0, "
-                              "sections that only sound similar (not identical) increasingly "
-                              "reuse an earlier section's choices too, at the same position in "
-                              "the pattern -- not a guarantee, more a family resemblance the "
-                              "closer this gets to 1, where even a loose resemblance is enough.")
+                         help="Make repeated parts of the song play like repeats, instead of "
+                              "every part being freshly, independently improvised: whenever a "
+                              "measure sounds like an earlier one (a verse's second pass, a "
+                              "chorus that returns after a bridge), reuse that earlier measure's "
+                              "slider-vs-circle layout, its rests, and its hitsounds at the same "
+                              "position -- rather than rolling fresh, unrelated choices for "
+                              "something the player will recognize by ear as the same bit of "
+                              "music. 0-1, default 0 (today's behavior: matching happens only for "
+                              "hitsounds, and only on an *exact* repeat). Raising it also starts "
+                              "recognizing sections that only sound similar, not identical, as "
+                              "repeats -- not a hard guarantee at every value below 1, more a "
+                              "strong tendency, so it reads as a family resemblance rather than a "
+                              "rigid, robotic loop. Also forwarded to apply_style.py's own "
+                              "--uniformity (by main.py) for the styling/positioning half of the "
+                              "same idea -- see its help text for what that changes.")
     args = parser.parse_args()
     args.uniformity = max(0.0, min(1.0, args.uniformity))
     args.stream_frequency = max(0.0, min(1.0, args.stream_frequency))
@@ -573,8 +579,17 @@ def main() -> None:
 
         # A short, occasional rest: drop this beat entirely so busy sections
         # get a breath instead of being wall-to-wall notes. Never applied to
-        # quiet sections, which are already thinned out above.
-        if rng.random() < args.rest_probability:
+        # quiet sections, which are already thinned out above. Blended the
+        # same way as the chain/treatment decisions below it -- otherwise
+        # this roll alone (drawn from the same shared, position-independent
+        # `rng` stream every other call site still uses) can silently drop
+        # a different circle in one occurrence of an otherwise identical
+        # repeated measure than another, shifting which index every later,
+        # properly pattern-aware decision in that measure sees and
+        # defeating the replay even at uniformity 1.
+        if blended_choice(args.seed, "rest", canonical_measure_for(cur.time), slot_for(cur.time), args.uniformity,
+                           group_fn=lambda r: r.random() < args.rest_probability,
+                           indep_fn=lambda: rng.random() < args.rest_probability):
             i += 1
             continue
 
@@ -633,7 +648,10 @@ def main() -> None:
         pos = i
         last_treatment = None
         while pos <= run_end:
-            if rng.random() < args.rest_probability:
+            pos_time = circles[pos].time
+            if blended_choice(args.seed, "rest", canonical_measure_for(pos_time), slot_for(pos_time), args.uniformity,
+                               group_fn=lambda r: r.random() < args.rest_probability,
+                               indep_fn=lambda: rng.random() < args.rest_probability):
                 pos += 1
                 continue
 
@@ -730,7 +748,10 @@ def main() -> None:
             chunk_avg_energy = float(np.mean(slot_energy[pos:chunk_end + 1]))
             subdivision = eighth_beat_ms if chunk_avg_energy > q_climax else quarter_beat_ms
             for j in range(pos, chunk_end + 1):
-                if rng.random() < args.rest_probability:
+                j_time = circles[j].time
+                if blended_choice(args.seed, "rest", canonical_measure_for(j_time), slot_for(j_time), args.uniformity,
+                                   group_fn=lambda r: r.random() < args.rest_probability,
+                                   indep_fn=lambda: rng.random() < args.rest_probability):
                     continue
                 cur_j = circles[j]
                 has_next_j = j + 1 < n

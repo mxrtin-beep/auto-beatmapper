@@ -611,14 +611,23 @@ def main() -> None:
                               "0.8x-1.3x range, since lower values still read as too close together / "
                               "prone to crisscrossing).")
     parser.add_argument("--uniformity", type=float, default=0.0,
-                         help="How strongly a returning section (a verse's second repeat, a "
-                              "chorus that comes back later) reuses its earlier motif and slider "
-                              "curviness, beyond what's already found by matching *exact* runs of "
-                              "repeating energy -- 0-1, default 0 (a no-op: exactly today's "
-                              "exact-match-only behavior). Above 0, sections that only sound "
-                              "similar (not identical) increasingly get treated as repeats too, "
-                              "reusing an earlier section's pattern instead of its own. At 1, "
-                              "even a loose resemblance is enough.")
+                         help="Make the styling of a repeated part of the song look like the "
+                              "same part, instead of restyling it from scratch: whenever a "
+                              "measure sounds like an earlier one (a verse's second pass, a "
+                              "chorus that returns after a bridge), reuse that earlier measure's "
+                              "turn-angle motif, slider curviness, and stream/stack layout, "
+                              "beyond what's already reused for an *exact* repeat. 0-1, default 0 "
+                              "(today's behavior: matching only on an exact repeat). Raising it "
+                              "also starts recognizing sections that only sound similar, not "
+                              "identical, as repeats -- not a hard guarantee at every value below "
+                              "1, more a strong tendency toward matching. Note this repeats the "
+                              "*shape* of the pattern (which turn/motif plays, straight vs. curved "
+                              "sliders, stacked vs. spread runs) and its hitsounds, not the exact "
+                              "on-screen coordinates -- the cursor path keeps flowing from wherever "
+                              "the previous section left it, so a repeated section traces the same "
+                              "recognizable shape somewhere else on the playfield, not literally "
+                              "the same pixels. Forwarded from add_variety.py's own --uniformity "
+                              "(by main.py) for the layout/rhythm half of the same idea.")
     args = parser.parse_args()
     args.curviness = max(0.0, min(1.0, args.curviness))
     args.spacing = max(0.1, args.spacing)
@@ -661,6 +670,16 @@ def main() -> None:
     # occurrence's own measure index -- see motif_turn_degrees' own
     # docstring.
     measure_repeat_map = fuzzy_repeat_map(measure_buckets, args.uniformity, args.seed)
+    # Every measure's own bucket is swapped for its canonical (first)
+    # occurrence's bucket -- a no-op for an *exact* repeat (matching
+    # buckets is how it was detected in the first place) but a real change
+    # for a --uniformity > 0 fuzzy match, whose bucket can differ slightly
+    # from its canonical's. Reassigning here (rather than threading
+    # measure_repeat_map through every call site separately) means every
+    # bucket-keyed styling decision below -- stream/stack mode, slider
+    # curviness, not just motif angle -- automatically replays its
+    # canonical occurrence's own choice instead of only the angle doing so.
+    measure_buckets = {m: measure_buckets.get(measure_repeat_map.get(m, m), b) for m, b in measure_buckets.items()}
     stream_mode = build_stream_runs(objects, beat_length_ms, rng, args.seed, offset_ms=offset_ms,
                                      measure_length_ms=measure_length_ms, measure_buckets=measure_buckets,
                                      stream_frequency=args.stream_frequency,

@@ -113,12 +113,21 @@ def main() -> None:
                          help="Forwarded to apply_style.py's --temperature (0-1, how creative vs. "
                               "structured the styling gets). Omit to use apply_style.py's own default.")
     parser.add_argument("--uniformity", type=float, default=None,
-                         help="Forwarded to both add_variety.py's and apply_style.py's own "
-                              "--uniformity (0-1): how strongly a returning section (a verse's "
-                              "second repeat, a chorus that comes back later) reuses its earlier "
-                              "slider-vs-circle, hitsound, and motif/curviness choices, beyond "
-                              "what's already reused on an *exact* repeat. Omit to use each "
-                              "stage's own default (0 -- a no-op).")
+                         help="Make repeated parts of the song actually play like repeats, "
+                              "instead of every part being freshly, independently improvised: "
+                              "whenever a section sounds like an earlier one (a verse's second "
+                              "pass, a chorus that returns after a bridge), reuse that earlier "
+                              "section's slider-vs-circle layout, hitsounds, turn-angle motif, "
+                              "curviness, and stream/stack style, all at the same position -- "
+                              "instead of rolling fresh, unrelated choices for something the "
+                              "player will recognize by ear as the same bit of music. Forwarded "
+                              "to both add_variety.py's and apply_style.py's own --uniformity "
+                              "(0-1). 0 is today's behavior (matching only on an *exact* repeat, "
+                              "and only for hitsounds); raising it starts treating sections that "
+                              "only sound similar, not identical, as repeats too -- not a hard "
+                              "guarantee below 1, more a strong tendency, so a repeated verse "
+                              "reads as a clear family resemblance rather than a rigid, robotic "
+                              "loop. Omit to use each stage's own default (0).")
     parser.add_argument("--bpm", type=float, default=None,
                          help="Forwarded to generate_base_beatmap.py's --bpm, to set it manually "
                               "instead of auto-detecting it. Ignored with --restyle-only.")
