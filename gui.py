@@ -94,6 +94,15 @@ SLIDER_PARAMS = [
                 "distance shifts over the course of the song. Min 0 (tight and repetitive, "
                 "spacing never changes), max 1 (loose and varied). Default 0.5.",
                 0.0, 1.0, 0.5),
+    SliderParam("--uniformity", "Pattern uniformity",
+                "How strongly a returning section (a verse's second repeat, a chorus that "
+                "comes back later) reuses its earlier slider-vs-circle, hitsound, and layout "
+                "choices instead of deciding each independently. The song is scanned for parts "
+                "that sound alike, so a chorus matches its earlier self even with a bridge in "
+                "between — matching isn't exact, more a family resemblance the closer this is "
+                "to 1. Min 0 (every note fully independent, today's default feel), max 1 (the "
+                "whole song shares one pattern). Default 0.",
+                0.0, 1.0, 0.0),
 ]
 
 

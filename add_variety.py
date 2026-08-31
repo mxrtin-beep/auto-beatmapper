@@ -62,6 +62,7 @@ import librosa
 import numpy as np
 
 from beatmap_utils import HitObject, read_osu, slider_length_for_gap, write_osu
+from pattern_uniformity import blended_choice, compute_pattern_groups, measure_index_for_time
 
 # Hitsound bit flags (osu! HitObject hitSound field / slider edgeHitsounds).
 HS_NORMAL = 0
@@ -363,7 +364,16 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=None,
                          help="Random seed. Omit for a different map every run; pass a fixed "
                               "value (printed on every run) to reproduce the exact same map later.")
+    parser.add_argument("--uniformity", type=float, default=0.0,
+                         help="How strongly a returning section (a verse's second repeat, a "
+                              "chorus that comes back later) reuses its earlier slider/circle "
+                              "choices instead of deciding independently, 0-1 (default 0, today's "
+                              "fully independent behavior). Matched by a chroma self-similarity "
+                              "pass over the song, not just a fixed measure count, so a chorus "
+                              "still matches its earlier self even if a verse or bridge sits "
+                              "between them. At 1, the whole song is treated as one section.")
     args = parser.parse_args()
+    args.uniformity = max(0.0, min(1.0, args.uniformity))
 
     if args.seed is None:
         args.seed = random.SystemRandom().randrange(2**32)
@@ -387,6 +397,24 @@ def main() -> None:
     print("Analyzing song energy...")
     times_ms, energy = compute_energy_curve(args.audio)
     energy_at = make_energy_lookup(times_ms, energy)
+
+    pattern_groups = None
+    if args.uniformity > 0.0:
+        print(f"Detecting repeated sections (uniformity={args.uniformity:.2f})...")
+        track_end_ms = find_track_end_ms(times_ms, energy)
+        pattern_groups = compute_pattern_groups(args.audio, offset_ms, measure_length_ms,
+                                                 track_end_ms, args.uniformity)
+
+    def slot_key_for(time_ms: float) -> int:
+        """Position within its measure, in half-beat slots (0-7) — the
+        stable key that lets the same slot in two occurrences of the same
+        pattern group land on the same treatment/chain decision."""
+        return int(round((time_ms - offset_ms) / half_beat_ms)) % 8
+
+    def group_for(time_ms: float):
+        if pattern_groups is None:
+            return None
+        return pattern_groups.get(measure_index_for_time(time_ms, offset_ms, measure_length_ms))
 
     slot_energy = np.array([energy_at(c.time) for c in circles])
     # Categories are decided from smoothed energy (raw per-slot energy is
@@ -448,9 +476,17 @@ def main() -> None:
             while (i + max_chain < n and max_chain < 4
                    and categories[i + max_chain] != "intense"):
                 max_chain += 1
-            can_chain = max_chain >= 2 and rng.random() < args.chain_probability
+            def draw_chain(chain_rng: random.Random, max_chain: int = max_chain) -> tuple[bool, int]:
+                can_chain = max_chain >= 2 and chain_rng.random() < args.chain_probability
+                if not can_chain:
+                    return False, 0
+                chain_len = chain_rng.choices([2, 3, 4][:max_chain - 1], weights=[50, 30, 20][:max_chain - 1])[0]
+                return True, chain_len
+
+            can_chain, chain_len = blended_choice(
+                args.seed, "chain", group_for(cur.time), slot_key_for(cur.time), args.uniformity,
+                group_fn=draw_chain, indep_fn=lambda: draw_chain(rng))
             if can_chain:
-                chain_len = rng.choices([2, 3, 4][:max_chain - 1], weights=[50, 30, 20][:max_chain - 1])[0]
                 nodes = circles[i:i + chain_len]
                 new_objects.append(make_slider_chain(nodes, beat_length_ms, slider_multiplier))
                 i += chain_len
@@ -497,7 +533,14 @@ def main() -> None:
             else:
                 options = [t for t in ("stream", "bounce", "rest") if t != last_treatment]
                 weights = {"stream": 0.45, "bounce": 0.45, "rest": 0.10}
-                treatment = rng.choices(options, weights=[weights[t] for t in options])[0]
+
+                def draw_treatment(t_rng: random.Random, options: list[str] = options) -> str:
+                    return t_rng.choices(options, weights=[weights[t] for t in options])[0]
+
+                pos_time = circles[pos].time
+                treatment = blended_choice(
+                    args.seed, "treatment", group_for(pos_time), slot_key_for(pos_time), args.uniformity,
+                    group_fn=draw_treatment, indep_fn=lambda: draw_treatment(rng))
             last_treatment = treatment
 
             chunk_end = lookahead_end

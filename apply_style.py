@@ -70,6 +70,7 @@ import random
 import numpy as np
 
 from beatmap_utils import HitObject, PLAYFIELD_H, PLAYFIELD_W, clamp_to_playfield, read_osu, write_osu
+from pattern_uniformity import blended_choice, compute_pattern_groups
 
 MARGIN = 30
 MIN_SPACING = 10.0    # px, safety floor only — the distance-snap formula rarely needs it
@@ -459,10 +460,19 @@ def main() -> None:
                               "formula; default 1.3, the top of the ranking-criteria-recommended "
                               "range, since lower values still read as too close together / "
                               "prone to crisscrossing).")
+    parser.add_argument("--uniformity", type=float, default=0.0,
+                         help="How strongly a returning section (a verse's second repeat, a "
+                              "chorus that comes back later) reuses its earlier motif, "
+                              "stream/stack mode, and slider curviness instead of only matching "
+                              "on energy the way the pipeline already does, 0-1 (default 0). "
+                              "Matched by a chroma self-similarity pass over the song, so a "
+                              "chorus still matches its earlier self even with a verse or bridge "
+                              "in between. At 1, the whole song shares one pattern.")
     args = parser.parse_args()
     args.curviness = max(0.0, min(1.0, args.curviness))
     args.spacing = max(0.1, args.spacing)
     args.temperature = max(0.0, min(1.0, args.temperature))
+    args.uniformity = max(0.0, min(1.0, args.uniformity))
     if args.angle_jitter is None:
         args.angle_jitter = 1.0 + args.temperature * 9.0  # 1-10 degrees
     curviness_variance = 0.15 + args.temperature * 0.4  # 0.15-0.55
@@ -494,6 +504,28 @@ def main() -> None:
         q_low, q_high = 0.35, 0.75
 
     measure_buckets = compute_measure_energy_buckets(energy_at, offset_ms, measure_length_ms, objects[-1].time)
+
+    if args.uniformity > 0.0 and args.audio:
+        print(f"Detecting repeated sections (uniformity={args.uniformity:.2f})...")
+        pattern_groups = compute_pattern_groups(args.audio, offset_ms, measure_length_ms,
+                                                 objects[-1].time, args.uniformity)
+        if pattern_groups:
+            # Every measure's own bucket is either the group's shared
+            # bucket (its pattern-mates' energy bucket, so a chorus's later
+            # repeat reuses the same motif/curviness/stream-mode as its
+            # first) or its own energy bucket as today — decided once per
+            # (group, energy bucket) rather than per measure, so a whole
+            # returning section moves as one instead of some of its
+            # measures matching and others not.
+            def resolve_bucket(measure_index: int, energy_bucket: int) -> int:
+                group_id = pattern_groups.get(measure_index)
+                return blended_choice(
+                    args.seed, "measure_bucket", group_id, "measure_bucket", args.uniformity,
+                    group_fn=lambda _: group_id % NUM_ENERGY_BUCKETS,
+                    indep_fn=lambda: energy_bucket)
+
+            measure_buckets = {m: resolve_bucket(m, b) for m, b in measure_buckets.items()}
+
     stream_mode = build_stream_runs(objects, beat_length_ms, rng, args.seed, offset_ms=offset_ms,
                                      measure_length_ms=measure_length_ms, measure_buckets=measure_buckets,
                                      stream_frequency=args.stream_frequency,

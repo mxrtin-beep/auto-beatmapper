@@ -91,6 +91,13 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=None,
                          help="Forwarded to apply_style.py's --temperature (0-1, how creative vs. "
                               "structured the styling gets). Omit to use apply_style.py's own default.")
+    parser.add_argument("--uniformity", type=float, default=None,
+                         help="Forwarded to both add_variety.py's and apply_style.py's "
+                              "--uniformity (0-1): how strongly a returning section (a verse's "
+                              "second repeat, a chorus that comes back later) reuses its earlier "
+                              "slider/circle, hitsound, and layout choices instead of deciding "
+                              "each independently. 0 (default) is today's fully independent "
+                              "behavior; 1 makes the whole song share one pattern.")
     parser.add_argument("--bpm", type=float, default=None,
                          help="Forwarded to generate_base_beatmap.py's --bpm, to set it manually "
                               "instead of auto-detecting it. Ignored with --restyle-only.")
@@ -119,9 +126,14 @@ def main() -> None:
                          ("--stream-frequency", args.stream_frequency),
                          ("--stack-probability", args.stack_probability),
                          ("--angle-jitter", args.angle_jitter),
-                         ("--temperature", args.temperature)):
+                         ("--temperature", args.temperature),
+                         ("--uniformity", args.uniformity)):
         if value is not None:
             style_extra_args += [flag, str(value)]
+
+    variety_extra_args: list[str] = []
+    if args.uniformity is not None:
+        variety_extra_args += ["--uniformity", str(args.uniformity)]
 
     title = args.title or os.path.splitext(os.path.basename(args.audio))[0]
     outdir = args.outdir
@@ -183,7 +195,8 @@ def main() -> None:
 
     print("=== Stage 2: add variety ===")
     _run_module_main(add_variety, [base_path, args.audio, "--output", variety_path,
-                                    "--version", "Auto Variety", "--seed", str(args.seed)])
+                                    "--version", "Auto Variety", "--seed", str(args.seed)]
+                      + variety_extra_args)
 
     print("=== Stage 3: apply style ===")
     _run_module_main(apply_style, [variety_path, "--output", styled_path, "--audio", args.audio,
