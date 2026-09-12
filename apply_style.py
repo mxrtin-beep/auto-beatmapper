@@ -91,6 +91,18 @@ MAX_SPACING = 600.0   # px, generous safety ceiling (a little over the playfield
 STACK_ON_PREVIOUS_PROBABILITY = 0.05
 STACK_ON_PREVIOUS_MAX_GAP_BEATS = 0.5  # half a beat or less
 
+# A stack or line run is only ever entered on a short (quarter-beat-or-
+# less) gap -- that's the very definition of the run in build_stream_runs.
+# Distance snap alone, even with STREAM_TRANSITION_BOOST on top, still
+# scales that entry jump down to almost nothing for the shortest gaps (an
+# eighth-note transition into a brand new run can land under 40px away),
+# which reads as still part of whatever run just ended rather than a
+# distinct new spot -- exactly backwards from the point of forming a
+# fresh run at all. This is an absolute floor (not scaled by --spacing)
+# on just the one jump that establishes a new run's anchor/direction, big
+# enough that the new spot is unambiguously not the old one.
+STREAM_ENTRY_MIN_SPACING = 90.0
+
 HALF_BEAT_STEPS_PER_MEASURE = 8  # 4/4 time, half-beat resolution
 
 # A handful of repeating turn-angle "motifs" per energy tier (degrees,
@@ -504,7 +516,6 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
     why --stack-probability stopped visibly doing anything.)
     """
     quarter_beat_ms = beat_length_ms / 4.0
-    eighth_beat_ms = beat_length_ms / 8.0
     threshold = quarter_beat_ms + 1.0
     MAX_RUN_LEN = 8  # matches add_variety.py's own hard cap (cap_stream_length's max_len at frequency 1)
     # A run this short or shorter — a plain double or triple, not a real
@@ -517,36 +528,39 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
     # clear little gesture instead.
     MIN_STREAM_LEN = 2
 
-    def gap_rate(gap_ms: float) -> str:
-        # "eighth" (a climax burst's own rate) vs. "quarter" (everything
-        # else this loop ever sees, since threshold above already only
-        # lets a quarter-beat-or-closer gap through in the first place).
-        return "eighth" if gap_ms <= eighth_beat_ms + 1.0 else "quarter"
-
     mode_of: dict[int, tuple[int, str]] = {}
     i = 0
     n = len(objects)
     run_id = 0
+    last_stream_mode = None  # "stack" or "line" of the most recent streaming burst, for the anti-repeat rule below
     while i < n:
         if objects[i].is_slider:
             i += 1
             continue
         j = i + 1
-        run_rate = None
+        run_gap_ms = None
         while (j < n and not objects[j].is_slider
                and (objects[j].time - objects[j - 1].time) <= threshold):
             # A run only ever streams at one consistent pace -- a stack
-            # mixing an eighth-beat climax burst with a slower quarter-beat
-            # stretch reads as one held-in-place gesture even though the
-            # actual pacing changed partway through it, which is
-            # disorienting (the same held spot no longer means "hit these
-            # all at the same rate"). Splitting into a fresh run right at
-            # the rate change gives the change its own entry/exit gap and
-            # (if it streams) its own stack position instead.
-            rate = gap_rate(objects[j].time - objects[j - 1].time)
-            if run_rate is None:
-                run_rate = rate
-            elif rate != run_rate:
+            # mixing gaps of genuinely different sizes reads as one
+            # held-in-place gesture even though the actual pacing changed
+            # partway through it (e.g. tail end of an eighth-note burst
+            # happening to land within a quarter beat of an unrelated
+            # object right after it), which is disorienting: the same
+            # held spot no longer means "hit these all at the same rate",
+            # and the odd-sized gap has no relationship to anything either
+            # side of it. Matched to the *exact* gap (not just which side
+            # of the eighth/quarter-beat line it falls on) so only a
+            # genuinely uniform run — the guarantee add_variety.py's own
+            # subdivision code already gives a real stream or bounce
+            # slider — ever gets treated as one. Splitting right at the
+            # first gap that doesn't match gives the change its own
+            # entry/exit gap and (if it streams) its own stack position
+            # instead.
+            gap = objects[j].time - objects[j - 1].time
+            if run_gap_ms is None:
+                run_gap_ms = gap
+            elif abs(gap - run_gap_ms) > 2.0:
                 break
             j += 1
         run_len = j - i
@@ -573,6 +587,17 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
 
                     if is_stream:
                         base_mode = "stack" if wants_stack else "line"
+                        # A run of piled-on-one-spot stacks back to back
+                        # (however each individually rolled --stack-
+                        # probability) reads as monotonous rather than a
+                        # deliberate pattern -- never let two streaming
+                        # bursts in a row both land on "stack"; the second
+                        # spreads along a line instead, still overlapping
+                        # (so it's still visually one deliberate unit) but
+                        # no longer identical to the one right before it.
+                        if base_mode == "stack" and last_stream_mode == "stack":
+                            base_mode = "line"
+                        last_stream_mode = base_mode
                     else:
                         base_mode = "flow"
 
@@ -650,12 +675,16 @@ def main() -> None:
                               "setting. Which one a given repeating section picks stays consistent "
                               "across its repeats either way. Default 0.1 — deliberately low, since "
                               "even a modest value here already makes streams a regular occurrence.")
-    parser.add_argument("--stack-probability", type=float, default=1.0,
+    parser.add_argument("--stack-probability", type=float, default=0.6,
                          help="Of whichever bursts --stream-frequency already decided ARE a "
                               "stream: the mix between piling into one stacked spot and spreading "
                               "along a line (0 = always line, 1 = always stack). Has no effect on "
                               "whether a burst streams in the first place — that's "
-                              "--stream-frequency's job. Default 1.0 (always stack).")
+                              "--stream-frequency's job. Default 0.6 (leans stack, but a real mix -- "
+                              "always 1.0 made every streaming burst in the whole map an identical "
+                              "one-spot stack, which reads as monotonous over a long intense section; "
+                              "build_stream_runs also never lets two streaming bursts in a row both "
+                              "land on stack regardless of this value, see its own docstring).")
     parser.add_argument("--curviness", type=float, default=0.5,
                          help="How curvy the map feels, 0-1. 0 makes almost every slider a "
                               "straight line; 1 makes almost every slider a pronounced curve "
@@ -881,6 +910,8 @@ def main() -> None:
                 # object several beats away that just happened to precede
                 # it.
                 spacing = max(MIN_SPACING, min(MAX_SPACING, boost * styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing * spacing_scale_for(obj.time), rng)))
+                if entering_stream:
+                    spacing = max(spacing, STREAM_ENTRY_MIN_SPACING)
                 cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter, measure_repeat_map=measure_repeat_map)
                 cur_angle = wander_nudge(cur_angle, cur_x, cur_y)
                 new_x, new_y, cur_angle = place_at_distance(cur_x, cur_y, spacing, cur_angle)
@@ -899,6 +930,8 @@ def main() -> None:
                                              measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter, measure_repeat_map=measure_repeat_map)
                 line_run_angle = wander_nudge(line_run_angle, cur_x, cur_y)
             spacing = max(MIN_SPACING, min(MAX_SPACING, boost * styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing * spacing_scale_for(obj.time), rng)))
+            if entering_stream:
+                spacing = max(spacing, STREAM_ENTRY_MIN_SPACING)
             # A run's direction is locked in once, above — but if it
             # happens to point straight at a wall, letting place_at_distance
             # "bounce" it back on every single step (as every other call
