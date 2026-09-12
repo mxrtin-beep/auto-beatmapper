@@ -588,6 +588,16 @@ def main() -> None:
         while run_end + 1 < n and categories[run_end + 1] == "intense":
             run_end += 1
 
+        # The quarter-vs-eighth subdivision rate is decided once for the
+        # *whole* intense run, not per chunk. A chunk-local average can sit
+        # right on either side of q_climax from one 2-beat chunk to the
+        # next even within one continuous intense passage, which used to
+        # flip the rate every couple of beats -- a switch fast enough to be
+        # unplayable rather than a deliberate escalation. One run can still
+        # differ from the next (a later, more intense run gets its own
+        # average), just not mid-run.
+        run_avg_energy = float(np.mean(slot_energy[i:run_end + 1]))
+
         chunk_slots = 4  # half a measure
         pos = i
         last_treatment = None
@@ -630,8 +640,7 @@ def main() -> None:
                 # rate up front, rather than letting cap_stream_length chop
                 # an oversized stream in half with a bridging slider that
                 # doesn't really break anything up.
-                chunk_avg_energy = float(np.mean(slot_energy[pos:lookahead_end + 1]))
-                steps_per_slot = 4 if chunk_avg_energy > q_climax else 2
+                steps_per_slot = 4 if run_avg_energy > q_climax else 2
                 max_slots_for_cap = max(1, stream_max_len // steps_per_slot)
                 chunk_end = min(lookahead_end, pos + max_slots_for_cap - 1)
 
@@ -653,8 +662,7 @@ def main() -> None:
                 # *exactly* — chunk_len consecutive base-grid slots are
                 # always exactly chunk_len half-beats apart — so every
                 # repeat lands precisely on the beat grid with no rounding.
-                chunk_avg_energy = float(np.mean(slot_energy[pos:chunk_end + 1]))
-                one_way_ms = eighth_beat_ms if chunk_avg_energy > q_climax else quarter_beat_ms
+                one_way_ms = eighth_beat_ms if run_avg_energy > q_climax else quarter_beat_ms
                 legs_per_half_beat = 4 if one_way_ms == eighth_beat_ms else 2
                 full_bounces = chunk_len * legs_per_half_beat
 
@@ -674,17 +682,26 @@ def main() -> None:
             # chunk, the same way as the bounce branch above) rather than
             # switching between quarter- and eighth-notes slot to slot,
             # which would read as an inconsistent, hard-to-parse stream.
+            # No per-note --rest-probability roll inside this loop (unlike
+            # the chunk-level one above, which only ever drops a whole
+            # chunk before it becomes a stream at all): dropping one circle
+            # out of an otherwise-contiguous stream leaves the very next one
+            # a full extra subdivision away from its neighbor, which is
+            # enough to sever it from the run apply_style.py would
+            # otherwise have recognized (its stack/line placement, and the
+            # wider entry/exit gap that sets a stream apart, both key off
+            # consecutive gaps staying quarter-beat-or-closer) — the result
+            # is a stray, oddly-timed, oddly-placed orphan right where the
+            # stream should have ended cleanly instead.
+            #
             # Subdivisions are packed into the gap up to the next existing
             # object, never overlapping it — the interval is split into an
             # exact whole number of equal steps so no inserted timestamp can
             # land a fraction of a millisecond from the next object (which
             # would round to the same millisecond on disk and become an
             # unplayable simultaneous note).
-            chunk_avg_energy = float(np.mean(slot_energy[pos:chunk_end + 1]))
-            subdivision = eighth_beat_ms if chunk_avg_energy > q_climax else quarter_beat_ms
+            subdivision = eighth_beat_ms if run_avg_energy > q_climax else quarter_beat_ms
             for j in range(pos, chunk_end + 1):
-                if rng.random() < args.rest_probability:
-                    continue
                 cur_j = circles[j]
                 has_next_j = j + 1 < n
                 next_time_j = circles[j + 1].time if has_next_j else cur_j.time + half_beat_ms

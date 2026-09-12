@@ -447,12 +447,12 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
     long a run of quarter/eighth-spaced circles is ever allowed to get),
     each with its own mode decision and its own entry/exit transition.
 
-    A burst only counts as an actual "stream" — eligible to be forced into
-    a stack or a line at all — once it's 4 or more notes long; that's the
-    definition (a run of 2-3 fast notes is just a quick triplet, not a
-    stream). Shorter bursts always use ordinary motif-driven flow, the
-    same as an object outside any fast run, regardless of
-    `stream_frequency` below.
+    Any run of 2 or more counts as a burst eligible for this treatment —
+    even a plain double or triple, not just a longer stream (see
+    MIN_STREAM_LEN below) — since a short close-together run left to
+    ordinary motif-driven flow instead just blends into the surrounding
+    notes at a similar distance, rather than reading as its own pair/
+    triplet gesture.
 
     Two independent knobs govern this, deliberately kept separate since
     they answer two different questions:
@@ -501,7 +501,15 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
     eighth_beat_ms = beat_length_ms / 8.0
     threshold = quarter_beat_ms + 1.0
     MAX_RUN_LEN = 8  # matches add_variety.py's own hard cap (cap_stream_length's max_len at frequency 1)
-    MIN_STREAM_LEN = 4  # fewer than this is a quick triplet, not a stream (see docstring)
+    # A run this short or shorter — a plain double or triple, not a real
+    # stream — still gets the stack/line/flow treatment: left to ordinary
+    # motif-driven flow, a close-together pair reads as a formless "mush"
+    # indistinguishable from the surrounding notes (nothing sets the pair
+    # apart from anything else nearby at a similar distance), where a quick
+    # stack or short line -- plus the transition boost on the gap in and
+    # out of it -- makes the pair (or two pairs in a row) read as its own
+    # clear little gesture instead.
+    MIN_STREAM_LEN = 2
 
     def gap_rate(gap_ms: float) -> str:
         # "eighth" (a climax burst's own rate) vs. "quarter" (everything
@@ -569,6 +577,40 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
                 burst_index += 1
         i = j
     return mode_of
+
+
+def snap_combos_to_stream_boundaries(objects: list[HitObject], stream_mode: dict[int, tuple[int, str]]) -> None:
+    """Make sure no combo starts or ends in the middle of a "stack" or
+    "line" run — those are meant to read as one deliberate held-in-place or
+    overlapping-line gesture, and a combo break partway through it (a new
+    colour appearing mid-stack, or the stack's last member kicking off a
+    combo of its own) breaks that read even though add_variety.py's own
+    combo placement (purely downbeat/measure-count driven, with no idea
+    runs like this would later exist) followed its own rules correctly.
+
+    Every run's members are a contiguous stretch of `objects` (see
+    build_stream_runs), so for each run this just clears any is_new_combo
+    found on an interior/trailing member and, if one was cleared, moves it
+    to the run's first member instead — the run still gets a combo break
+    where it musically wanted one, just at its boundary instead of inside
+    it. "flow" bursts (a burst that rolled *not* to stream) aren't a single
+    visual unit and are left alone.
+    """
+    run_indices: dict[int, list[int]] = {}
+    for idx, (run_id, mode) in stream_mode.items():
+        if mode in ("stack", "line"):
+            run_indices.setdefault(run_id, []).append(idx)
+
+    for idxs in run_indices.values():
+        idxs.sort()
+        first = idxs[0]
+        interior_break = False
+        for k in idxs[1:]:
+            if objects[k].is_new_combo:
+                objects[k].is_new_combo = False
+                interior_break = True
+        if interior_break:
+            objects[first].is_new_combo = True
 
 
 def main() -> None:
@@ -664,6 +706,7 @@ def main() -> None:
                                      measure_length_ms=measure_length_ms, measure_buckets=measure_buckets,
                                      stream_frequency=args.stream_frequency,
                                      stack_probability=args.stack_probability)
+    snap_combos_to_stream_boundaries(objects, stream_mode)
 
     # --spacing itself shifts a little, a handful of times over the course
     # of the song, instead of staying exactly one multiplier the whole way
