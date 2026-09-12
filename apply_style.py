@@ -391,7 +391,13 @@ def p_curve_arc_bbox(p0: tuple[float, float], p1: tuple[float, float],
     lo, hi = min(a0, a2n), max(a0, a2n)
 
     xs, ys = [ax, bx, cx], [ay, by, cy]
-    steps = 32
+    # A coarse sample grid can straddle a sharp protrusion -- a high-
+    # curvature arc (large radius relative to the swept angle) can bulge
+    # past the playfield edge for only a few degrees of its sweep, which
+    # 32 evenly-spaced samples can straddle without ever landing a point
+    # on the actual peak. 128 keeps the worst-case miss to a fraction of a
+    # degree regardless of how tight the bulge is.
+    steps = 128
     for i in range(steps + 1):
         angle = lo + (hi - lo) * i / steps
         xs.append(ux + r * math.cos(angle))
@@ -402,12 +408,21 @@ def p_curve_arc_bbox(p0: tuple[float, float], p1: tuple[float, float],
 def p_curve_fits_playfield(p0: tuple[float, float], p1: tuple[float, float], p2: tuple[float, float],
                             margin: float) -> bool:
     """Whether a P-curve slider's actual rendered arc through these three
-    points stays within the playfield margin -- see p_curve_arc_bbox."""
+    points stays within the playfield margin -- see p_curve_arc_bbox.
+
+    Checked against a slightly wider margin than the one actually used to
+    place the points (+5px) — a cushion against p_curve_arc_bbox's own
+    sampling still being a discrete approximation of a continuous arc,
+    so a real bulge landing between two samples fails this check instead
+    of narrowly passing it.
+    """
     bbox = p_curve_arc_bbox(p0, p1, p2)
     if bbox is None:
         return False
     xlo, xhi, ylo, yhi = bbox
-    return xlo >= margin and xhi <= PLAYFIELD_W - margin and ylo >= margin and yhi <= PLAYFIELD_H - margin
+    safety_margin = margin + 5.0
+    return (xlo >= safety_margin and xhi <= PLAYFIELD_W - safety_margin
+            and ylo >= safety_margin and yhi <= PLAYFIELD_H - safety_margin)
 
 
 def snap_distance(gap_ms: float, beat_length_ms: float, slider_multiplier: float) -> float:
@@ -666,15 +681,19 @@ def main() -> None:
                               "angles/flow, never timing, note count, or object type — a way to "
                               "get more (or less) variety in the flow without being restrictive. "
                               "Defaults to a value derived from --temperature (roughly 1-10).")
-    parser.add_argument("--stream-frequency", type=float, default=0.1,
-                         help="How often a fast (quarter-beat-or-closer) burst of 4+ notes is placed "
+    parser.add_argument("--stream-frequency", type=float, default=0.9,
+                         help="How often a fast (quarter-beat-or-closer) burst of 2+ notes is placed "
                               "as a deliberate stream unit (stacked in one spot, or spread along one "
                               "locked-in line) versus just following ordinary flow like any other "
                               "note (0 = never a stream, 1 = always one). A run longer than 8 is "
                               "always split into separate bursts of at most 8 regardless of this "
                               "setting. Which one a given repeating section picks stays consistent "
-                              "across its repeats either way. Default 0.1 — deliberately low, since "
-                              "even a modest value here already makes streams a regular occurrence.")
+                              "across its repeats either way. Default 0.9 -- deliberately high: "
+                              "ordinary motif-driven flow assumes moderate, varied-direction jumps "
+                              "between objects, which reads as a formless scatter once gaps shrink "
+                              "to quarter/eighth-beat -- a fast run needs the deliberate stack/line "
+                              "treatment to read as one coherent gesture instead, so 'flow' should "
+                              "stay the exception for these, not the common case.")
     parser.add_argument("--stack-probability", type=float, default=0.6,
                          help="Of whichever bursts --stream-frequency already decided ARE a "
                               "stream: the mix between piling into one stacked spot and spreading "
@@ -982,7 +1001,17 @@ def main() -> None:
             # Outside a stream: normal distance-snap + motif-driven flow
             # (plus the transition boost on the one gap right after a
             # stream ends, for the same readability reason as entering one).
+            # This is also where a "flow"-mode burst lands (an eligible
+            # fast run that rolled *not* to become a deliberate stack/line)
+            # -- the same STREAM_ENTRY_MIN_SPACING floor applies on its
+            # entry step for the same reason as a stack/line's: plain
+            # distance-snap on the short connecting gap that defines the
+            # run in the first place would otherwise land it close enough
+            # to read as still part of whatever run just ended, even
+            # though build_stream_runs treats it as a separate group.
             spacing = max(MIN_SPACING, min(MAX_SPACING, boost * styled_spacing(gap_ms, beat_length_ms, slider_multiplier, args.spacing * spacing_scale_for(obj.time), rng)))
+            if entering_stream or leaving_stream:
+                spacing = max(spacing, STREAM_ENTRY_MIN_SPACING)
             cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter, measure_repeat_map=measure_repeat_map)
             cur_angle = wander_nudge(cur_angle, cur_x, cur_y)
             new_x, new_y, cur_angle = place_at_distance(cur_x, cur_y, spacing, cur_angle)
