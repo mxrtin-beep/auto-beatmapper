@@ -247,11 +247,13 @@ class App:
         # --- Options ---
         opt_panel = self._panel(form, "Options")
         self.osz_var = tk.BooleanVar(value=True)
+        self.keep_osu_var = tk.BooleanVar(value=False)
         self.auto_open_var = tk.BooleanVar(value=True)
         self.keep_intermediate_var = tk.BooleanVar(value=False)
         self.report_var = tk.BooleanVar(value=False)
         options = (
             (self.osz_var, "Package as .osz (ready to import into osu!)"),
+            (self.keep_osu_var, "Keep loose .osu files too"),
             (self.auto_open_var, "Open the finished map when done"),
             (self.keep_intermediate_var, "Keep intermediate stages too (Circles and Sliders, "
                                           "alongside the final Styled map)"),
@@ -526,8 +528,9 @@ class App:
                 build_osz(all_paths, audio, osz_path,
                           extra_files=[background_path] if background_path else None)
                 self.log_queue.put(f"Packaged {osz_path}\n")
-                for path in all_paths:
-                    os.remove(path)
+                if not self.keep_osu_var.get():
+                    for path in all_paths:
+                        os.remove(path)
                 self.result_path = osz_path
             else:
                 self.result_path = styled_path
