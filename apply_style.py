@@ -82,8 +82,14 @@ MAX_SPACING = 600.0   # px, generous safety ceiling (a little over the playfield
 # not just inside a designated stream. Kept low and only ever considered
 # for a plain circle (never a slider, whose own curve/end point already
 # has to originate from wherever it's placed) so normal flow still
-# dominates.
+# dominates. Also gated on the gap to the previous object actually being
+# short (see STACK_ON_PREVIOUS_MAX_GAP_BEATS below) -- a stack reads as
+# "these belong together, hit fast" only when they're already close in
+# time; stacking two objects a full beat or more apart produces a stack
+# with no rhythmic reason to exist, forcing the player onto the same spot
+# for two unrelated hits and then off it again with no warning.
 STACK_ON_PREVIOUS_PROBABILITY = 0.05
+STACK_ON_PREVIOUS_MAX_GAP_BEATS = 0.5  # half a beat or less
 
 HALF_BEAT_STEPS_PER_MEASURE = 8  # 4/4 time, half-beat resolution
 
@@ -929,7 +935,8 @@ def main() -> None:
             # second stream ending later doesn't keep re-triggering it.
             cur_x, cur_y = last_stack_anchor
             last_stack_anchor = None
-        elif not obj.is_slider and rng.random() < STACK_ON_PREVIOUS_PROBABILITY:
+        elif (not obj.is_slider and gap_ms <= beat_length_ms * STACK_ON_PREVIOUS_MAX_GAP_BEATS + 1.0
+              and rng.random() < STACK_ON_PREVIOUS_PROBABILITY):
             # A plain circle, dropped right on top of whatever object came
             # before it (circle or slider head alike -- cur_x, cur_y is
             # already wherever that one ended up) instead of moving away

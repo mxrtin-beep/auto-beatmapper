@@ -444,8 +444,6 @@ def main() -> None:
     parser.add_argument("--bounce-probability", type=float, default=0.6,
                          help="Chance a dense intense-section burst (4+ notes) becomes a single "
                               "back-and-forth slider instead of a run of circles (0-1).")
-    parser.add_argument("--rest-probability", type=float, default=0.03,
-                         help="Chance any non-quiet beat is dropped entirely as a short rest (0-1).")
     parser.add_argument("--slider-length-bias", type=float, default=0.5,
                          help="Which chain length a merged slider in a normal-energy section tends "
                               "to pick, 0-1 (default 0.5). 2 nodes = 1 beat, 3 = 1.5 beats, 4 = 2 "
@@ -538,13 +536,6 @@ def main() -> None:
             i += 1
             continue
 
-        # A short, occasional rest: drop this beat entirely so busy sections
-        # get a breath instead of being wall-to-wall notes. Never applied to
-        # quiet sections, which are already thinned out above.
-        if rng.random() < args.rest_probability:
-            i += 1
-            continue
-
         if cat == "normal":
             # Combine this circle with the next 1-3 into a slider whenever
             # possible — varying the chain length (2, 3, or 4 nodes: 1, 1.5,
@@ -602,10 +593,6 @@ def main() -> None:
         pos = i
         last_treatment = None
         while pos <= run_end:
-            if rng.random() < args.rest_probability:
-                pos += 1
-                continue
-
             lookahead_end = min(pos + chunk_slots - 1, run_end)
             lookahead_len = lookahead_end - pos + 1
 
@@ -682,9 +669,7 @@ def main() -> None:
             # chunk, the same way as the bounce branch above) rather than
             # switching between quarter- and eighth-notes slot to slot,
             # which would read as an inconsistent, hard-to-parse stream.
-            # No per-note --rest-probability roll inside this loop (unlike
-            # the chunk-level one above, which only ever drops a whole
-            # chunk before it becomes a stream at all): dropping one circle
+            # No per-note random rest inside this loop: dropping one circle
             # out of an otherwise-contiguous stream leaves the very next one
             # a full extra subdivision away from its neighbor, which is
             # enough to sever it from the run apply_style.py would
@@ -692,7 +677,11 @@ def main() -> None:
             # wider entry/exit gap that sets a stream apart, both key off
             # consecutive gaps staying quarter-beat-or-closer) — the result
             # is a stray, oddly-timed, oddly-placed orphan right where the
-            # stream should have ended cleanly instead.
+            # stream should have ended cleanly instead. The only remaining
+            # source of a deliberate breather anywhere in this function is
+            # the "rest" treatment above, which always drops one clean,
+            # fully-aligned chunk at a time rather than an arbitrary single
+            # slot -- every other beat that survives classification is kept.
             #
             # Subdivisions are packed into the gap up to the next existing
             # object, never overlapping it — the interval is split into an
