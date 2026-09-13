@@ -581,14 +581,16 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
     return mode_of
 
 
-def snap_combos_to_stream_boundaries(objects: list[HitObject], stream_mode: dict[int, tuple[int, str]]) -> None:
+def snap_combos_to_stream_boundaries(objects: list[HitObject], stream_mode: dict[int, tuple[int, str]],
+                                      max_combo_length: int = 8) -> None:
     """Make sure no combo starts or ends in the middle of a "stack" or
     "line" run — those are meant to read as one deliberate held-in-place or
     overlapping-line gesture, and a combo break partway through it (a new
     colour appearing mid-stack, or the stack's last member kicking off a
-    combo of its own) breaks that read even though add_variety.py's own
-    combo placement (purely downbeat/measure-count driven, with no idea
-    runs like this would later exist) followed its own rules correctly.
+    combo of its own) breaks that read even though the combo placement
+    that ran before this (purely downbeat/measure-count/8-object-cap
+    driven, with no idea runs like this would later exist) followed its
+    own rules correctly.
 
     Every run's members are a contiguous stretch of `objects` (see
     build_stream_runs), so for each run this just clears any is_new_combo
@@ -597,22 +599,50 @@ def snap_combos_to_stream_boundaries(objects: list[HitObject], stream_mode: dict
     where it musically wanted one, just at its boundary instead of inside
     it. "flow" bursts (a burst that rolled *not* to stream) aren't a single
     visual unit and are left alone.
+
+    Clearing an interior break can let a combo run past whatever cap the
+    caller originally enforced (an 8-object cap, forced to land mid-run,
+    just got moved out to the run's start alongside everything already
+    ahead of it) — so `max_combo_length` is re-enforced here too, in a
+    second pass, but only ever by forcing a break at a point that's
+    actually safe: a run's own first member, or any object outside a
+    run entirely. A run longer than max_combo_length by itself (rare, but
+    possible for a maximal-length stack) is the one case this can't fully
+    prevent — letting the combo run past the cap for the length of that
+    one run is still better than breaking color mid-stack, and the count
+    resets the moment the run ends.
     """
     run_indices: dict[int, list[int]] = {}
     for idx, (run_id, mode) in stream_mode.items():
         if mode in ("stack", "line"):
             run_indices.setdefault(run_id, []).append(idx)
 
+    interior_of_run: set[int] = set()
     for idxs in run_indices.values():
         idxs.sort()
         first = idxs[0]
         interior_break = False
         for k in idxs[1:]:
+            interior_of_run.add(k)
             if objects[k].is_new_combo:
                 objects[k].is_new_combo = False
                 interior_break = True
         if interior_break:
             objects[first].is_new_combo = True
+
+    combo_count = 0
+    for idx, obj in enumerate(objects):
+        if obj.is_new_combo:
+            combo_count = 1
+        elif idx in interior_of_run:
+            # Not a safe place to force a break -- ride it out; the count
+            # is still tracked so a break lands as soon as the run ends.
+            combo_count += 1
+        elif combo_count >= max_combo_length:
+            obj.is_new_combo = True
+            combo_count = 1
+        else:
+            combo_count += 1
 
 
 def main() -> None:
@@ -1107,7 +1137,7 @@ def main() -> None:
                 # subtype re-roll needed.
                 if combo_curved is None:
                     combo_curved = rng.random() < chain_curviness
-                obj.curve_type = "B" if combo_curved else "L"
+                start_x, start_y = cur_x, cur_y
                 new_points = []
                 for _ in range(num_segments):
                     cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms,
@@ -1115,6 +1145,29 @@ def main() -> None:
                     px, py, cur_angle = place_at_distance(cur_x, cur_y, segment_length, cur_angle)
                     cur_x, cur_y = clamp_to_playfield(px, py, margin=MARGIN)
                     new_points.append((cur_x, cur_y))
+                # A Bezier through several points is guaranteed to stay
+                # within their convex hull -- but that only bounds the
+                # curve osu! actually *defines*, not what it renders: if
+                # the chain folds back sharply enough that a straight line
+                # from the chain's start to its own last waypoint covers
+                # much less ground than its declared travel distance
+                # (obj.length, the sum of every leg's own segment_length),
+                # the Bezier's real arc length falls well short of that
+                # declared length too -- a tightly-curved path is shorter
+                # than the straight legs that define it. osu! then extends
+                # the slider in a straight line past its last point to make
+                # up the shortfall, in whatever direction the curve's own
+                # tangent happens to point there, which is no longer
+                # bounded by anything checked above and can run off the
+                # playfield. A near-straight or gently-curved chain never
+                # triggers this (its arc length already tracks its
+                # declared length closely); only a sharp fold-back does,
+                # so those are forced to a straight polyline instead,
+                # whose rendered length always matches exactly with no
+                # extension possible.
+                end_x, end_y = new_points[-1]
+                straight_span = math.hypot(end_x - start_x, end_y - start_y)
+                obj.curve_type = "B" if (combo_curved and straight_span >= obj.length * 0.5) else "L"
                 obj.points = new_points
 
             prev_end_time = obj.end_time(beat_length_ms, slider_multiplier)
