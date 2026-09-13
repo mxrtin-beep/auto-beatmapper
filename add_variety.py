@@ -513,6 +513,22 @@ def main() -> None:
 
     categories = [classify(e, q_low, q_high) for e in smoothed_energy]
 
+    # Bridge a single isolated non-intense slot sandwiched between two
+    # "intense" ones. Without this, a brief one-slot dip in energy splits
+    # what's really one continuous intense passage into two separate
+    # "intense" runs below, each independently picking its own quarter-
+    # vs-eighth subdivision rate (see run_avg_energy) -- close enough in
+    # time that the player experiences it as one passage that arbitrarily
+    # changes rate partway through, rather than two genuinely distinct
+    # moments in the song. A single-slot gap is too short to read as a
+    # deliberate breather anyway (that's what the "rest" treatment inside
+    # one run is for); a longer dip is left alone, since two intense
+    # passages with real space between them picking different rates is a
+    # legitimate escalation, not a glitch.
+    for idx in range(1, len(categories) - 1):
+        if categories[idx] != "intense" and categories[idx - 1] == "intense" and categories[idx + 1] == "intense":
+            categories[idx] = "intense"
+
     new_objects: list[HitObject] = []
     i = 0
     n = len(circles)

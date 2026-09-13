@@ -71,7 +71,7 @@ import numpy as np
 
 from beatmap_utils import HitObject, PLAYFIELD_H, PLAYFIELD_W, clamp_to_playfield, read_osu, write_osu
 
-MARGIN = 30
+MARGIN = 50  # see clamp_to_playfield's own docstring — sized to the largest circle radius any tier renders
 MIN_SPACING = 10.0    # px, safety floor only — the distance-snap formula rarely needs it
 MAX_SPACING = 600.0   # px, generous safety ceiling (a little over the playfield diagonal)
 
