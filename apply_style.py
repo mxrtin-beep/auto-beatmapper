@@ -89,7 +89,14 @@ MAX_SPACING = 600.0   # px, generous safety ceiling (a little over the playfield
 # with no rhythmic reason to exist, forcing the player onto the same spot
 # for two unrelated hits and then off it again with no warning.
 STACK_ON_PREVIOUS_PROBABILITY = 0.05
-STACK_ON_PREVIOUS_MAX_GAP_BEATS = 0.5  # half a beat or less
+# Quarter-beat-or-less -- the same "fast" definition build_stream_runs
+# itself uses, not a looser one. A half-beat gap (the old threshold) is
+# loose enough to fire right at the tail of an existing quarter-beat-
+# spaced stack: three circles already 120ms apart, then a fourth joining
+# the same exact spot on a 240ms gap reads as "same stack, but the last
+# hit is somehow twice as far as the others" -- confusing precisely
+# because it *looks* like one uniform stack while its own timing isn't.
+STACK_ON_PREVIOUS_MAX_GAP_BEATS = 0.25
 
 # A stack or line run is only ever entered on a short (quarter-beat-or-
 # less) gap -- that's the very definition of the run in build_stream_runs.
@@ -953,7 +960,8 @@ def main() -> None:
             new_x, new_y, _ = place_at_distance(cur_x, cur_y, spacing, line_run_angle)
             cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
             cur_angle = line_run_angle
-        elif leaving_stream and last_stream_mode == "stack" and last_stack_anchor is not None:
+        elif (leaving_stream and last_stream_mode == "stack" and last_stack_anchor is not None
+              and gap_ms <= beat_length_ms * STACK_ON_PREVIOUS_MAX_GAP_BEATS + 1.0):
             # The very first object right after a "stack" run holds the
             # exact same spot as the stack itself, one time only — a
             # stack (all zero px apart) reads as one held-in-place gesture,
@@ -961,6 +969,14 @@ def main() -> None:
             # on its heels undercuts that read; the object *after* this
             # one goes back to normal flow. One-shot: cleared below so a
             # second stream ending later doesn't keep re-triggering it.
+            #
+            # Only when the gap to this object is itself short (same
+            # threshold as STACK_ON_PREVIOUS_PROBABILITY below) -- "right
+            # on its heels" stops being true once the gap widens to, say,
+            # half a beat, and holding the exact same spot regardless of
+            # the gap size produced a stack that *looked* like one uniform
+            # unit while one of its own members sat on a gap twice the
+            # others'. A wide gap instead falls through to ordinary flow.
             cur_x, cur_y = last_stack_anchor
             last_stack_anchor = None
         elif (not obj.is_slider and gap_ms <= beat_length_ms * STACK_ON_PREVIOUS_MAX_GAP_BEATS + 1.0
