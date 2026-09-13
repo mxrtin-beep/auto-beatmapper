@@ -606,7 +606,17 @@ def main() -> None:
             # frequency-weighted choice as everything else; only the
             # no-repeat-treatment rule is skipped for it (too short to
             # read as a repetitive wall either way).
-            p_stream = 0.9 * args.stream_frequency
+            #
+            # The 0.9 multiplier below (rather than 1.0) is a deliberate
+            # recalibration, not the original scale: too many long
+            # intense passages were reading as wall-to-wall individually-
+            # clicked stacks, at the expense of the bounce-slider variety
+            # that's supposed to break them up. Shifted so the flag's own
+            # *displayed* default (0.5) now lands where 0.5 used to feel
+            # like it should have all along — noticeably more bounce
+            # sliders, without calling for a --stream-frequency value the
+            # help text doesn't otherwise justify.
+            p_stream = 0.66 * args.stream_frequency
             p_rest_of = 1.0 - p_stream
             weights = {"stream": p_stream, "bounce": p_rest_of * 0.818, "rest": p_rest_of * 0.182}
             if lookahead_len < 3:

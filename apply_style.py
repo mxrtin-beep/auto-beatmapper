@@ -350,79 +350,15 @@ def place_at_distance(cur_x: float, cur_y: float, spacing: float, angle: float) 
     return x, y, angle
 
 
-def p_curve_arc_bbox(p0: tuple[float, float], p1: tuple[float, float],
-                      p2: tuple[float, float]) -> tuple[float, float, float, float] | None:
-    """Bounding box of the actual rendered arc of a "P" (perfect-circle)
-    slider through (p0, p1, p2) — the arc's *own* extent, not just the
-    bounding box of its three defining points. This is what makes a P
-    curve unsafe in a way a Bezier through the same points never is: all
-    three points can individually sit well inside the playfield while the
-    circular arc connecting them still bulges outside it, whenever the
-    arc's radius is large relative to the chord (near-collinear points
-    especially). Returns None if the three points are exactly collinear
-    (no finite circle fits) — the caller should treat that as unsafe too.
-    """
-    (ax, ay), (bx, by), (cx, cy) = p0, p1, p2
-    d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
-    if abs(d) < 1e-9:
-        return None
-    ux = ((ax**2 + ay**2) * (by - cy) + (bx**2 + by**2) * (cy - ay) + (cx**2 + cy**2) * (ay - by)) / d
-    uy = ((ax**2 + ay**2) * (cx - bx) + (bx**2 + by**2) * (ax - cx) + (cx**2 + cy**2) * (bx - ax)) / d
-    r = math.hypot(ax - ux, ay - uy)
-
-    a0 = math.atan2(ay - uy, ax - ux)
-    a1 = math.atan2(by - uy, bx - ux)
-    a2 = math.atan2(cy - uy, cx - ux)
-
-    def normalize_above(angle: float, ref: float) -> float:
-        while angle < ref:
-            angle += 2 * math.pi
-        while angle > ref + 2 * math.pi:
-            angle -= 2 * math.pi
-        return angle
-
-    # Sweep from a0 to a2 the way that actually passes through a1 (the
-    # slider's own bow/anchor point, its declared shape) -- the *other*
-    # way around the circle is not the arc osu! renders.
-    a2n = normalize_above(a2, a0)
-    a1n = normalize_above(a1, a0)
-    if not (a0 <= a1n <= a2n):
-        a2n = a0 - (2 * math.pi - (a2n - a0))
-    lo, hi = min(a0, a2n), max(a0, a2n)
-
-    xs, ys = [ax, bx, cx], [ay, by, cy]
-    # A coarse sample grid can straddle a sharp protrusion -- a high-
-    # curvature arc (large radius relative to the swept angle) can bulge
-    # past the playfield edge for only a few degrees of its sweep, which
-    # 32 evenly-spaced samples can straddle without ever landing a point
-    # on the actual peak. 128 keeps the worst-case miss to a fraction of a
-    # degree regardless of how tight the bulge is.
-    steps = 128
-    for i in range(steps + 1):
-        angle = lo + (hi - lo) * i / steps
-        xs.append(ux + r * math.cos(angle))
-        ys.append(uy + r * math.sin(angle))
-    return min(xs), max(xs), min(ys), max(ys)
-
-
-def p_curve_fits_playfield(p0: tuple[float, float], p1: tuple[float, float], p2: tuple[float, float],
-                            margin: float) -> bool:
-    """Whether a P-curve slider's actual rendered arc through these three
-    points stays within the playfield margin -- see p_curve_arc_bbox.
-
-    Checked against a slightly wider margin than the one actually used to
-    place the points (+5px) — a cushion against p_curve_arc_bbox's own
-    sampling still being a discrete approximation of a continuous arc,
-    so a real bulge landing between two samples fails this check instead
-    of narrowly passing it.
-    """
-    bbox = p_curve_arc_bbox(p0, p1, p2)
-    if bbox is None:
-        return False
-    xlo, xhi, ylo, yhi = bbox
-    safety_margin = margin + 5.0
-    return (xlo >= safety_margin and xhi <= PLAYFIELD_W - safety_margin
-            and ylo >= safety_margin and yhi <= PLAYFIELD_H - safety_margin)
+# apply_style.py itself no longer generates "P" (perfect-circle) sliders
+# at all (see the single-anchor curved-slider branch below) -- their
+# rendered arc can bulge past the playfield edge even when all three
+# declared points sit inside it, and verifying that against a discrete
+# sample of a continuous arc kept letting real cases through. A Bezier
+# through the same points is used unconditionally instead, since it's
+# mathematically guaranteed to stay within their convex hull with no
+# verification needed. make_easy.py can still encounter a "P" slider
+# left over in an Insane file from an older run and handles it there.
 
 
 def snap_distance(gap_ms: float, beat_length_ms: float, slider_multiplier: float) -> float:
@@ -572,10 +508,23 @@ def build_stream_runs(objects: list[HitObject], beat_length_ms: float, rng: rand
             # first gap that doesn't match gives the change its own
             # entry/exit gap and (if it streams) its own stack position
             # instead.
+            #
+            # Tolerance is 3ms, not 0: every object's time has already
+            # been through at least one write-then-read round trip as a
+            # whole millisecond (read_osu/write_osu round to the nearest
+            # ms), and two *independently* rounded gaps drawn from the
+            # same true continuous value can disagree by up to 2ms in the
+            # worst case (each endpoint off by up to 0.5ms, in opposing
+            # directions, on both gaps) -- an exact-equality check was
+            # splitting a genuinely uniform run into ragged sub-clusters
+            # purely from that rounding noise, not any real timing
+            # difference. 3ms clears that worst case with a hair of
+            # margin while staying far below any real quarter/eighth-beat
+            # difference at any plausible BPM (tens of ms).
             gap = objects[j].time - objects[j - 1].time
             if run_gap_ms is None:
                 run_gap_ms = gap
-            elif abs(gap - run_gap_ms) > 2.0:
+            elif abs(gap - run_gap_ms) > 3.0:
                 break
             j += 1
         run_len = j - i
@@ -862,6 +811,19 @@ def main() -> None:
     last_stream_mode = None  # the mode ("stack"/"line"/"flow") the just-finished run used, if any
     last_stack_anchor = None  # that run's stack spot, if it was a "stack" run — see leaving_stream below
 
+    # A handful of the most recently-established stack spots, so a brand
+    # new stack doesn't land right back on (or almost on) one from just a
+    # few objects ago -- distance-snap and the motif angles both key off
+    # only the *immediately preceding* object, with no memory of anywhere
+    # else the path has recently been, so two unrelated stacks a few beats
+    # apart can coincidentally land on top of each other. That reads as
+    # the player having to double back to a spot they already left,
+    # rather than two genuinely distinct moments in the song. Short
+    # (3 spots) on purpose: this is only meant to break an immediate,
+    # confusing repeat, not to force every stack in the map apart.
+    RECENT_STACK_ANCHOR_MIN_DIST = 70.0
+    recent_stack_anchors: list[tuple[float, float]] = []
+
     # Slider shape consistency within a combo: once the *first* slider in a
     # combo lands on straight or curved, every later slider in that same
     # combo (until the next new-combo) is held to the same choice — a
@@ -934,8 +896,22 @@ def main() -> None:
                 cur_angle = next_angle(cur_angle, tier, obj.time, offset_ms, beat_length_ms, measure_length_ms, measure_buckets, rng, jitter_degrees=args.angle_jitter, measure_repeat_map=measure_repeat_map)
                 cur_angle = wander_nudge(cur_angle, cur_x, cur_y)
                 new_x, new_y, cur_angle = place_at_distance(cur_x, cur_y, spacing, cur_angle)
+                # If that lands too close to one of the last few stacks,
+                # try the opposite direction once instead — still a legal
+                # distance-snapped spot the same distance away, just not
+                # the one that doubles back on a stack the player was
+                # already at recently.
+                if any(math.hypot(new_x - rx, new_y - ry) < RECENT_STACK_ANCHOR_MIN_DIST
+                       for rx, ry in recent_stack_anchors):
+                    flipped_angle = cur_angle + math.pi
+                    flipped_x, flipped_y, flipped_angle = place_at_distance(cur_x, cur_y, spacing, flipped_angle)
+                    if not any(math.hypot(flipped_x - rx, flipped_y - ry) < RECENT_STACK_ANCHOR_MIN_DIST
+                               for rx, ry in recent_stack_anchors):
+                        new_x, new_y, cur_angle = flipped_x, flipped_y, flipped_angle
                 cur_x, cur_y = clamp_to_playfield(new_x, new_y, margin=MARGIN)
                 stack_anchor = (cur_x, cur_y)
+                recent_stack_anchors.append(stack_anchor)
+                del recent_stack_anchors[:-3]
             else:
                 # Every other circle in this run: hold the exact same spot.
                 cur_x, cur_y = stack_anchor
@@ -1058,45 +1034,34 @@ def main() -> None:
                     obj.curve_type = "L"
                     obj.points = [(end_x, end_y)]
                 else:
+                    # Always a quadratic Bezier through (start, bow, end),
+                    # never a "P" (perfect-circle) curve. A P curve's three
+                    # points can each individually sit in bounds while the
+                    # arc actually connecting them still bulges off the
+                    # playfield (its true rendered extent isn't the
+                    # triangle these three points form, especially near-
+                    # collinear) -- p_curve_arc_bbox/p_curve_fits_playfield
+                    # used to verify this and fall back to Bezier when it
+                    # didn't fit, but that still meant trusting a discrete
+                    # sample of a continuous arc to catch every case, and
+                    # kept coming back as a real offscreen slider. A Bezier
+                    # through the same three points is mathematically
+                    # guaranteed to stay within their convex hull, with no
+                    # verification needed at all, so it's used unconditionally
+                    # now; "gentle" vs. "pronounced" is still real shape
+                    # variety, just both expressed as a Bezier bow size
+                    # rather than a separate riskier curve type for the
+                    # larger one.
                     mid_x, mid_y = (cur_x + end_x) / 2.0, (cur_y + end_y) / 2.0
                     perp_angle = end_angle + math.pi / 2
+                    obj.curve_type = "B"
                     subtype_roll = rng.uniform(straight_prob, 1.0)
                     if subtype_roll < bezier_prob:
-                        # A quadratic Bezier through (start, bow, end) — a
-                        # gentle arc. Unlike a "P" (perfect-circle) curve
-                        # with a *small* bow, whose rendered path can swing
-                        # well outside the triangle these three points form
-                        # (and off the visible playfield) when they're close
-                        # to collinear, a Bezier is mathematically
-                        # guaranteed to stay within their convex hull.
-                        obj.curve_type = "B"
                         bow = min(40.0 * bow_scale, segment_length * 0.25 * bow_scale) * bow_jitter
                     else:
-                        # A real circular arc: a pronounced, legible curve
-                        # that actually guides the cursor around a bend.
-                        # The bow is deliberately large relative to the
-                        # chord specifically to stay clear of the near-
-                        # collinear configuration that makes a perfect-
-                        # circle curve balloon outward -- but "less likely"
-                        # isn't "never," especially at high --curviness
-                        # (a larger bow_scale directly widens the bow), so
-                        # this is still verified for real below rather than
-                        # just trusted.
-                        obj.curve_type = "P"
                         bow = min(70.0 * bow_scale, segment_length * 0.45 * bow_scale) * bow_jitter
                     bow_x, bow_y = clamp_to_playfield(mid_x + bow * math.cos(perp_angle),
                                                        mid_y + bow * math.sin(perp_angle), margin=MARGIN)
-                    # A P curve's three points can each individually sit in
-                    # bounds while the arc actually connecting them still
-                    # bulges off the playfield (p_curve_arc_bbox computes
-                    # the arc's own extent, not just its points' bounding
-                    # box) — a Bezier through the exact same three points
-                    # is provably safe instead (always within their convex
-                    # hull), so that's the fallback rather than trying to
-                    # iteratively shrink the bow until it happens to fit.
-                    if obj.curve_type == "P" and not p_curve_fits_playfield(
-                            (cur_x, cur_y), (bow_x, bow_y), (end_x, end_y), MARGIN):
-                        obj.curve_type = "B"
                     obj.points = [(bow_x, bow_y), (end_x, end_y)]
 
                 if obj.slides % 2 == 1:
