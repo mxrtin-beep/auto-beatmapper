@@ -155,10 +155,25 @@ def find_track_end_ms(times_ms: np.ndarray, energy: np.ndarray, floor: float = 0
     return float(times_ms[above[-1]])
 
 
-def hitsound_for(energy_value: float, is_downbeat: bool, q_high: float, q_climax: float) -> int:
-    """Pick a hitsound accent from local loudness and beat position."""
+def hitsound_for(energy_value: float, is_downbeat: bool, is_backbeat: bool, q_high: float, q_climax: float) -> int:
+    """Pick a hitsound accent from local loudness and beat position.
+
+    `is_backbeat` is beat 2 or 4 of the measure (the off-downbeats) --
+    where a clap/snare conventionally lands under the kick-on-every-beat
+    feel of house/EDM, the genre this pipeline's own reference set and
+    typical input skew toward. Without distinguishing it from an ordinary
+    beat, a loud backbeat and a loud "beat 3" (say) picked their accent
+    from energy alone with no regard for *which* beat they were, so the
+    same energy level could land CLAP one measure and WHISTLE the next
+    depending on which beat it happened to fall on -- no repeating
+    pattern for the ear to lock onto. Preferring CLAP specifically on the
+    backbeat (ahead of the plain climax check) gives loud measures a
+    consistent, genre-appropriate kick/clap/kick/clap shape instead.
+    """
     if is_downbeat and energy_value > q_high:
         return HS_FINISH
+    if is_backbeat and energy_value > q_high:
+        return HS_CLAP
     if energy_value > q_climax:
         return HS_CLAP
     if energy_value > q_high:
@@ -228,7 +243,8 @@ def assign_hitsounds(objects: list[HitObject], energy_at, offset_ms: float, meas
             else:
                 e = energy_at(beat_time)
                 on_downbeat = is_on_downbeat(beat_time, offset_ms, measure_length_ms)
-                hs = hitsound_for(e, on_downbeat, q_high, q_climax)
+                on_backbeat = beat_idx % 4 in (1, 3)
+                hs = hitsound_for(e, on_downbeat, on_backbeat, q_high, q_climax)
                 if hs == HS_NORMAL and (last_accent_time is None
                                          or beat_time - last_accent_time > MAX_MS_WITHOUT_ACCENT):
                     hs = HS_WHISTLE
