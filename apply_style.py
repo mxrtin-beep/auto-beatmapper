@@ -1104,11 +1104,28 @@ def main() -> None:
                     subtype_roll = rng.uniform(straight_prob, 1.0)
                     if subtype_roll < bezier_prob:
                         bow = min(40.0 * bow_scale, segment_length * 0.25 * bow_scale) * bow_jitter
+                        angular = False
                     else:
                         bow = min(70.0 * bow_scale, segment_length * 0.45 * bow_scale) * bow_jitter
+                        # Half of this remaining share reads as a sharp
+                        # elbow instead of one more smooth arc -- real
+                        # mapsets lean on this a lot for shape variety
+                        # ours never produced at all. The trick is an
+                        # osu! Bezier-path quirk: repeating the same
+                        # anchor point back to back splits the curve into
+                        # two independent Beziers meeting at that shared
+                        # point instead of blending through it smoothly.
+                        # With only 2 points either side of the repeat
+                        # (start-to-bow, bow-to-end) each side is a
+                        # straight line, so a doubled bow point reads as
+                        # one clean angular "V" bend rather than a curve.
+                        angular = rng.random() < 0.5
                     bow_x, bow_y = clamp_to_playfield(mid_x + bow * math.cos(perp_angle),
                                                        mid_y + bow * math.sin(perp_angle), margin=MARGIN)
-                    obj.points = [(bow_x, bow_y), (end_x, end_y)]
+                    if angular:
+                        obj.points = [(bow_x, bow_y), (bow_x, bow_y), (end_x, end_y)]
+                    else:
+                        obj.points = [(bow_x, bow_y), (end_x, end_y)]
 
                 if obj.slides % 2 == 1:
                     cur_x, cur_y, cur_angle = end_x, end_y, end_angle
