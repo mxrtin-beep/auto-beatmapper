@@ -190,8 +190,14 @@ def assign_hitsounds(objects: list[HitObject], energy_at, offset_ms: float, meas
         plain.
       - otherwise: the whole measure stays plain (HS_NORMAL). Real maps
         spend most of their time silent on hitsounds and punctuate
-        rarely -- there's no forced minimum-accent-frequency floor here
-        anymore; a long plain stretch is the genre norm, not a bug.
+        rarely, which this mostly leaves alone -- but a long enough
+        silent stretch still trips "long period without hitsounds"
+        warnings in osu!'s own map checkers, so a soft whistle is still
+        forced onto a measure's downbeat if MAX_MEASURES_WITHOUT_ACCENT
+        measures have passed with nothing but plain hits. That floor is
+        deliberately much longer than the one-measure version this
+        replaced -- generous enough that real plain stretches still read
+        as plain, only stepping in before a checker actually complains.
 
     `measure_repeat_map` (see find_repeating_measure_map) makes a
     repeating verse/chorus reuse its first pass's own pattern exactly,
@@ -207,7 +213,12 @@ def assign_hitsounds(objects: list[HitObject], energy_at, offset_ms: float, meas
     plain.
     """
     beat_length_ms = measure_length_ms / 4.0
+    # ~15-30s at typical BPM, depending on time signature -- generous
+    # compared to the one-measure floor this replaced, but still short
+    # enough to head off a real "long period without hitsounds" warning.
+    MAX_MEASURES_WITHOUT_ACCENT = 8
     pattern_cache: dict[int, dict[int, int]] = {}
+    last_accent_measure: int | None = None
 
     def pattern_for_measure(measure_idx: int) -> dict[int, int]:
         canonical = measure_idx
@@ -235,7 +246,14 @@ def assign_hitsounds(objects: list[HitObject], energy_at, offset_ms: float, meas
         return pattern_for_measure(measure_idx)[beat_in_measure]
 
     for obj in objects:
-        hs = hitsound_at(obj.time)
+        beat_idx = int(round((obj.time - offset_ms) / beat_length_ms))
+        measure_idx, beat_in_measure = divmod(beat_idx, 4)
+        hs = pattern_for_measure(measure_idx)[beat_in_measure]
+        if (hs == HS_NORMAL and beat_in_measure == 0
+                and (last_accent_measure is None or measure_idx - last_accent_measure > MAX_MEASURES_WITHOUT_ACCENT)):
+            hs = HS_WHISTLE
+        if hs != HS_NORMAL:
+            last_accent_measure = measure_idx
         obj.hitsound = hs
         if obj.is_slider:
             tail_hs = hitsound_at(obj.end_time(beat_length_ms, slider_multiplier))
