@@ -264,16 +264,34 @@ def motif_turn_degrees(tier: str, time_ms: float, offset_ms: float, beat_length_
     the same arrangement; this makes a real repeat read as the exact same
     one, matching how hitsounds and (add_sliders_v2.py's own) circle/
     slider layout already reuse a verse/chorus's first pass.
+
+    A repeat (measure_index != its own raw index, once redirected) plays
+    that motif *mirrored* -- every turn negated -- rather than identical.
+    The reference set's own repeated phrases are exact geometric
+    reflections (same y, x mirrored across the playfield center); doing
+    that literally would mean teleporting the cursor to a mirrored
+    position the instant a repeat measure begins, which breaks distance
+    snap the moment that boundary falls in the middle of an established
+    stack or line run (the whole point of which is to *not* jump on its
+    own terms). Negating every turn instead keeps every position exactly
+    where distance-snap already puts it -- only which way the path bends
+    changes -- so a repeated phrase reads as the first one's mirror image
+    in shape and feel without that risk. The first (canonical) occurrence
+    always plays normally; only its later repeats are mirrored.
     """
     half_beat_ms = beat_length_ms / 2.0
     pos_in_measure = int(round((time_ms - offset_ms) / half_beat_ms)) % HALF_BEAT_STEPS_PER_MEASURE
-    measure_index = int((time_ms - offset_ms) // measure_length_ms)
+    raw_measure_index = int((time_ms - offset_ms) // measure_length_ms)
+    measure_index = raw_measure_index
+    mirrored = False
     if measure_repeat_map is not None:
-        measure_index = measure_repeat_map.get(measure_index, measure_index)
+        measure_index = measure_repeat_map.get(raw_measure_index, raw_measure_index)
+        mirrored = measure_index != raw_measure_index
     bucket = measure_buckets.get(measure_index, 0)
     motifs = MOTIFS[tier]
     motif = motifs[bucket % len(motifs)]
-    return motif[pos_in_measure % len(motif)]
+    turn = motif[pos_in_measure % len(motif)]
+    return -turn if mirrored else turn
 
 
 def next_angle(prev_angle: float, tier: str, time_ms: float, offset_ms: float, beat_length_ms: float,
@@ -1104,28 +1122,11 @@ def main() -> None:
                     subtype_roll = rng.uniform(straight_prob, 1.0)
                     if subtype_roll < bezier_prob:
                         bow = min(40.0 * bow_scale, segment_length * 0.25 * bow_scale) * bow_jitter
-                        angular = False
                     else:
                         bow = min(70.0 * bow_scale, segment_length * 0.45 * bow_scale) * bow_jitter
-                        # Half of this remaining share reads as a sharp
-                        # elbow instead of one more smooth arc -- real
-                        # mapsets lean on this a lot for shape variety
-                        # ours never produced at all. The trick is an
-                        # osu! Bezier-path quirk: repeating the same
-                        # anchor point back to back splits the curve into
-                        # two independent Beziers meeting at that shared
-                        # point instead of blending through it smoothly.
-                        # With only 2 points either side of the repeat
-                        # (start-to-bow, bow-to-end) each side is a
-                        # straight line, so a doubled bow point reads as
-                        # one clean angular "V" bend rather than a curve.
-                        angular = rng.random() < 0.5
                     bow_x, bow_y = clamp_to_playfield(mid_x + bow * math.cos(perp_angle),
                                                        mid_y + bow * math.sin(perp_angle), margin=MARGIN)
-                    if angular:
-                        obj.points = [(bow_x, bow_y), (bow_x, bow_y), (end_x, end_y)]
-                    else:
-                        obj.points = [(bow_x, bow_y), (end_x, end_y)]
+                    obj.points = [(bow_x, bow_y), (end_x, end_y)]
 
                 if obj.slides % 2 == 1:
                     cur_x, cur_y, cur_angle = end_x, end_y, end_angle
