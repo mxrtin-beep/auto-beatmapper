@@ -50,12 +50,13 @@ Five motifs, chosen independently at each candidate spot:
     where an earlier object ended — "this slider starts where that one
     finished", or two circles stacked on the same spot.
 
-A circle that's eighth-note-or-closer to its neighbor on either side is
-left alone by every motif above, whether as the object a motif would move
-or as a partner another motif would move to meet — those runs already
-read as one continuous stream/stack, and yanking one note out of that
-flow into a polygon vertex or a mirrored/echoed spot reads as a mistake,
-not a motif (see STREAM_GAP_BEATS below).
+A circle that's sixteenth-note-or-closer to its neighbor on either side
+is left alone by every motif above, whether as the object a motif would
+move or as a partner another motif would move to meet — those runs
+already read as one continuous stream/stack, and yanking one note out of
+that flow into a polygon vertex or a mirrored/echoed spot reads as a
+mistake, not a motif. Eighth notes are fair game (see STREAM_GAP_BEATS
+below).
 
 Run standalone against an already-styled/-derived .osu file:
 
@@ -103,16 +104,20 @@ FAN_SIZES = (2, 3, 4)
 PARTNER_LOOKAHEAD = 6
 
 # A circle spaced this close (in beats) to its neighbor on either side --
-# eighth-note or faster -- is part of a stream/stack, not an isolated
+# sixteenth-note or faster -- is part of a stream/stack, not an isolated
 # circle. Those runs already read as one continuous motion by design (see
 # add_variety.py's own "stream"/climax handling); yanking one note out to
 # a polygon vertex or a mirrored/echoed spot breaks that flow far worse
 # than it would for a circle with normal breathing room around it, so
 # every motif here leaves stream circles alone -- both as the object a
-# motif would move, and as a partner another motif would move to. A small
-# tolerance covers rounding in the beat-length arithmetic that produced
-# the gap in the first place.
-STREAM_GAP_BEATS = 0.5
+# motif would move, and as a partner another motif would move to.
+# Eighth notes (0.5 beats) are *not* excluded -- on a dense/stream-heavy
+# map those make up most of the material flair actually has to work
+# with, and an eighth-note run still reads fine as a polygon/star/
+# constellation once it's placed deliberately rather than along the
+# usual distance-snapped flow. A small tolerance covers rounding in the
+# beat-length arithmetic that produced the gap in the first place.
+STREAM_GAP_BEATS = 0.25
 STREAM_GAP_TOLERANCE_MS = 2.0
 
 
@@ -254,8 +259,8 @@ def _apply_echo(objects: List[HitObject], i: int, j: int) -> None:
 # --- Scanning the map for candidate spots -----------------------------------
 
 def _stream_circles(objects: Sequence[HitObject], beat_length_ms: float, slider_multiplier: float) -> List[bool]:
-    """Per-object flag: is this a circle sitting at eighth-note-or-faster
-    spacing from the object right before or right after it? See
+    """Per-object flag: is this a circle sitting at sixteenth-note-or-
+    faster spacing from the object right before or right after it? See
     STREAM_GAP_BEATS's own comment for why those are off-limits to every
     motif below."""
     n = len(objects)
