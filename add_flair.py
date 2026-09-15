@@ -24,7 +24,7 @@ untouched), hitsounds, or combos — a beatmap run through this is still
 byte-for-byte the same rhythm, just with some of its jumps replaced by a
 motif.
 
-Five motifs, chosen independently at each candidate spot:
+Nine motifs, chosen independently at each candidate spot:
 
   * "polygon"      — a run of 3-9 consecutive circles placed at the
     vertices of a regular polygon (or, for run lengths that support it,
@@ -39,8 +39,17 @@ Five motifs, chosen independently at each candidate spot:
   * "fan"          — a run of 2-4 consecutive sliders all starting from
     the same point and fanning out to their own (otherwise unchanged)
     shapes and endpoints, like a mapper reusing one anchor for several
-    sliders in a row -- the other look a slider run can get, chosen
-    against "constellation" at random.
+    sliders in a row -- one of three looks a slider run can get, chosen
+    against "constellation"/"pinwheel" at random.
+  * "pinwheel"     — a run of 2 or 3 consecutive sliders sharing one
+    start point, where every slider after the first is the *first*
+    one's own shape rotated by 360/n degrees around that point -- 180
+    degrees apart for a pair, 120 for a triple -- true rotational
+    symmetry, unlike "fan" (same shared point, but each slider keeps
+    its own independent shape).
+  * "alternating"  — exactly 4 consecutive circles, evenly spaced in
+    time, bounced between two spots: the 1st and 3rd share one, the 2nd
+    and 4th share the other.
   * "mirror"       — two same-type objects (both circles or both sliders)
     within a few notes of each other, where the second is placed as a
     reflection of the first across the playfield's center point or one
@@ -49,6 +58,16 @@ Five motifs, chosen independently at each candidate spot:
   * "echo"         — the next object is pulled back to start exactly
     where an earlier object ended — "this slider starts where that one
     finished", or two circles stacked on the same spot.
+  * "overlap"      — two sliders, both forced straight, placed on the
+    exact same line through the first one's own position — either both
+    starting at the shared point and heading the same way (so the
+    shorter one's line is a literal prefix of the longer one's), or the
+    second starting where the first ends and heading back the other way
+    (retracing/opposing the same stretch). Only ever applied to sliders.
+  * "parallel"     — the same straight-line construction as "overlap",
+    but offset sideways onto a second, parallel line instead of the
+    same one, always heading the opposite way -- two lanes running
+    against each other rather than one retraced line.
 
 A circle that's 32nd-note-or-closer to its neighbor on either side is
 left alone by every motif above, whether as the object a motif would
@@ -58,12 +77,13 @@ that flow into a polygon vertex or a mirrored/echoed spot reads as a
 mistake, not a motif. Eighth and sixteenth notes are fair game (see
 STREAM_GAP_BEATS below).
 
-"polygon"/"constellation" only ever claim objects that are actually
-*evenly* spaced in time (see `_run_length`'s own docstring) — a run
-picked purely by type/eligibility could otherwise span a real musical
-gap (nothing disqualifying happened to fall between two notes a whole
-phrase apart), and the resulting shape read as "the last vertex has a
-weirdly long pause before it" instead of one drawn gesture.
+Every run-based motif ("polygon"/"constellation"/"fan"/"pinwheel"/
+"alternating") only ever claims objects that are actually *evenly*
+spaced in time (see `_run_length`'s own docstring) — a run picked purely
+by type/eligibility could otherwise span a real musical gap (nothing
+disqualifying happened to fall between two notes a whole phrase apart),
+and the resulting shape read as "the last vertex has a weirdly long
+pause before it" instead of one drawn gesture.
 
 Once a "polygon"/"constellation" lands on a given measure, the exact
 same shape (not just the same *kind* of motif) gets replayed on every
@@ -111,6 +131,20 @@ STAR_SKIPS = {5: 2, 7: 2, 8: 3, 9: 2}
 # just never show up in practice.
 POLYGON_SIZES = (3, 4, 5, 6, 7, 8, 9)
 FAN_SIZES = (2, 3, 4)
+# "pinwheel": a run of 2 (180 degrees apart) or 3 (120 degrees apart)
+# consecutive sliders, each a rotated copy of the first one's own shape
+# around their shared start point -- true rotational symmetry, unlike
+# "fan" (same shared point, but each slider keeps its own independent
+# shape).
+PINWHEEL_SIZES = (2, 3)
+# "alternating": always exactly 4 circles, 1st/3rd sharing one spot and
+# 2nd/4th sharing another.
+ALTERNATING_SIZE = 4
+# How far apart the two spots "alternating" bounces between are, in px.
+ALTERNATING_DISTANCE_RANGE = (70.0, 160.0)
+# How far apart the two lines "parallel" places its pair of straight
+# sliders' lines, in px -- 0 would just be "overlap" again.
+PARALLEL_SEPARATION_RANGE = (40.0, 90.0)
 # How many objects ahead "mirror"/"echo" are allowed to look for a partner
 # -- far enough to skip past an object or two already claimed by another
 # motif, close enough that the pairing still reads as related rather than
@@ -262,6 +296,66 @@ def _apply_fan(objects: List[HitObject], start: int, n: int) -> None:
         _translate_object(obj, dx, dy, MARGIN)
 
 
+def _apply_pinwheel(objects: List[HitObject], start: int, n: int, rng: random.Random) -> bool:
+    """A run of `n` (2 or 3) sliders sharing one pivot point, where every
+    slider after the first is the *first* slider's own shape rotated by
+    360/n degrees around that pivot for each step -- 180 degrees apart
+    for a pair, 120 for a triple. Scaled per-slider by its own
+    length/the pivot's length first, the same similarity-transform trick
+    "mirror" uses, so every rotated copy's geometric length still
+    matches its own (unchanged) declared `length`. Returns False and
+    leaves every object untouched if the rotated formation can't be
+    made to fit the playfield at all -- the caller should treat that as
+    "this spot doesn't get this motif" rather than a partial pattern."""
+    base = objects[start]
+    pivot = (float(base.x), float(base.y))
+    direction = rng.choice((1, -1))
+    step = direction * (2 * math.pi / n)
+
+    shapes = [[(base.x, base.y)] + list(base.points)]
+    for k in range(1, n):
+        obj = objects[start + k]
+        scale = obj.length / base.length if base.length > 0 else 1.0
+        angle = step * k
+        cos_a, sin_a = math.cos(angle), math.sin(angle)
+        pts = []
+        for px, py in [(base.x, base.y)] + list(base.points):
+            ox, oy = (px - pivot[0]) * scale, (py - pivot[1]) * scale
+            pts.append((pivot[0] + ox * cos_a - oy * sin_a, pivot[1] + ox * sin_a + oy * cos_a))
+        shapes.append(pts)
+
+    all_points = [p for shape in shapes for p in shape]
+    dx, dy = _shift_into_bounds(all_points, MARGIN)
+    shifted = [[(x + dx, y + dy) for x, y in shape] for shape in shapes]
+    if not all(MARGIN <= x <= PLAYFIELD_W - MARGIN and MARGIN <= y <= PLAYFIELD_H - MARGIN
+               for shape in shifted for x, y in shape):
+        return False
+
+    for k in range(n):
+        obj = objects[start + k]
+        pts = shifted[k]
+        obj.curve_type = base.curve_type
+        obj.x, obj.y = round(pts[0][0]), round(pts[0][1])
+        obj.points = [(round(x), round(y)) for x, y in pts[1:]]
+    return True
+
+
+def _apply_alternating_pair(objects: List[HitObject], start: int, rng: random.Random) -> None:
+    """Exactly 4 circles: the 1st and 3rd land on one spot, the 2nd and
+    4th on another -- a two-point bounce rather than a shape with more
+    vertices."""
+    group = objects[start:start + ALTERNATING_SIZE]
+    cx = sum(o.x for o in group) / len(group)
+    cy = sum(o.y for o in group) / len(group)
+    distance = rng.uniform(*ALTERNATING_DISTANCE_RANGE)
+    angle = rng.uniform(0.0, 2 * math.pi)
+    dx, dy = math.cos(angle), math.sin(angle)
+    ax, ay = clamp_to_playfield(cx - distance / 2 * dx, cy - distance / 2 * dy, int(MARGIN))
+    bx, by = clamp_to_playfield(cx + distance / 2 * dx, cy + distance / 2 * dy, int(MARGIN))
+    for k, obj in enumerate(group):
+        obj.x, obj.y = (ax, ay) if k % 2 == 0 else (bx, by)
+
+
 def _apply_mirror(objects: List[HitObject], i: int, j: int, rng: random.Random) -> None:
     a, b = objects[i], objects[j]
     mode = rng.choice(("point", "horizontal", "vertical"))
@@ -308,6 +402,63 @@ def _apply_mirror(objects: List[HitObject], i: int, j: int, rng: random.Random) 
         _translate_object(b, new_bx - b.x, new_by - b.y, MARGIN)
     else:
         b.x, b.y = new_bx, new_by
+
+
+def _place_two_straight_sliders(a: HitObject, b: HitObject, mode: str, separation: float,
+                                 rng: random.Random) -> bool:
+    """Force both A and B into straight ("L", single-anchor) sliders
+    sharing one line (or, with `separation` > 0, two parallel lines that
+    distance apart) through A's own existing position -- built directly
+    from each slider's own (unchanged) declared `length`, so the anchor
+    *is* exactly `length` px from the head with nothing for osu! to
+    extrapolate, the same guarantee "mirror"'s scaling trick gives a
+    copied curve.
+
+    mode "same": both start at the shared point, heading the same way,
+    so the shorter slider's line is a literal prefix of the longer
+    one's -- "perfectly overlapping" (separation 0) or two parallel
+    lines pointing the same way (separation > 0).
+    mode "opposite": B starts where A's line ends (offset by
+    `separation` sideways) and heads back the other way, so the two
+    read as retracing/opposing the same stretch.
+
+    Tries several random headings and keeps the first that lands every
+    point in bounds; returns False (leaving both sliders untouched) if
+    none of them do."""
+    if a.length <= 0 or b.length <= 0:
+        return False
+    origin = (float(a.x), float(a.y))
+    for _ in range(32):
+        angle = rng.uniform(0.0, 2 * math.pi)
+        dx, dy = math.cos(angle), math.sin(angle)
+        px, py = -dy, dx
+        ox, oy = origin[0] + separation * px, origin[1] + separation * py
+        a_tail = (origin[0] + a.length * dx, origin[1] + a.length * dy)
+        if mode == "same":
+            b_head = (ox, oy)
+            b_tail = (ox + b.length * dx, oy + b.length * dy)
+        else:  # "opposite"
+            b_head = (ox + a.length * dx, oy + a.length * dy)
+            b_tail = (b_head[0] - b.length * dx, b_head[1] - b.length * dy)
+        candidates = [origin, a_tail, b_head, b_tail]
+        if all(MARGIN <= x <= PLAYFIELD_W - MARGIN and MARGIN <= y <= PLAYFIELD_H - MARGIN
+               for x, y in candidates):
+            a.curve_type = "L"
+            a.points = [(round(a_tail[0]), round(a_tail[1]))]
+            b.curve_type = "L"
+            b.x, b.y = round(b_head[0]), round(b_head[1])
+            b.points = [(round(b_tail[0]), round(b_tail[1]))]
+            return True
+    return False
+
+
+def _apply_overlap(a: HitObject, b: HitObject, rng: random.Random) -> bool:
+    return _place_two_straight_sliders(a, b, rng.choice(("same", "opposite")), 0.0, rng)
+
+
+def _apply_parallel(a: HitObject, b: HitObject, rng: random.Random) -> bool:
+    separation = rng.uniform(*PARALLEL_SEPARATION_RANGE)
+    return _place_two_straight_sliders(a, b, "opposite", separation, rng)
 
 
 def _apply_echo(objects: List[HitObject], i: int, j: int) -> None:
@@ -470,25 +621,26 @@ def apply_flair(bm: Beatmap, rng: random.Random, probability: float = 0.35) -> i
             i += 1
             continue
 
-        # The run-based motifs (polygon for a circle run; constellation
-        # *or* fan for a slider run) go first whenever one is actually
-        # available at this spot -- mirror/echo only need a single free
-        # partner somewhere in the next few objects, so they succeed far
-        # more often than a real 3+-long run comes along; trying them
-        # first (or shuffled in) meant they kept claiming objects out from
+        # The run-based motifs (polygon/alternating for a circle run;
+        # constellation/fan/pinwheel for a slider run) go first whenever
+        # one is actually available at this spot -- the pair-based ones
+        # (mirror/echo/overlap/parallel) only need a single free partner
+        # somewhere in the next few objects, so they succeed far more
+        # often than a real 3+-long run comes along; trying them first
+        # (or shuffled in) meant they kept claiming objects out from
         # under the run-based motifs before those ever got a turn, so
-        # polygons/stars/constellations showed up far less than the runs
-        # in the map could actually support. Between the two slider
-        # looks, and between mirror/echo, order is still random.
+        # shapes showed up far less than the runs in the map could
+        # actually support. Order within each group is still random.
         if not obj.is_slider:
-            primary = ["polygon"]
+            primary = ["polygon", "alternating"]
+            rest = ["mirror", "echo"]
         else:
-            primary = ["constellation", "fan"]
-            rng.shuffle(primary)
-        rest = ["mirror", "echo"]
+            primary = ["constellation", "fan", "pinwheel"]
+            rest = ["mirror", "echo", "overlap", "parallel"]
+        rng.shuffle(primary)
         rng.shuffle(rest)
         kinds = primary + rest
-        run_based = {"polygon", "constellation", "fan"}
+        run_based = {"polygon", "constellation", "fan", "pinwheel", "alternating"}
         claimed = 0
         for kind in kinds:
             if kind == "polygon":
@@ -520,6 +672,23 @@ def apply_flair(bm: Beatmap, rng: random.Random, probability: float = 0.35) -> i
                 size = rng.choice(sizes)
                 _apply_fan(objects, i, size)
                 claimed = size
+            elif kind == "pinwheel":
+                run = _run_length(objects, i, used, stream, want_slider=True,
+                                   beat_length_ms=bm.beat_length, slider_multiplier=bm.slider_multiplier)
+                sizes = [s for s in PINWHEEL_SIZES if s <= run]
+                if not sizes:
+                    continue
+                size = rng.choice(sizes)
+                if not _apply_pinwheel(objects, i, size, rng):
+                    continue
+                claimed = size
+            elif kind == "alternating":
+                run = _run_length(objects, i, used, stream, want_slider=False,
+                                   beat_length_ms=bm.beat_length, slider_multiplier=bm.slider_multiplier)
+                if run < ALTERNATING_SIZE:
+                    continue
+                _apply_alternating_pair(objects, i, rng)
+                claimed = ALTERNATING_SIZE
             elif kind == "mirror":
                 partner = _find_partner(objects, used, stream, i, PARTNER_LOOKAHEAD, same_type=True)
                 if partner is None:
@@ -527,11 +696,23 @@ def apply_flair(bm: Beatmap, rng: random.Random, probability: float = 0.35) -> i
                 _apply_mirror(objects, i, partner, rng)
                 used[partner] = True
                 claimed = 1
-            else:  # "echo"
+            elif kind == "echo":
                 partner = _find_partner(objects, used, stream, i, PARTNER_LOOKAHEAD, same_type=False)
                 if partner is None:
                     continue
                 _apply_echo(objects, i, partner)
+                used[partner] = True
+                claimed = 1
+            elif kind == "overlap":
+                partner = _find_partner(objects, used, stream, i, PARTNER_LOOKAHEAD, same_type=True)
+                if partner is None or not _apply_overlap(objects[i], objects[partner], rng):
+                    continue
+                used[partner] = True
+                claimed = 1
+            else:  # "parallel"
+                partner = _find_partner(objects, used, stream, i, PARTNER_LOOKAHEAD, same_type=True)
+                if partner is None or not _apply_parallel(objects[i], objects[partner], rng):
+                    continue
                 used[partner] = True
                 claimed = 1
 
