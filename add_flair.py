@@ -24,25 +24,31 @@ untouched), hitsounds, or combos — a beatmap run through this is still
 byte-for-byte the same rhythm, just with some of its jumps replaced by a
 motif.
 
-Four motifs, chosen independently at each candidate spot:
+Five motifs, chosen independently at each candidate spot:
 
-  * "polygon" — a run of 3-6 consecutive circles placed at the vertices
-    of a regular polygon (or, for run lengths that support it, a star/
-    flower — the same vertices connected in skip-one-or-two order, e.g.
-    a pentagram out of 5 circles) around a center near where that run
-    would otherwise have landed.
-  * "fan"     — a run of 2-4 consecutive sliders all starting from the
-    same point and fanning out to their own (otherwise unchanged) shapes
-    and endpoints, like a mapper reusing one anchor for several sliders
-    in a row.
-  * "mirror"  — two same-type objects (both circles or both sliders)
+  * "polygon"      — a run of 3-9 consecutive circles placed at the
+    vertices of a regular polygon (or, for run lengths that support it,
+    a star/flower — the same vertices connected in skip-one-or-two
+    order, e.g. a pentagram out of 5 circles) around a center near where
+    that run would otherwise have landed.
+  * "constellation" — the same polygon/star treatment, but for a run of
+    3-9 consecutive sliders: each keeps its own shape, just translated
+    so its head lands on the vertex, so a long run of otherwise-isolated
+    sliders reads as one deliberate shape instead of a chain of
+    unrelated jumps.
+  * "fan"          — a run of 2-4 consecutive sliders all starting from
+    the same point and fanning out to their own (otherwise unchanged)
+    shapes and endpoints, like a mapper reusing one anchor for several
+    sliders in a row -- the other look a slider run can get, chosen
+    against "constellation" at random.
+  * "mirror"       — two same-type objects (both circles or both sliders)
     within a few notes of each other, where the second is placed as a
     reflection of the first across the playfield's center point or one
     of its axes (and, for sliders, given a mirrored copy of the first
     one's shape).
-  * "echo"    — the next object is pulled back to start exactly where an
-    earlier object ended — "this slider starts where that one finished",
-    or two circles stacked on the same spot.
+  * "echo"         — the next object is pulled back to start exactly
+    where an earlier object ended — "this slider starts where that one
+    finished", or two circles stacked on the same spot.
 
 A circle that's eighth-note-or-closer to its neighbor on either side is
 left alone by every motif above, whether as the object a motif would move
@@ -191,7 +197,14 @@ def _polygon_vertices(center: Tuple[float, float], radius: float, n: int,
 
 # --- The four motifs ---------------------------------------------------------
 
-def _apply_polygon(objects: List[HitObject], start: int, n: int, rng: random.Random) -> None:
+def _apply_shape_run(objects: List[HitObject], start: int, n: int, rng: random.Random) -> None:
+    """Place a run of `n` objects -- circles ("polygon") or, just as well,
+    sliders ("constellation": each keeps its own shape, translated so its
+    head lands on the vertex) -- on a regular polygon or star/flower.
+    Translation (not a direct coordinate overwrite) is what makes this
+    safe for sliders too: it moves a slider's whole curve as one rigid
+    piece instead of just its head, so the shape/length (and so duration)
+    survive untouched."""
     group = objects[start:start + n]
     cx = sum(o.x for o in group) / n
     cy = sum(o.y for o in group) / n
@@ -204,8 +217,8 @@ def _apply_polygon(objects: List[HitObject], start: int, n: int, rng: random.Ran
     direction = rng.choice((1, -1))
     start_angle = rng.uniform(0.0, 2 * math.pi)
     verts = _polygon_vertices(center, radius, n, start_angle, direction, skip)
-    for obj, (x, y) in zip(group, verts):
-        obj.x, obj.y = clamp_to_playfield(x, y, int(MARGIN))
+    for obj, (vx, vy) in zip(group, verts):
+        _translate_object(obj, vx - obj.x, vy - obj.y, MARGIN)
 
 
 def _apply_fan(objects: List[HitObject], start: int, n: int) -> None:
@@ -309,18 +322,25 @@ def apply_flair(bm: Beatmap, rng: random.Random, probability: float = 0.35) -> i
             i += 1
             continue
 
-        # The run-based motif (polygon for a circle run, fan for a slider
-        # run) goes first whenever it's actually available at this spot --
-        # mirror/echo only need a single free partner somewhere in the next
-        # few objects, so they succeed far more often than a real 3+-long
-        # run comes along; trying them first (or shuffled in) meant they
-        # kept claiming objects out from under polygon/fan before those
-        # ever got a turn, so polygons/stars showed up far less than the
-        # runs in the map could actually support. mirror and echo still
-        # split any leftover chance at this spot in random order.
+        # The run-based motifs (polygon for a circle run; constellation
+        # *or* fan for a slider run) go first whenever one is actually
+        # available at this spot -- mirror/echo only need a single free
+        # partner somewhere in the next few objects, so they succeed far
+        # more often than a real 3+-long run comes along; trying them
+        # first (or shuffled in) meant they kept claiming objects out from
+        # under the run-based motifs before those ever got a turn, so
+        # polygons/stars/constellations showed up far less than the runs
+        # in the map could actually support. Between the two slider
+        # looks, and between mirror/echo, order is still random.
+        if not obj.is_slider:
+            primary = ["polygon"]
+        else:
+            primary = ["constellation", "fan"]
+            rng.shuffle(primary)
         rest = ["mirror", "echo"]
         rng.shuffle(rest)
-        kinds = ["polygon" if not obj.is_slider else "fan"] + rest
+        kinds = primary + rest
+        run_based = {"polygon", "constellation", "fan"}
         claimed = 0
         for kind in kinds:
             if kind == "polygon":
@@ -329,7 +349,15 @@ def apply_flair(bm: Beatmap, rng: random.Random, probability: float = 0.35) -> i
                 if not sizes:
                     continue
                 size = rng.choice(sizes)
-                _apply_polygon(objects, i, size, rng)
+                _apply_shape_run(objects, i, size, rng)
+                claimed = size
+            elif kind == "constellation":
+                run = _run_length(objects, i, used, stream, want_slider=True)
+                sizes = [s for s in POLYGON_SIZES if s <= run]
+                if not sizes:
+                    continue
+                size = rng.choice(sizes)
+                _apply_shape_run(objects, i, size, rng)
                 claimed = size
             elif kind == "fan":
                 run = _run_length(objects, i, used, stream, want_slider=True)
@@ -355,10 +383,10 @@ def apply_flair(bm: Beatmap, rng: random.Random, probability: float = 0.35) -> i
                 claimed = 1
 
             if claimed:
-                for k in range(i, i + claimed if kind in ("polygon", "fan") else i + 1):
+                for k in range(i, i + claimed if kind in run_based else i + 1):
                     used[k] = True
                 applied += 1
-                i += claimed if kind in ("polygon", "fan") else 1
+                i += claimed if kind in run_based else 1
                 break
         else:
             i += 1
