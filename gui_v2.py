@@ -69,7 +69,7 @@ STYLED_VERSION = "Insane"
 # file; the GUI's "Add artistic flair" checkbox is an on/off switch, not
 # another dial, so it just fixes a single reasonable density here rather
 # than exposing --probability as yet another slider.
-FLAIR_PROBABILITY = 0.45
+FLAIR_PROBABILITY = 0.65
 
 
 @dataclass
