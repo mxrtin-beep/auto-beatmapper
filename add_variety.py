@@ -155,93 +155,112 @@ def find_track_end_ms(times_ms: np.ndarray, energy: np.ndarray, floor: float = 0
     return float(times_ms[above[-1]])
 
 
-def hitsound_for(energy_value: float, is_downbeat: bool, q_high: float, q_climax: float) -> int:
-    """Pick a hitsound accent from local loudness and beat position."""
-    if is_downbeat and energy_value > q_high:
-        return HS_FINISH
-    if energy_value > q_climax:
-        return HS_CLAP
-    if energy_value > q_high:
-        return HS_WHISTLE
-    return HS_NORMAL
-
-
-
 def assign_hitsounds(objects: list[HitObject], energy_at, offset_ms: float, measure_length_ms: float,
-                      q_high: float, q_climax: float, measure_repeat_map: dict[int, int] | None = None) -> None:
+                      q_high: float, q_climax: float, slider_multiplier: float = 1.4,
+                      measure_repeat_map: dict[int, int] | None = None) -> None:
     """Assign every object's hitsound (and, for sliders, edge_hitsounds) from
-    local loudness and downbeat position, mutating `objects` in place.
-    Shared between add_variety.py's own pipeline and add_sliders_v2.py (the
-    Base Map v2 pathway) — a map with every object left on the default
-    "normal" sample reads as broken/unfinished to any checker.
+    local loudness and beat-in-measure position, mutating `objects` in
+    place. Shared between add_variety.py's own pipeline and
+    add_sliders_v2.py (the Base Map v2 pathway).
 
-    Decided once per whole beat, not once per object: checking the
-    reference set (example/keha_backstabber/) found every hitsound change
-    lines up with a whole- or half-beat position, never switching between
-    two objects that share the same whole beat, and a real accent (clap/
-    finish) tends to land on one consistent beat of the bar (e.g. the
-    backbeat) rather than flickering note to note the way sampling energy
-    per-object could when it hovers right at a quantile threshold. All
-    objects within the same beat share one hitsound, decided from that
-    beat's own energy (sampled at its start) and whether it's a downbeat.
+    Decided once per whole *measure*, not per beat or per object, from a
+    fixed 4-slot pattern (one hitsound per beat-in-measure) that every
+    beat sharing that measure just looks up. Comparing against a real
+    ranked reference set (Dark Necessities [Insane]) found accents follow
+    a fixed, repeating positional pattern -- the same beat-in-measure
+    (e.g. "beat 4 of every 4-bar phrase") carries the same accent every
+    time a section this loud recurs, not a value re-derived from that
+    beat's own (slightly different every time) energy. The old per-beat
+    version picked independently beat to beat, so the same energy level
+    could land a CLAP on one measure's beat 2 and a plain WHISTLE on the
+    next measure's beat 2 -- no pattern for the ear to lock onto. This
+    also matches the reference in being much sparser: most measures are
+    entirely plain, with one deliberate accent standing out, rather than
+    every measure carrying its own energy-driven mix.
 
-    `measure_repeat_map` (see find_repeating_measure_map) is optional but
-    strongly recommended — without it, a verse's second pass gets its own
-    hitsounds decided independently from its own (very similar, but not
-    identical) energy, which drifts from the first pass's choices exactly
-    where the reference set stays consistent. When given, a beat whose
-    measure repeats an earlier one just copies that earlier measure's own
-    corresponding beat, if it made one — a section's own accent pattern
-    replaying, not a coincidence.
+    Pattern, per measure, from that measure's own energy sampled once at
+    its downbeat:
+      - climax (> q_climax): beat 0 (downbeat) gets FINISH, plus one of
+        beat 2/4 (the backbeat, where a clap/snare conventionally lands
+        under a kick-every-beat feel) gets CLAP -- *which* of the two is
+        picked once via a seed keyed to the measure index, so the same
+        measure always makes the same choice rather than a fresh
+        coin-flip that would itself look inconsistent on a repeat.
+      - loud (> q_high): beat 0 gets a lighter WHISTLE, everything else
+        plain.
+      - otherwise: the whole measure stays plain (HS_NORMAL). Real maps
+        spend most of their time silent on hitsounds and punctuate
+        rarely, which this mostly leaves alone -- but a long enough
+        silent stretch still trips "long period without hitsounds"
+        warnings in osu!'s own map checkers, so a soft whistle is still
+        forced onto a measure's downbeat if MAX_MEASURES_WITHOUT_ACCENT
+        measures have passed with nothing but plain hits. That floor is
+        deliberately much longer than the one-measure version this
+        replaced -- generous enough that real plain stretches still read
+        as plain, only stepping in before a checker actually complains.
 
-    A bouncing slider only accents its head — repeating the same clap/
-    finish on every one of a dozen rapid reversals is jarring rather than
-    emphatic, so its repeats and tail stay a plain normal sample instead.
-    A long quiet/normal stretch can otherwise go many measures with every
-    hit landing on plain HS_NORMAL, which itself reads as "no hitsounds"
-    to a checker — at least a soft whistle is forced often enough that
-    never happens, even where the energy alone wouldn't have earned one.
+    `measure_repeat_map` (see find_repeating_measure_map) makes a
+    repeating verse/chorus reuse its first pass's own pattern exactly,
+    on top of the per-measure determinism above -- belt and suspenders
+    for the same goal.
+
+    A slider's head and tail can carry different hitsounds too (the
+    reference set does this constantly, e.g. a slider starting on a
+    plain beat and ending right as the phrase's own accent beat lands) --
+    the tail (and, for a repeating slider, each subsequent edge) looks up
+    whichever beat-in-measure the slider's own end time actually falls
+    on, rather than blindly repeating the head's sound or defaulting to
+    plain.
     """
     beat_length_ms = measure_length_ms / 4.0
-    MAX_MS_WITHOUT_ACCENT = measure_length_ms
-    last_accent_time = None
-    beat_hitsound: dict[int, int] = {}
+    # ~15-30s at typical BPM, depending on time signature -- generous
+    # compared to the one-measure floor this replaced, but still short
+    # enough to head off a real "long period without hitsounds" warning.
+    MAX_MEASURES_WITHOUT_ACCENT = 8
+    pattern_cache: dict[int, dict[int, int]] = {}
+    last_accent_measure: int | None = None
+
+    def pattern_for_measure(measure_idx: int) -> dict[int, int]:
+        canonical = measure_idx
+        if measure_repeat_map is not None:
+            canonical = measure_repeat_map.get(measure_idx, measure_idx)
+        cached = pattern_cache.get(canonical)
+        if cached is not None:
+            return cached
+
+        measure_time = offset_ms + canonical * measure_length_ms
+        e = energy_at(measure_time)
+        pattern = {0: HS_NORMAL, 1: HS_NORMAL, 2: HS_NORMAL, 3: HS_NORMAL}
+        if e > q_climax:
+            pattern[0] = HS_FINISH
+            backbeat_rng = random.Random(f"hitsound_backbeat:{canonical}")
+            pattern[backbeat_rng.choice([1, 3])] = HS_CLAP
+        elif e > q_high:
+            pattern[0] = HS_WHISTLE
+        pattern_cache[canonical] = pattern
+        return pattern
+
+    def hitsound_at(time_ms: float) -> int:
+        beat_idx = int(round((time_ms - offset_ms) / beat_length_ms))
+        measure_idx, beat_in_measure = divmod(beat_idx, 4)
+        return pattern_for_measure(measure_idx)[beat_in_measure]
+
     for obj in objects:
         beat_idx = int(round((obj.time - offset_ms) / beat_length_ms))
-        if beat_idx not in beat_hitsound:
-            beat_time = offset_ms + beat_idx * beat_length_ms
-
-            canonical_beat_idx = None
-            if measure_repeat_map is not None:
-                measure_idx, beat_in_measure = divmod(beat_idx, 4)
-                canonical_measure = measure_repeat_map.get(measure_idx, measure_idx)
-                if canonical_measure != measure_idx:
-                    canonical_beat_idx = canonical_measure * 4 + beat_in_measure
-
-            if canonical_beat_idx is not None and canonical_beat_idx in beat_hitsound:
-                # This measure repeats an earlier one, and that earlier
-                # measure's own corresponding beat already had an object
-                # (and so a hitsound decided) -- reuse it verbatim, rather
-                # than re-deriving independently from this pass's own
-                # (similar but not identical) energy.
-                hs = beat_hitsound[canonical_beat_idx]
-            else:
-                e = energy_at(beat_time)
-                on_downbeat = is_on_downbeat(beat_time, offset_ms, measure_length_ms)
-                hs = hitsound_for(e, on_downbeat, q_high, q_climax)
-                if hs == HS_NORMAL and (last_accent_time is None
-                                         or beat_time - last_accent_time > MAX_MS_WITHOUT_ACCENT):
-                    hs = HS_WHISTLE
-            beat_hitsound[beat_idx] = hs
-            if hs != HS_NORMAL:
-                last_accent_time = beat_time
-        hs = beat_hitsound[beat_idx]
+        measure_idx, beat_in_measure = divmod(beat_idx, 4)
+        hs = pattern_for_measure(measure_idx)[beat_in_measure]
+        if (hs == HS_NORMAL and beat_in_measure == 0
+                and (last_accent_measure is None or measure_idx - last_accent_measure > MAX_MEASURES_WITHOUT_ACCENT)):
+            hs = HS_WHISTLE
+        if hs != HS_NORMAL:
+            last_accent_measure = measure_idx
         obj.hitsound = hs
         if obj.is_slider:
+            tail_hs = hitsound_at(obj.end_time(beat_length_ms, slider_multiplier))
             if obj.slides > 1:
-                obj.edge_hitsounds = [hs] + [HS_NORMAL] * obj.slides
+                obj.edge_hitsounds = [hs] + [tail_hs if i % 2 == 0 else hs for i in range(obj.slides)]
             else:
-                obj.edge_hitsounds = [hs] * (obj.slides + 1)
+                obj.edge_hitsounds = [hs, tail_hs]
 
 
 def chain_len_weights(bias: float) -> tuple[float, float, float]:
@@ -444,8 +463,6 @@ def main() -> None:
     parser.add_argument("--bounce-probability", type=float, default=0.6,
                          help="Chance a dense intense-section burst (4+ notes) becomes a single "
                               "back-and-forth slider instead of a run of circles (0-1).")
-    parser.add_argument("--rest-probability", type=float, default=0.03,
-                         help="Chance any non-quiet beat is dropped entirely as a short rest (0-1).")
     parser.add_argument("--slider-length-bias", type=float, default=0.5,
                          help="Which chain length a merged slider in a normal-energy section tends "
                               "to pick, 0-1 (default 0.5). 2 nodes = 1 beat, 3 = 1.5 beats, 4 = 2 "
@@ -515,6 +532,22 @@ def main() -> None:
 
     categories = [classify(e, q_low, q_high) for e in smoothed_energy]
 
+    # Bridge a single isolated non-intense slot sandwiched between two
+    # "intense" ones. Without this, a brief one-slot dip in energy splits
+    # what's really one continuous intense passage into two separate
+    # "intense" runs below, each independently picking its own quarter-
+    # vs-eighth subdivision rate (see run_avg_energy) -- close enough in
+    # time that the player experiences it as one passage that arbitrarily
+    # changes rate partway through, rather than two genuinely distinct
+    # moments in the song. A single-slot gap is too short to read as a
+    # deliberate breather anyway (that's what the "rest" treatment inside
+    # one run is for); a longer dip is left alone, since two intense
+    # passages with real space between them picking different rates is a
+    # legitimate escalation, not a glitch.
+    for idx in range(1, len(categories) - 1):
+        if categories[idx] != "intense" and categories[idx - 1] == "intense" and categories[idx + 1] == "intense":
+            categories[idx] = "intense"
+
     new_objects: list[HitObject] = []
     i = 0
     n = len(circles)
@@ -535,13 +568,6 @@ def main() -> None:
             # the 3rd beat of the measure) instead of the beat itself.
             if is_near_multiple(cur.time, offset_ms, beat_length_ms):
                 new_objects.append(cur)
-            i += 1
-            continue
-
-        # A short, occasional rest: drop this beat entirely so busy sections
-        # get a breath instead of being wall-to-wall notes. Never applied to
-        # quiet sections, which are already thinned out above.
-        if rng.random() < args.rest_probability:
             i += 1
             continue
 
@@ -588,14 +614,20 @@ def main() -> None:
         while run_end + 1 < n and categories[run_end + 1] == "intense":
             run_end += 1
 
+        # The quarter-vs-eighth subdivision rate is decided once for the
+        # *whole* intense run, not per chunk. A chunk-local average can sit
+        # right on either side of q_climax from one 2-beat chunk to the
+        # next even within one continuous intense passage, which used to
+        # flip the rate every couple of beats -- a switch fast enough to be
+        # unplayable rather than a deliberate escalation. One run can still
+        # differ from the next (a later, more intense run gets its own
+        # average), just not mid-run.
+        run_avg_energy = float(np.mean(slot_energy[i:run_end + 1]))
+
         chunk_slots = 4  # half a measure
         pos = i
         last_treatment = None
         while pos <= run_end:
-            if rng.random() < args.rest_probability:
-                pos += 1
-                continue
-
             lookahead_end = min(pos + chunk_slots - 1, run_end)
             lookahead_len = lookahead_end - pos + 1
 
@@ -609,7 +641,17 @@ def main() -> None:
             # frequency-weighted choice as everything else; only the
             # no-repeat-treatment rule is skipped for it (too short to
             # read as a repetitive wall either way).
-            p_stream = 0.9 * args.stream_frequency
+            #
+            # The 0.9 multiplier below (rather than 1.0) is a deliberate
+            # recalibration, not the original scale: too many long
+            # intense passages were reading as wall-to-wall individually-
+            # clicked stacks, at the expense of the bounce-slider variety
+            # that's supposed to break them up. Shifted so the flag's own
+            # *displayed* default (0.5) now lands where 0.5 used to feel
+            # like it should have all along — noticeably more bounce
+            # sliders, without calling for a --stream-frequency value the
+            # help text doesn't otherwise justify.
+            p_stream = 0.66 * args.stream_frequency
             p_rest_of = 1.0 - p_stream
             weights = {"stream": p_stream, "bounce": p_rest_of * 0.818, "rest": p_rest_of * 0.182}
             if lookahead_len < 3:
@@ -630,8 +672,7 @@ def main() -> None:
                 # rate up front, rather than letting cap_stream_length chop
                 # an oversized stream in half with a bridging slider that
                 # doesn't really break anything up.
-                chunk_avg_energy = float(np.mean(slot_energy[pos:lookahead_end + 1]))
-                steps_per_slot = 4 if chunk_avg_energy > q_climax else 2
+                steps_per_slot = 4 if run_avg_energy > q_climax else 2
                 max_slots_for_cap = max(1, stream_max_len // steps_per_slot)
                 chunk_end = min(lookahead_end, pos + max_slots_for_cap - 1)
 
@@ -653,8 +694,7 @@ def main() -> None:
                 # *exactly* — chunk_len consecutive base-grid slots are
                 # always exactly chunk_len half-beats apart — so every
                 # repeat lands precisely on the beat grid with no rounding.
-                chunk_avg_energy = float(np.mean(slot_energy[pos:chunk_end + 1]))
-                one_way_ms = eighth_beat_ms if chunk_avg_energy > q_climax else quarter_beat_ms
+                one_way_ms = eighth_beat_ms if run_avg_energy > q_climax else quarter_beat_ms
                 legs_per_half_beat = 4 if one_way_ms == eighth_beat_ms else 2
                 full_bounces = chunk_len * legs_per_half_beat
 
@@ -674,17 +714,28 @@ def main() -> None:
             # chunk, the same way as the bounce branch above) rather than
             # switching between quarter- and eighth-notes slot to slot,
             # which would read as an inconsistent, hard-to-parse stream.
+            # No per-note random rest inside this loop: dropping one circle
+            # out of an otherwise-contiguous stream leaves the very next one
+            # a full extra subdivision away from its neighbor, which is
+            # enough to sever it from the run apply_style.py would
+            # otherwise have recognized (its stack/line placement, and the
+            # wider entry/exit gap that sets a stream apart, both key off
+            # consecutive gaps staying quarter-beat-or-closer) — the result
+            # is a stray, oddly-timed, oddly-placed orphan right where the
+            # stream should have ended cleanly instead. The only remaining
+            # source of a deliberate breather anywhere in this function is
+            # the "rest" treatment above, which always drops one clean,
+            # fully-aligned chunk at a time rather than an arbitrary single
+            # slot -- every other beat that survives classification is kept.
+            #
             # Subdivisions are packed into the gap up to the next existing
             # object, never overlapping it — the interval is split into an
             # exact whole number of equal steps so no inserted timestamp can
             # land a fraction of a millisecond from the next object (which
             # would round to the same millisecond on disk and become an
             # unplayable simultaneous note).
-            chunk_avg_energy = float(np.mean(slot_energy[pos:chunk_end + 1]))
-            subdivision = eighth_beat_ms if chunk_avg_energy > q_climax else quarter_beat_ms
+            subdivision = eighth_beat_ms if run_avg_energy > q_climax else quarter_beat_ms
             for j in range(pos, chunk_end + 1):
-                if rng.random() < args.rest_probability:
-                    continue
                 cur_j = circles[j]
                 has_next_j = j + 1 < n
                 next_time_j = circles[j + 1].time if has_next_j else cur_j.time + half_beat_ms
@@ -775,7 +826,7 @@ def main() -> None:
                                                        new_objects[-1].time if new_objects else 0.0)
     measure_repeat_map = find_repeating_measure_map(measure_buckets)
     assign_hitsounds(new_objects, energy_at, offset_ms, measure_length_ms, q_high, q_climax,
-                      measure_repeat_map=measure_repeat_map)
+                      slider_multiplier=slider_multiplier, measure_repeat_map=measure_repeat_map)
 
     # Sanity check: nothing should overlap in time, judged the same way the
     # .osu file itself will be read back (every object's time rounded to a

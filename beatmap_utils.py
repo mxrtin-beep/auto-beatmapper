@@ -393,7 +393,21 @@ def guess_tier(osu_path: str) -> Optional[str]:
 
 # --- geometry helpers shared by later stages --------------------------------
 
-def clamp_to_playfield(x: float, y: float, margin: int = 20) -> Tuple[int, int]:
+def clamp_to_playfield(x: float, y: float, margin: int = 50) -> Tuple[int, int]:
+    """Clamp a hit object's own (x, y) coordinate into the playfield.
+
+    The default margin (50) isn't an arbitrary buffer -- it's sized to
+    the *rendered circle radius*, not just the raw coordinate. osu!'s
+    circle radius is 54.4 - 4.48*CS px; CS ranges from 2.0 (Easy) up to
+    around 4 (Insane) in this pipeline's own output (see make_easy.py's
+    TIER_TARGET/TIER_SETTINGS), so the largest radius any tier actually
+    renders is close to 54.4 - 4.48*2.0 ≈ 45px. A coordinate sitting right
+    at a margin smaller than that keeps the object's *center* on the
+    playfield while its visible edge (and, for a slider, its body's
+    width along the whole curve) still pokes past it -- exactly what
+    "an object is going offscreen" reports turned out to mean at a
+    margin of 20-30. 50 clears the worst case with a small cushion.
+    """
     x = max(margin, min(PLAYFIELD_W - margin, x))
     y = max(margin, min(PLAYFIELD_H - margin, y))
     return int(round(x)), int(round(y))

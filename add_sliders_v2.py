@@ -457,7 +457,7 @@ def build_tier(tier: str, objects: list[HitObject], bm, args, rng: random.Random
                                                                    thinned[-1].time)
     measure_repeat_map = find_repeating_measure_map(measure_buckets)
     assign_hitsounds(thinned, energy_at, offset_ms, measure_length_ms, q_high, q_climax,
-                      measure_repeat_map=measure_repeat_map)
+                      slider_multiplier=slider_multiplier, measure_repeat_map=measure_repeat_map)
 
     tier_bm = read_osu(args.beatmap)
     tier_bm.hit_objects = thinned
@@ -607,7 +607,7 @@ def main() -> None:
                                                                    merged[-1].time)
     measure_repeat_map = find_repeating_measure_map(measure_buckets)
     assign_hitsounds(merged, energy_at, bm.offset, measure_length_ms, q_high, q_climax,
-                      measure_repeat_map=measure_repeat_map)
+                      slider_multiplier=slider_multiplier, measure_repeat_map=measure_repeat_map)
 
     bm.hit_objects = merged
     # Written under --merged-output's own name (and kept) if given -- an

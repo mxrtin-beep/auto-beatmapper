@@ -230,7 +230,7 @@ def recompute_combos(objects: list[HitObject], offset_ms: float, measure_length_
 
 
 def _safe_translation_fraction(points: list[tuple[float, float]], dx: float, dy: float,
-                                margin: int = 20) -> float:
+                                margin: int = 50) -> float:
     """The largest f in [0, 1] such that every point in `points`, shifted by
     (f*dx, f*dy), still lands within the playfield margin on both axes.
 

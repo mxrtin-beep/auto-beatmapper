@@ -202,15 +202,37 @@ def _emit_climax_run(kept_times: list[float], climax_times: set[float], start_be
     grid = [start_ms + k * step_ms for k in range(num_steps + 1)]
 
     if rng is not None and len(grid) > 2:
-        candidates = [c for c in CLIMAX_NOTE_COUNTS if c <= len(grid)]
-        weights = CLIMAX_NOTE_WEIGHTS[:len(candidates)]
+        # Only a count where (count-1) evenly divides (len(grid)-1) is
+        # actually eligible -- otherwise round(k*(len(grid)-1)/(count-1))
+        # silently mixes single- and double-step gaps into the same burst
+        # (e.g. a 9-point/1-beat grid thinned to 7 notes lands on indices
+        # [0,1,3,4,5,7,8]: gaps of 60,120,60,60,120,60,60ms, quarter- and
+        # eighth-beat mixed with no rhyme or reason to which is which).
+        # That reads as an arbitrary, unplayable-feeling rhythm rather
+        # than a deliberate sparser pattern -- every kept note needs to
+        # still land on one consistent subdivision of the burst's own
+        # span. Filtering to only the divisors of (len(grid)-1) keeps the
+        # same density variety (2/3/5/9 notes read very differently) while
+        # guaranteeing whatever's kept is evenly, consistently spaced.
+        # zip, not a plain list-comprehension + a separate weights[:n]
+        # slice: the divisibility filter can now skip an entry out of the
+        # middle of CLIMAX_NOTE_COUNTS (e.g. 7 for a 1-beat/9-point grid),
+        # not just cut off a trailing suffix the way "c <= len(grid)" alone
+        # used to -- slicing weights by count would silently pair the
+        # wrong weight with the wrong candidate the moment that happens.
+        eligible = [(c, w) for c, w in zip(CLIMAX_NOTE_COUNTS, CLIMAX_NOTE_WEIGHTS)
+                    if c <= len(grid) and (len(grid) - 1) % (c - 1) == 0]
+        candidates, weights = zip(*eligible)
         count = rng.choices(candidates, weights=weights)[0]
         if count < len(grid):
             # Evenly spaced indices into `grid`, always keeping the first
             # and last (the burst's own declared start/end) -- a Bresenham-
             # style even spread rather than np.linspace, so this stays
-            # exact-integer and dependency-free.
-            indices = sorted({round(k * (len(grid) - 1) / (count - 1)) for k in range(count)})
+            # exact-integer and dependency-free. Every index below is now
+            # exact (no rounding), since count-1 was filtered to evenly
+            # divide len(grid)-1 above.
+            step = (len(grid) - 1) // (count - 1)
+            indices = range(0, len(grid), step)
             grid = [grid[idx] for idx in indices]
 
     kept_times.extend(grid)
