@@ -245,7 +245,7 @@ def default_metadata(title: str, artist: str, creator: str, version: str, audio_
         "Creator": creator,
         "Version": version,
         "Source": "",
-        "Tags": "auto-generated auto-beatmapper",
+        "Tags": "",
         "BeatmapID": "0",
         "BeatmapSetID": "-1",
     }
