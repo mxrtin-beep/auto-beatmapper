@@ -890,6 +890,7 @@ def main() -> None:
     # is still real shape variety from one combo to the next and within a
     # curved one, just not a jarring flip mid-phrase.
     combo_curved: bool | None = None
+    last_measure_index: int | None = None  # for the entry-angle mirror below
 
     def wander_nudge(angle: float, x: float, y: float) -> float:
         bias = math.atan2(wander_target[1] - y, wander_target[0] - x)
@@ -901,6 +902,29 @@ def main() -> None:
             gap_ms = beat_length_ms
         else:
             gap_ms = max(1.0, obj.time - prev_end_time)
+
+        # motif_turn_degrees mirrors (negates) every turn for a measure
+        # that repeats an earlier one -- but negating turns alone, from
+        # whatever heading the path organically had entering the measure,
+        # isn't a real reflection of anything: a true mirror also flips
+        # the *entry* heading (a direction reflected across a vertical
+        # axis is angle -> pi - angle), and skipping that half of it
+        # sometimes sent the mirrored phrase looping back over the ground
+        # it just covered -- turning the "other way" from an unmirrored
+        # heading can point straight back the way it came. Flipping
+        # cur_angle once, right as a repeat measure begins, keeps the
+        # rest of that measure's negated turns consistent with a genuine
+        # reflection instead of an arbitrary one. Never touches cur_x/
+        # cur_y -- only the heading distance-snap turns from, so this
+        # still can't break distance-snap the way actually teleporting
+        # position would.
+        raw_measure_index = int((obj.time - offset_ms) // measure_length_ms)
+        if raw_measure_index != last_measure_index:
+            canonical_measure_index = (measure_repeat_map.get(raw_measure_index, raw_measure_index)
+                                        if measure_repeat_map is not None else raw_measure_index)
+            if canonical_measure_index != raw_measure_index:
+                cur_angle = math.pi - cur_angle
+            last_measure_index = raw_measure_index
 
         if obj.is_new_combo:
             wander_target = (wander_rng.uniform(MARGIN, PLAYFIELD_W - MARGIN),
