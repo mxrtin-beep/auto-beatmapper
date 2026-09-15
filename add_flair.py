@@ -83,7 +83,12 @@ MARGIN = 55.0
 # into multiple disconnected shapes instead of one continuous line through
 # every vertex.
 STAR_SKIPS = {5: 2, 7: 2, 8: 3, 9: 2}
-POLYGON_SIZES = (3, 4, 5, 6)
+# Includes every size STAR_SKIPS knows a star for (5, 7, 8, 9), not just
+# plain-polygon sizes -- a run that can only support a triangle/square
+# never draws a star, but one long enough for a pentagon/heptagon/octagon
+# should actually get the option, or a size those skips are keyed to would
+# just never show up in practice.
+POLYGON_SIZES = (3, 4, 5, 6, 7, 8, 9)
 FAN_SIZES = (2, 3, 4)
 # How many objects ahead "mirror"/"echo" are allowed to look for a partner
 # -- far enough to skip past an object or two already claimed by another
@@ -192,7 +197,10 @@ def _apply_polygon(objects: List[HitObject], start: int, n: int, rng: random.Ran
     cy = sum(o.y for o in group) / n
     radius = rng.uniform(55.0, 120.0)
     center = _safe_center(cx, cy, radius, MARGIN)
-    skip = STAR_SKIPS.get(n, 1) if rng.random() < 0.5 else 1
+    # Weighted toward the star/flower crossing pattern (when this run
+    # length actually has one) rather than a coin flip -- that's the
+    # "draw it like a star with a pen" look this motif exists for.
+    skip = STAR_SKIPS.get(n, 1) if rng.random() < 0.65 else 1
     direction = rng.choice((1, -1))
     start_angle = rng.uniform(0.0, 2 * math.pi)
     verts = _polygon_vertices(center, radius, n, start_angle, direction, skip)
@@ -301,8 +309,18 @@ def apply_flair(bm: Beatmap, rng: random.Random, probability: float = 0.35) -> i
             i += 1
             continue
 
-        kinds = ["polygon" if not obj.is_slider else "fan", "mirror", "echo"]
-        rng.shuffle(kinds)
+        # The run-based motif (polygon for a circle run, fan for a slider
+        # run) goes first whenever it's actually available at this spot --
+        # mirror/echo only need a single free partner somewhere in the next
+        # few objects, so they succeed far more often than a real 3+-long
+        # run comes along; trying them first (or shuffled in) meant they
+        # kept claiming objects out from under polygon/fan before those
+        # ever got a turn, so polygons/stars showed up far less than the
+        # runs in the map could actually support. mirror and echo still
+        # split any leftover chance at this spot in random order.
+        rest = ["mirror", "echo"]
+        rng.shuffle(rest)
+        kinds = ["polygon" if not obj.is_slider else "fan"] + rest
         claimed = 0
         for kind in kinds:
             if kind == "polygon":
