@@ -65,12 +65,6 @@ CIRCLES_VERSION = "Auto Base v2 (Circles)"
 SLIDERS_VERSION = "Auto Base v2 (Sliders)"
 STYLED_VERSION = "Insane"
 
-# add_flair.py's own default is tuned for a standalone CLI run against one
-# file; the GUI's "Add artistic flair" checkbox is an on/off switch, not
-# another dial, so it just fixes a single reasonable density here rather
-# than exposing --probability as yet another slider.
-FLAIR_PROBABILITY = 0.65
-
 
 @dataclass
 class SliderParam:
@@ -88,6 +82,11 @@ class SliderParam:
     actual_lo: float
     actual_mid: float
     actual_hi: float
+    # Where the thumb starts out, on the same 0-1 display scale as the dial
+    # itself. Every other knob here defaults to the tuned "sensible middle"
+    # (0.5, i.e. actual_mid) -- flair is the one exception, opt-in at 0
+    # (actual_lo, i.e. off) rather than silently on by default.
+    default_display: float = 0.5
 
     def to_actual(self, display: float) -> float:
         display = max(0.0, min(1.0, display))
@@ -124,6 +123,13 @@ SLIDER_PARAMS = [
                 "note density. 0 = independent every measure. 1 = one fixed pattern "
                 "per density.",
                 0.0, 0.7, 1.0),
+    SliderParam("--flair-probability", "Artistic flair",
+                "How much of the map gets reworked into deliberate polygon/star, fanned-"
+                "slider, mirrored, and echoed patterns after everything else is placed -- "
+                "breaking strict distance-snap on the objects it touches. 0 = off, every "
+                "object stays exactly where the rest of the pipeline put it. 1 = a motif "
+                "at nearly every eligible spot.",
+                0.0, 0.65, 1.0, default_display=0.0),
 ]
 
 
@@ -258,7 +264,6 @@ class App:
         self.auto_open_var = tk.BooleanVar(value=True)
         self.keep_intermediate_var = tk.BooleanVar(value=False)
         self.report_var = tk.BooleanVar(value=False)
-        self.flair_var = tk.BooleanVar(value=False)
         options = (
             (self.osz_var, "Package as .osz (ready to import into osu!)"),
             (self.keep_osu_var, "Keep loose .osu files too"),
@@ -266,8 +271,6 @@ class App:
             (self.keep_intermediate_var, "Keep intermediate stages too (Circles and Sliders, "
                                           "alongside the final Styled map)"),
             (self.report_var, "Generate a statistics report (PDF, plotted against Backstabber)"),
-            (self.flair_var, "Add artistic flair (fans/mirrors/polygons; breaks strict distance-snap "
-                              "for a few objects at a time)"),
         )
         # ttk::checkbutton has no -wraplength option on every platform/Tk
         # build (it raised TclError: unknown option "-wraplength" on
@@ -334,10 +337,11 @@ class App:
             padx=PAD_INNER, pady=(4, PAD_INNER if last else 0))
 
     def _slider_row(self, parent: tk.Widget, row: int, p: SliderParam, first: bool = False) -> None:
-        # Every dial here is a plain 0-1 scale, thumb defaulting to the
-        # middle -- see SliderParam's own docstring for why that middle
-        # doesn't have to be the middle of the real underlying range.
-        var = tk.DoubleVar(value=0.5)
+        # Every dial here is a plain 0-1 scale, thumb defaulting to
+        # p.default_display (the middle, for nearly all of them) -- see
+        # SliderParam's own docstring for why that default doesn't have to
+        # be the middle of the real underlying range.
+        var = tk.DoubleVar(value=p.default_display)
         self.slider_vars[p.flag] = var
         base_row = row * 4
         ttk.Label(parent, text=p.label, style="Heading.TLabel").grid(
@@ -499,7 +503,8 @@ class App:
             sys.argv = ["add_sliders_v2.py"] + sliders_argv
             add_sliders_v2.main()
 
-            if self.flair_var.get():
+            flair_probability = self._actual("--flair-probability")
+            if flair_probability > 0.0:
                 # Every *final* difficulty file gets its own independent
                 # pass -- each has its own positions (Hard/Normal/Easy are
                 # each their own real apply_style.py run, not derived from
@@ -512,7 +517,7 @@ class App:
                 for i, path in enumerate(flair_targets):
                     bm = read_osu(path)
                     applied = add_flair.apply_flair(bm, random.Random(seed + i * 104729),
-                                                      probability=FLAIR_PROBABILITY)
+                                                      probability=flair_probability)
                     write_osu(bm, path)
                     self.log_queue.put(f"Added {applied} flair pattern(s) to {os.path.basename(path)}\n")
 
