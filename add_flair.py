@@ -58,6 +58,20 @@ that flow into a polygon vertex or a mirrored/echoed spot reads as a
 mistake, not a motif. Eighth and sixteenth notes are fair game (see
 STREAM_GAP_BEATS below).
 
+"polygon"/"constellation" only ever claim objects that are actually
+*evenly* spaced in time (see `_run_length`'s own docstring) — a run
+picked purely by type/eligibility could otherwise span a real musical
+gap (nothing disqualifying happened to fall between two notes a whole
+phrase apart), and the resulting shape read as "the last vertex has a
+weirdly long pause before it" instead of one drawn gesture.
+
+Once a "polygon"/"constellation" lands on a given measure, the exact
+same shape (not just the same *kind* of motif) gets replayed on every
+other measure with the same rhythm-and-type fingerprint — the same
+repetition add_sliders_v2.py's own --uniformity already gives the
+underlying circle/slider layout, carried through to flair instead of
+every recurrence rolling its own independent shape.
+
 Run standalone against an already-styled/-derived .osu file:
 
     python3 add_flair.py "Song [Insane].osu" --output "Song [Insane].osu"
@@ -204,28 +218,41 @@ def _polygon_vertices(center: Tuple[float, float], radius: float, n: int,
 
 # --- The four motifs ---------------------------------------------------------
 
-def _apply_shape_run(objects: List[HitObject], start: int, n: int, rng: random.Random) -> None:
+def _apply_shape_run(objects: List[HitObject], start: int, n: int, rng: random.Random,
+                      spec: Optional[dict] = None) -> dict:
     """Place a run of `n` objects -- circles ("polygon") or, just as well,
     sliders ("constellation": each keeps its own shape, translated so its
     head lands on the vertex) -- on a regular polygon or star/flower.
     Translation (not a direct coordinate overwrite) is what makes this
     safe for sliders too: it moves a slider's whole curve as one rigid
     piece instead of just its head, so the shape/length (and so duration)
-    survive untouched."""
+    survive untouched.
+
+    `spec` (radius/skip/direction/start_angle) is normally rolled fresh
+    here and returned so a caller can cache it -- pass one back in to
+    *replay* an earlier roll instead (same shape, same orientation, just
+    re-centered on this run's own objects), which is how a repeating
+    section of the map ends up with the same motif every time instead of
+    a fresh independent one each time it recurs."""
     group = objects[start:start + n]
     cx = sum(o.x for o in group) / n
     cy = sum(o.y for o in group) / n
-    radius = rng.uniform(55.0, 120.0)
-    center = _safe_center(cx, cy, radius, MARGIN)
-    # Weighted toward the star/flower crossing pattern (when this run
-    # length actually has one) rather than a coin flip -- that's the
-    # "draw it like a star with a pen" look this motif exists for.
-    skip = STAR_SKIPS.get(n, 1) if rng.random() < 0.65 else 1
-    direction = rng.choice((1, -1))
-    start_angle = rng.uniform(0.0, 2 * math.pi)
-    verts = _polygon_vertices(center, radius, n, start_angle, direction, skip)
+    if spec is None:
+        spec = {
+            "radius": rng.uniform(55.0, 120.0),
+            # Weighted toward the star/flower crossing pattern (when this
+            # run length actually has one) rather than a coin flip --
+            # that's the "draw it like a star with a pen" look this
+            # motif exists for.
+            "skip": STAR_SKIPS.get(n, 1) if rng.random() < 0.65 else 1,
+            "direction": rng.choice((1, -1)),
+            "start_angle": rng.uniform(0.0, 2 * math.pi),
+        }
+    center = _safe_center(cx, cy, spec["radius"], MARGIN)
+    verts = _polygon_vertices(center, spec["radius"], n, spec["start_angle"], spec["direction"], spec["skip"])
     for obj, (vx, vy) in zip(group, verts):
         _translate_object(obj, vx - obj.x, vy - obj.y, MARGIN)
+    return spec
 
 
 def _apply_fan(objects: List[HitObject], start: int, n: int) -> None:
@@ -239,16 +266,48 @@ def _apply_mirror(objects: List[HitObject], i: int, j: int, rng: random.Random) 
     a, b = objects[i], objects[j]
     mode = rng.choice(("point", "horizontal", "vertical"))
     bx, by = _reflect_point(a.x, a.y, mode)
-    b.x, b.y = clamp_to_playfield(bx, by, int(MARGIN))
-    if a.is_slider and b.is_slider:
-        b.curve_type = a.curve_type
-        new_points = []
-        for px, py in a.points:
-            ox, oy = _reflect_offset(px - a.x, py - a.y, mode)
-            new_points.append((b.x + ox, b.y + oy))
-        sx, sy = _shift_into_bounds([(b.x, b.y)] + new_points, MARGIN)
-        b.x, b.y = clamp_to_playfield(b.x + sx, b.y + sy, int(MARGIN))
-        b.points = [clamp_to_playfield(px + sx, py + sy, int(MARGIN)) for px, py in new_points]
+    new_bx, new_by = clamp_to_playfield(bx, by, int(MARGIN))
+
+    if a.is_slider and b.is_slider and a.length > 0 and a.points:
+        # Copying A's own anchor points onto B isn't enough on its own --
+        # `length`, not the points, is what governs a slider's duration,
+        # so if the copied shape's actual geometric length doesn't match
+        # B's own (unchanged) `length`, osu! extrapolates the rendered
+        # curve past the last anchor to make up the difference. That
+        # extrapolated tail is exactly what was showing up off-screen:
+        # our bounds check below only ever looked at the given anchor
+        # points, never at a tail the renderer adds on its own. Scaling
+        # A's offsets by B.length/A.length first (a similarity transform,
+        # so it scales the curve's real geometric length by exactly the
+        # same factor for any curve type this pipeline produces) makes
+        # the copied shape's geometric length equal to B's declared
+        # `length`, so there's nothing left for osu! to extrapolate.
+        scale = b.length / a.length
+        offsets = [_reflect_offset((px - a.x) * scale, (py - a.y) * scale, mode) for px, py in a.points]
+        candidate = [(new_bx + ox, new_by + oy) for ox, oy in offsets]
+        sx, sy = _shift_into_bounds([(new_bx, new_by)] + candidate, MARGIN)
+        shifted = [(new_bx + sx, new_by + sy)] + [(px + sx, py + sy) for px, py in candidate]
+        # If the shape still doesn't fit even after the best uniform
+        # shift (wider than the playfield can hold at this margin), fall
+        # through to the translate-only fallback below instead of
+        # clamping each point independently -- that would warp the curve
+        # into a shape whose *rendered* geometry no longer matches
+        # `length` either, reintroducing the same off-screen risk.
+        if all(MARGIN <= x <= PLAYFIELD_W - MARGIN and MARGIN <= y <= PLAYFIELD_H - MARGIN
+               for x, y in shifted):
+            b.curve_type = a.curve_type
+            b.x, b.y = round(shifted[0][0]), round(shifted[0][1])
+            b.points = [(round(x), round(y)) for x, y in shifted[1:]]
+            return
+
+    # Not a slider pair, or the copied shape couldn't be made to fit
+    # cleanly -- just mirror the position. If b is a slider, keep its own
+    # existing shape and translate it there (a pure rigid translation, so
+    # its length/duration is exactly preserved, same as "fan"/"echo").
+    if b.is_slider:
+        _translate_object(b, new_bx - b.x, new_by - b.y, MARGIN)
+    else:
+        b.x, b.y = new_bx, new_by
 
 
 def _apply_echo(objects: List[HitObject], i: int, j: int) -> None:
@@ -282,12 +341,34 @@ def _stream_circles(objects: Sequence[HitObject], beat_length_ms: float, slider_
 
 
 def _run_length(objects: Sequence[HitObject], start: int, used: Sequence[bool],
-                 stream: Sequence[bool], want_slider: bool) -> int:
+                 stream: Sequence[bool], want_slider: bool,
+                 beat_length_ms: float, slider_multiplier: float) -> int:
+    """How many objects starting at `start` a shape motif (polygon/
+    constellation/fan) can actually claim -- type/stream/used-eligible
+    *and* evenly spaced. Eligibility alone isn't enough: two objects can
+    sit next to each other in the object list with nothing disqualifying
+    between them yet still be a full musical phrase apart in time (no
+    slider or stream circle happened to fall between them), and a shape
+    built across that gap reads as "the last vertex has a weirdly long
+    pause before it" rather than one drawn gesture. Every internal gap in
+    the run is snapped to its nearest eighth-of-a-beat and has to match
+    the very first gap's snap exactly -- once one doesn't, the run stops
+    there rather than folding in the mismatched object."""
     n = len(objects)
     length = 0
+    gap_unit_ms = beat_length_ms / 8.0
+    reference_bucket = None
     while (start + length < n and not used[start + length] and not stream[start + length]
            and objects[start + length].is_slider == want_slider
            and not objects[start + length].is_spinner):
+        if length > 0:
+            prev_end = objects[start + length - 1].end_time(beat_length_ms, slider_multiplier)
+            gap = objects[start + length].time - prev_end
+            bucket = round(gap / gap_unit_ms)
+            if reference_bucket is None:
+                reference_bucket = bucket
+            elif bucket != reference_bucket:
+                break
         length += 1
     return length
 
@@ -304,6 +385,30 @@ def _find_partner(objects: Sequence[HitObject], used: Sequence[bool], stream: Se
     return None
 
 
+def _measure_signatures(objects: Sequence[HitObject], offset_ms: float, beat_length_ms: float,
+                         meter: int) -> List[Tuple]:
+    """One value per object: a fingerprint of the *whole measure* it falls
+    in -- every object's own position within the measure (snapped to the
+    nearest 32nd note) and whether it's a slider, in time order. Two
+    measures get the same fingerprint exactly when they have the same
+    rhythm and object types, which is already what a repeating section of
+    the map (add_sliders_v2.py's own --uniformity) produces -- this reads
+    that repetition back out of the object list itself, no audio needed,
+    so a shape motif applied to one occurrence can be replayed on every
+    other measure that shares it (see `established` in apply_flair)."""
+    measure_length_ms = max(1.0, meter * beat_length_ms)
+    unit_ms = beat_length_ms / 8.0
+    by_measure: dict = {}
+    measure_of: List[int] = []
+    for obj in objects:
+        idx = int((obj.time - offset_ms) // measure_length_ms)
+        measure_of.append(idx)
+        rel = obj.time - offset_ms - idx * measure_length_ms
+        by_measure.setdefault(idx, []).append((round(rel / unit_ms), obj.is_slider))
+    signature_of_measure = {idx: tuple(items) for idx, items in by_measure.items()}
+    return [signature_of_measure[idx] for idx in measure_of]
+
+
 def apply_flair(bm: Beatmap, rng: random.Random, probability: float = 0.35) -> int:
     """Mutate `bm.hit_objects` in place with a randomly-sampled scatter of
     the four motifs above. `probability` is, roughly, the fraction of
@@ -314,18 +419,54 @@ def apply_flair(bm: Beatmap, rng: random.Random, probability: float = 0.35) -> i
     Objects are visited once, left-to-right in time order; each one that a
     motif claims (every vertex of a polygon, both ends of a mirror/echo
     pair, ...) is marked used so no later motif can also grab it -- motifs
-    never overlap or nest."""
+    never overlap or nest.
+
+    The first time a "polygon" or "constellation" lands on a given
+    measure, its shape (radius/skip/direction/orientation) is remembered
+    against that measure's rhythm-and-type fingerprint; every other
+    measure sharing that exact fingerprint (add_sliders_v2.py's own
+    --uniformity already repeats sections this way) gets the identical
+    shape replayed on it -- deliberately, not re-rolled -- the same way
+    apply_style.py's own repeating turn motif works. A repeat replays
+    regardless of `probability`, same as the rest of that measure's
+    rhythm doesn't need re-deciding either; only the *first* occurrence
+    of a fingerprint is gated by it."""
     objects = bm.hit_objects
     objects.sort(key=lambda o: o.time)
     n = len(objects)
     stream = _stream_circles(objects, bm.beat_length, bm.slider_multiplier)
+    meter = 4
+    for tp in bm.timing_points:
+        if tp.uninherited:
+            meter = tp.meter
+            break
+    measure_sig = _measure_signatures(objects, bm.offset, bm.beat_length, meter)
+    established: dict = {}
     used = [False] * n
     applied = 0
 
     i = 0
     while i < n:
         obj = objects[i]
-        if used[i] or obj.is_spinner or stream[i] or rng.random() >= probability:
+        if used[i] or obj.is_spinner or stream[i]:
+            i += 1
+            continue
+
+        sig = measure_sig[i]
+        repeat_kind = "polygon" if not obj.is_slider else "constellation"
+        spec = established.get((sig, repeat_kind))
+        if spec is not None:
+            run = _run_length(objects, i, used, stream, want_slider=obj.is_slider,
+                               beat_length_ms=bm.beat_length, slider_multiplier=bm.slider_multiplier)
+            if run >= spec["size"]:
+                _apply_shape_run(objects, i, spec["size"], rng, spec=spec)
+                for k in range(i, i + spec["size"]):
+                    used[k] = True
+                applied += 1
+                i += spec["size"]
+                continue
+
+        if rng.random() >= probability:
             i += 1
             continue
 
@@ -351,23 +492,28 @@ def apply_flair(bm: Beatmap, rng: random.Random, probability: float = 0.35) -> i
         claimed = 0
         for kind in kinds:
             if kind == "polygon":
-                run = _run_length(objects, i, used, stream, want_slider=False)
+                run = _run_length(objects, i, used, stream, want_slider=False,
+                                   beat_length_ms=bm.beat_length, slider_multiplier=bm.slider_multiplier)
                 sizes = [s for s in POLYGON_SIZES if s <= run]
                 if not sizes:
                     continue
                 size = rng.choice(sizes)
-                _apply_shape_run(objects, i, size, rng)
+                resolved = _apply_shape_run(objects, i, size, rng)
+                established[(sig, "polygon")] = {**resolved, "size": size}
                 claimed = size
             elif kind == "constellation":
-                run = _run_length(objects, i, used, stream, want_slider=True)
+                run = _run_length(objects, i, used, stream, want_slider=True,
+                                   beat_length_ms=bm.beat_length, slider_multiplier=bm.slider_multiplier)
                 sizes = [s for s in POLYGON_SIZES if s <= run]
                 if not sizes:
                     continue
                 size = rng.choice(sizes)
-                _apply_shape_run(objects, i, size, rng)
+                resolved = _apply_shape_run(objects, i, size, rng)
+                established[(sig, "constellation")] = {**resolved, "size": size}
                 claimed = size
             elif kind == "fan":
-                run = _run_length(objects, i, used, stream, want_slider=True)
+                run = _run_length(objects, i, used, stream, want_slider=True,
+                                   beat_length_ms=bm.beat_length, slider_multiplier=bm.slider_multiplier)
                 sizes = [s for s in FAN_SIZES if s <= run]
                 if not sizes:
                     continue
