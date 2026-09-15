@@ -48,12 +48,13 @@ import tkinter as tk
 from dataclasses import dataclass
 from tkinter import filedialog, messagebox, ttk
 
+import add_flair
 import add_sliders_v2
 import beatmap_report
 import generate_base_beatmap_v2
 from background_style import apply_background, extract_combo_colors
 from beatmap_stats import BeatmapStats, compute_stats
-from beatmap_utils import extract_osz, guess_tier
+from beatmap_utils import extract_osz, guess_tier, read_osu, write_osu
 from build_osz import build_osz
 from gui import BG, BG_ENTRY, FONT_MONO, PAD_INNER, PAD_OUTER, TextRedirector, _bind_click_to_position, \
     _configure_style, _open_path
@@ -63,6 +64,12 @@ from gui import BG, BG_ENTRY, FONT_MONO, PAD_INNER, PAD_OUTER, TextRedirector, _
 CIRCLES_VERSION = "Auto Base v2 (Circles)"
 SLIDERS_VERSION = "Auto Base v2 (Sliders)"
 STYLED_VERSION = "Insane"
+
+# add_flair.py's own default is tuned for a standalone CLI run against one
+# file; the GUI's "Add artistic flair" checkbox is an on/off switch, not
+# another dial, so it just fixes a single reasonable density here rather
+# than exposing --probability as yet another slider.
+FLAIR_PROBABILITY = 0.35
 
 
 @dataclass
@@ -251,6 +258,7 @@ class App:
         self.auto_open_var = tk.BooleanVar(value=True)
         self.keep_intermediate_var = tk.BooleanVar(value=False)
         self.report_var = tk.BooleanVar(value=False)
+        self.flair_var = tk.BooleanVar(value=False)
         options = (
             (self.osz_var, "Package as .osz (ready to import into osu!)"),
             (self.keep_osu_var, "Keep loose .osu files too"),
@@ -258,6 +266,8 @@ class App:
             (self.keep_intermediate_var, "Keep intermediate stages too (Circles and Sliders, "
                                           "alongside the final Styled map)"),
             (self.report_var, "Generate a statistics report (PDF, plotted against Backstabber)"),
+            (self.flair_var, "Add artistic flair (fans/mirrors/polygons; breaks strict distance-snap "
+                              "for a few objects at a time)"),
         )
         # ttk::checkbutton has no -wraplength option on every platform/Tk
         # build (it raised TclError: unknown option "-wraplength" on
@@ -488,6 +498,23 @@ class App:
                 tier_paths[tier] = tier_path
             sys.argv = ["add_sliders_v2.py"] + sliders_argv
             add_sliders_v2.main()
+
+            if self.flair_var.get():
+                # Every *final* difficulty file gets its own independent
+                # pass -- each has its own positions (Hard/Normal/Easy are
+                # each their own real apply_style.py run, not derived from
+                # Insane's), so flair applied to one must not be copied
+                # onto another. A distinct seed per file (rather than
+                # reusing the run's own `seed` identically for all of
+                # them) keeps them from all landing the same motifs at the
+                # same relative spots.
+                flair_targets = [styled_path] + list(tier_paths.values())
+                for i, path in enumerate(flair_targets):
+                    bm = read_osu(path)
+                    applied = add_flair.apply_flair(bm, random.Random(seed + i * 104729),
+                                                      probability=FLAIR_PROBABILITY)
+                    write_osu(bm, path)
+                    self.log_queue.put(f"Added {applied} flair pattern(s) to {os.path.basename(path)}\n")
 
             if self.report_var.get():
                 # Compared against Backstabber's Insane -- the closest
