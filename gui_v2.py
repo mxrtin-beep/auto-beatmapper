@@ -99,15 +99,15 @@ SLIDER_PARAMS = [
                 "How often an eligible run of adjacent circles actually becomes a slider, "
                 "versus staying plain circles. 0 = always circles. 1 = every eligible "
                 "run becomes a slider.",
-                0.0, 0.3, 1.0),
+                0.0, 0.7, 1.0),
     SliderParam("--slider-length-bias", "Slider length",
                 "Of whichever runs do become sliders: how long they tend to run. "
                 "0 = more, shorter/choppier sliders. 1 = fewer, longer sliders.",
-                0.0, 0.4, 1.0),
+                0.0, 0.35, 1.0),
     SliderParam("--curviness", "Slider curviness",
                 "How curved slider paths look. 0 = mostly straight lines. "
                 "1 = pronounced arcs.",
-                0.0, 0.5, 1.0),
+                0.0, 0.75, 1.0),
     SliderParam("--spacing", "Jump distance",
                 "How far apart notes are placed for a given time gap between them. "
                 "0 = tight, close together. 1 = wide, dramatic jumps.",
@@ -116,7 +116,7 @@ SLIDER_PARAMS = [
                 "How much the circle/slider layout repeats across measures with the same "
                 "note density. 0 = independent every measure. 1 = one fixed pattern "
                 "per density.",
-                0.0, 0.5, 1.0),
+                0.0, 0.7, 1.0),
 ]
 
 
