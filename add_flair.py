@@ -44,6 +44,13 @@ Four motifs, chosen independently at each candidate spot:
     earlier object ended — "this slider starts where that one finished",
     or two circles stacked on the same spot.
 
+A circle that's eighth-note-or-closer to its neighbor on either side is
+left alone by every motif above, whether as the object a motif would move
+or as a partner another motif would move to meet — those runs already
+read as one continuous stream/stack, and yanking one note out of that
+flow into a polygon vertex or a mirrored/echoed spot reads as a mistake,
+not a motif (see STREAM_GAP_BEATS below).
+
 Run standalone against an already-styled/-derived .osu file:
 
     python3 add_flair.py "Song [Insane].osu" --output "Song [Insane].osu"
@@ -83,6 +90,19 @@ FAN_SIZES = (2, 3, 4)
 # motif, close enough that the pairing still reads as related rather than
 # two coincidentally-similar notes on opposite sides of the map.
 PARTNER_LOOKAHEAD = 6
+
+# A circle spaced this close (in beats) to its neighbor on either side --
+# eighth-note or faster -- is part of a stream/stack, not an isolated
+# circle. Those runs already read as one continuous motion by design (see
+# add_variety.py's own "stream"/climax handling); yanking one note out to
+# a polygon vertex or a mirrored/echoed spot breaks that flow far worse
+# than it would for a circle with normal breathing room around it, so
+# every motif here leaves stream circles alone -- both as the object a
+# motif would move, and as a partner another motif would move to. A small
+# tolerance covers rounding in the beat-length arithmetic that produced
+# the gap in the first place.
+STREAM_GAP_BEATS = 0.5
+STREAM_GAP_TOLERANCE_MS = 2.0
 
 
 def _bbox(points: Sequence[Tuple[float, float]]) -> Tuple[float, float, float, float]:
@@ -212,21 +232,43 @@ def _apply_echo(objects: List[HitObject], i: int, j: int) -> None:
 
 # --- Scanning the map for candidate spots -----------------------------------
 
-def _run_length(objects: Sequence[HitObject], start: int, used: Sequence[bool], want_slider: bool) -> int:
+def _stream_circles(objects: Sequence[HitObject], beat_length_ms: float, slider_multiplier: float) -> List[bool]:
+    """Per-object flag: is this a circle sitting at eighth-note-or-faster
+    spacing from the object right before or right after it? See
+    STREAM_GAP_BEATS's own comment for why those are off-limits to every
+    motif below."""
+    n = len(objects)
+    threshold = STREAM_GAP_BEATS * beat_length_ms + STREAM_GAP_TOLERANCE_MS
+    flags = [False] * n
+    for i, obj in enumerate(objects):
+        if obj.is_slider or obj.is_spinner:
+            continue
+        if i > 0:
+            prev_end = objects[i - 1].end_time(beat_length_ms, slider_multiplier)
+            if obj.time - prev_end < threshold:
+                flags[i] = True
+                continue
+        if i + 1 < n and objects[i + 1].time - obj.time < threshold:
+            flags[i] = True
+    return flags
+
+
+def _run_length(objects: Sequence[HitObject], start: int, used: Sequence[bool],
+                 stream: Sequence[bool], want_slider: bool) -> int:
     n = len(objects)
     length = 0
-    while (start + length < n and not used[start + length]
+    while (start + length < n and not used[start + length] and not stream[start + length]
            and objects[start + length].is_slider == want_slider
            and not objects[start + length].is_spinner):
         length += 1
     return length
 
 
-def _find_partner(objects: Sequence[HitObject], used: Sequence[bool], i: int,
+def _find_partner(objects: Sequence[HitObject], used: Sequence[bool], stream: Sequence[bool], i: int,
                    lookahead: int, same_type: bool) -> Optional[int]:
     n = len(objects)
     for j in range(i + 1, min(n, i + 1 + lookahead)):
-        if used[j] or objects[j].is_spinner:
+        if used[j] or stream[j] or objects[j].is_spinner:
             continue
         if same_type and objects[j].is_slider != objects[i].is_slider:
             continue
@@ -248,13 +290,14 @@ def apply_flair(bm: Beatmap, rng: random.Random, probability: float = 0.35) -> i
     objects = bm.hit_objects
     objects.sort(key=lambda o: o.time)
     n = len(objects)
+    stream = _stream_circles(objects, bm.beat_length, bm.slider_multiplier)
     used = [False] * n
     applied = 0
 
     i = 0
     while i < n:
         obj = objects[i]
-        if used[i] or obj.is_spinner or rng.random() >= probability:
+        if used[i] or obj.is_spinner or stream[i] or rng.random() >= probability:
             i += 1
             continue
 
@@ -263,7 +306,7 @@ def apply_flair(bm: Beatmap, rng: random.Random, probability: float = 0.35) -> i
         claimed = 0
         for kind in kinds:
             if kind == "polygon":
-                run = _run_length(objects, i, used, want_slider=False)
+                run = _run_length(objects, i, used, stream, want_slider=False)
                 sizes = [s for s in POLYGON_SIZES if s <= run]
                 if not sizes:
                     continue
@@ -271,7 +314,7 @@ def apply_flair(bm: Beatmap, rng: random.Random, probability: float = 0.35) -> i
                 _apply_polygon(objects, i, size, rng)
                 claimed = size
             elif kind == "fan":
-                run = _run_length(objects, i, used, want_slider=True)
+                run = _run_length(objects, i, used, stream, want_slider=True)
                 sizes = [s for s in FAN_SIZES if s <= run]
                 if not sizes:
                     continue
@@ -279,14 +322,14 @@ def apply_flair(bm: Beatmap, rng: random.Random, probability: float = 0.35) -> i
                 _apply_fan(objects, i, size)
                 claimed = size
             elif kind == "mirror":
-                partner = _find_partner(objects, used, i, PARTNER_LOOKAHEAD, same_type=True)
+                partner = _find_partner(objects, used, stream, i, PARTNER_LOOKAHEAD, same_type=True)
                 if partner is None:
                     continue
                 _apply_mirror(objects, i, partner, rng)
                 used[partner] = True
                 claimed = 1
             else:  # "echo"
-                partner = _find_partner(objects, used, i, PARTNER_LOOKAHEAD, same_type=False)
+                partner = _find_partner(objects, used, stream, i, PARTNER_LOOKAHEAD, same_type=False)
                 if partner is None:
                     continue
                 _apply_echo(objects, i, partner)
